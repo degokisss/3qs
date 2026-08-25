@@ -1187,10 +1187,19 @@ asset directories this repo already ships: `image/` (~183MB) + `font/` (~6.3MB),
 deployed alongside `webport/` (the server reads them via `../image`, `../font`, i.e. one level
 above `webport/`) -- don't `.gitignore`/prune them out of whatever you deploy.
 
-Two reasonable options, in order of effort:
+Three reasonable options, in order of ongoing cost/control tradeoff:
 
-1. **A small VPS you already have/rent** (DigitalOcean, Hetzner, a home server, etc.) -- most
-   control, no cold starts, cheapest to run 24/7:
+1. **A free-forever VPS: Oracle Cloud "Always Free"** -- genuinely permanent (not a trial),
+   real always-on VM, no sleep/cold-start. 200GB disk (dwarfs the ~190MB of bundled assets), and
+   either an ARM Ampere shape (2 OCPU/12GB as of mid-2026, down from 4/24 -- Oracle halved the
+   free allocation) or the AMD micro shape (1GB RAM, always available, no capacity contention --
+   plenty for this single lightweight Node process). Needs a credit card + phone number to
+   verify the account (never charged unless you manually upgrade); the ARM shape sometimes shows
+   "out of capacity" in popular regions when provisioning -- the AMD micro shape doesn't have
+   that problem. Once you have the VM, follow the exact same steps as "a small VPS" below.
+
+2. **A small VPS you already have/rent** (DigitalOcean, Hetzner, a home server, Oracle's free VM
+   above, etc.) -- most control, no cold starts, cheapest to run 24/7:
    - `git clone` the repo, `cd webport && npm install && npm run build`.
    - Run it persistently: `pm2 start dist/server.js --name qsgs` (or a `systemd` unit, or this
      project's own `hub`-style process manager if you're driving it from an agent) with
@@ -1202,18 +1211,27 @@ Two reasonable options, in order of effort:
    - Open port 443 (and 80 for the ACME challenge) in the VPS firewall; keep 8787 closed to the
      outside world (only Caddy talks to it, over localhost).
 
-2. **A PaaS with a free/cheap tier** (Railway, Render, Fly.io) -- less setup, no server to patch,
-   but check the platform's free-tier disk/image size limits against the ~190MB of bundled
-   assets above:
-   - Point it at this repo, build command `cd webport && npm install && npm run build`, start
-     command `node webport/dist/server.js` (adjust paths to match the platform's working
-     directory).
-   - These platforms already terminate HTTPS and proxy WebSocket upgrades on the SAME public
-     port automatically -- no reverse-proxy config needed, `PORT` is set for you via env var
-     (the server already reads `process.env.PORT`).
-   - Free tiers on these platforms typically sleep an idle service and cold-start on the next
-     request -- fine for "play with friends when you're actually online", less fine for a
-     server meant to be always-on/joinable at any time.
+3. **A free-tier PaaS, no VPS setup at all** -- less control, but zero server administration.
+   Checked against this app's actual needs (long-lived WebSocket, ~190MB of bundled static
+   assets, single always-running process) as of mid-2026:
+   - **Railway** -- no card needed to start (30-day $5 trial credit, then $1/month non-rollover
+     credit after -- tight but genuinely enough to keep one small service running perpetually).
+     Full WebSocket support. Risk: heavy asset traffic (several friends loading avatar/card
+     images repeatedly) could burn through the small monthly credit.
+   - **Northflank** (free Sandbox) -- 2 services that genuinely never sleep, real long-running
+     Node+WebSocket support, closest free PaaS equivalent to a real always-on box. Needs a card
+     to verify the account (not charged on the free Sandbox).
+   - Avoid **Vercel/Netlify** (serverless functions only, no persistent WebSocket) and be
+     wary of tiny-storage free tiers (e.g. Bonto's 256MB cap is too tight against this repo's
+     ~190MB of bundled `image/`+`font/` assets).
+   - Point whichever platform you pick at this repo with build command
+     `cd webport && npm install && npm run build` and start command `node webport/dist/server.js`
+     (adjust paths to the platform's working directory). These platforms already terminate
+     HTTPS and proxy WebSocket upgrades on the SAME public port automatically -- no reverse-proxy
+     config needed, `PORT` is set for you via env var (the server already reads
+     `process.env.PORT`). Free tiers that DO sleep an idle service (Render, etc.) cold-start on
+     the next request -- fine for "play with friends when you're actually online", less fine for
+     a server meant to be always-on/joinable at any time.
 
 Either way, once it's reachable at `https://your-domain/`, anyone who opens that URL lands in the
 same shared room lobby and can create/join rooms together -- no separate client install, nothing
