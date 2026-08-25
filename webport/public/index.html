@@ -359,6 +359,33 @@
   #centerEmblem img.logo { width: 68px; opacity: 0.7; margin-bottom: 10px; filter: drop-shadow(0 0 6px rgba(201,162,74,0.3)); }
   #centerTurn { font-size: 12px; color: var(--gold); letter-spacing: 1px; }
   #centerActing { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+  #centerWinner { display: none; }
+  #centerEmblem.over #centerTurn,
+  #centerEmblem.over #centerActing { display: none; }
+  #centerEmblem.over #centerWinner {
+    display: block;
+    font-family: var(--font-display);
+    font-size: 21px;
+    color: var(--gold);
+    letter-spacing: 0.5px;
+    line-height: 1.4;
+    text-shadow: 0 0 16px rgba(201,162,74,0.7), 0 0 38px rgba(201,162,74,0.4);
+    animation: winnerGlow 1.6s ease-in-out infinite;
+  }
+  #centerEmblem.over #centerWinner .winnerSub {
+    display: block;
+    font-family: var(--font-label);
+    font-size: 11px;
+    color: var(--text-dim);
+    text-shadow: none;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-top: 4px;
+  }
+  @keyframes winnerGlow {
+    0%, 100% { text-shadow: 0 0 14px rgba(201,162,74,0.6), 0 0 32px rgba(201,162,74,0.35); }
+    50% { text-shadow: 0 0 22px rgba(201,162,74,0.95), 0 0 54px rgba(201,162,74,0.65); }
+  }
 
   .player {
     background: linear-gradient(180deg, var(--ink-3), var(--ink-2));
@@ -736,6 +763,7 @@
     <div id="table">
       <div id="centerEmblem">
         <img class="logo" src="../../image/logo/logo.png" alt="" onerror="this.style.display='none'">
+        <div id="centerWinner"></div>
         <div id="centerTurn"></div>
         <div id="centerActing"></div>
         <button id="drawPileBtn" onclick="window.__drawNow()">
@@ -786,6 +814,8 @@
     const turnBannerEl = document.getElementById("turnBanner");
     const centerTurnEl = document.getElementById("centerTurn");
     const centerActingEl = document.getElementById("centerActing");
+    const centerWinnerEl = document.getElementById("centerWinner");
+    const centerEmblemEl = document.getElementById("centerEmblem");
     const promptOverlayEl = document.getElementById("promptOverlay");
     const promptEl = document.getElementById("prompt");
     const logEl = document.getElementById("log");
@@ -1242,6 +1272,7 @@
       tableEl.style.display = picking ? "none" : "";
       pickGeneralPanelEl.style.display = picking ? "block" : "none";
       turnBannerEl.className = over ? "over" : "";
+      centerEmblemEl.className = over ? "over" : "";
       if (picking) {
         turnBannerEl.textContent =
           state.pickTurnPlayerId === mySeat ? "Lượt của bạn — chọn tướng" : `Đang chờ ${state.pickTurnPlayerId} chọn tướng…`;
@@ -1255,9 +1286,13 @@
         centerTurnEl.textContent = "Chưa bắt đầu";
         centerActingEl.textContent = "";
       } else {
-        turnBannerEl.textContent = over ? `${state.gameOver.winners.map((w) => ROLE_LABEL[w]).join(" + ")} chiến thắng` : "";
+        const winnerLabel = over ? state.gameOver.winners.map((w) => ROLE_LABEL[w]).join(" + ") : "";
+        turnBannerEl.textContent = over ? `${winnerLabel} chiến thắng` : "";
         centerTurnEl.textContent = `Lượt ${state.turnNumber}`;
         centerActingEl.textContent = over ? "Ván đấu kết thúc" : `Đang đi: ${state.currentPlayerId ?? "-"}`;
+        centerWinnerEl.innerHTML = over
+          ? `👑 ${winnerLabel} chiến thắng!<span class="winnerSub">Ván đấu kết thúc — mọi vai trò đã lộ diện</span>`
+          : "";
       }
       myseatEl.textContent = mySeat
         ? `Đang điều khiển: ${mySeat}`

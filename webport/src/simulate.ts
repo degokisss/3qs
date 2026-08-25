@@ -110,6 +110,29 @@ async function testLordAndLoyalistWin(): Promise<void> {
 }
 
 /**
+ * Regression proof: real Sanguosha reveals EVERY identity once the match ends, not just the
+ * dead and the lord -- a surviving loyalist/rebel/renegade who never died and isn't the lord
+ * must have `roleShown` flipped true the instant the win condition fires, not stay fogged
+ * forever (which would leave `server.ts`'s `role: p.roleShown ? p.role : null` masking it).
+ */
+async function testGameOverRevealsAllSurvivingRoles(): Promise<void> {
+  const room = new Room(playerIds(8), seededRng(1));
+  await room.pickGenerals();
+  const lord = room.players.find((p) => p.role === Role.Lord)!;
+  const survivors = room.players.filter((p) => p !== lord);
+  strict.ok(
+    survivors.some((p) => !p.roleShown),
+    "test setup: at least one non-lord survivor must still be fogged before the match ends",
+  );
+  await room.damagePlayer(lord.id, lord.maxHp, Role.Rebel);
+  strict.ok(room.gameOver, "test setup: the lord's death must have ended the match");
+  for (const p of room.players) {
+    strict.ok(p.roleShown, `${p.id} (${p.role}, alive=${p.alive}) must have its role revealed once the match ends`);
+  }
+  console.log("PASS testGameOverRevealsAllSurvivingRoles: every player's role is revealed, including survivors who never died");
+}
+
+/**
  * Regression proof: a cascading death that happens AFTER the win condition is already decided
  * (e.g. Tianfeng's Suishi: an ally of the just-dead player loses 1 hp and can die from it too)
  * must NOT re-run checkWinCondition and overwrite the already-correct winner. Found live: an
@@ -1311,6 +1334,7 @@ await testPhaseCyclingConservesCards();
 await testRebelKillsLord();
 await testLordAndLoyalistWin();
 await testCascadingDeathDoesNotOverwriteGameOver();
+await testGameOverRevealsAllSurvivingRoles();
 await testFreeformPlayLetsHumanChooseCardsAndPlayDuplicates();
 await testEquipTriggersLiveUpdateCallback();
 await testSlashTriggersLiveUpdateCallback();

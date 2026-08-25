@@ -225,6 +225,9 @@ export class Room {
       if (result) {
         this.gameOver = result;
         this.log.push(`Kết thúc ván: ${result.winners.map((r) => ROLE_LABEL_VI[r]).join(" + ")} thắng`);
+        // Real Sanguosha reveals EVERY identity once the match ends, not just the dead/lord --
+        // survivors' roles were only fogged during play (Player::hasShownRole).
+        for (const p of this.players) p.roleShown = true;
       }
     }
 
