@@ -266,6 +266,14 @@ function makeHumanController(gr: GameRoom, playerId: string): Partial<Controller
         (msg) => candidates.find((c) => c.id === msg.cardId) ?? candidates[0],
         candidates[0], // fallback on timeout/disconnect: matches the bot's own default (first revealed card)
       ),
+    wantsToDrawNow: (_player, count) =>
+      askClient(
+        gr,
+        playerId,
+        { type: "confirmDrawCard", actorId: playerId, count },
+        () => undefined,
+        undefined, // fallback on timeout/disconnect: auto-draw so the turn never stalls forever
+      ),
     chooseFreeAction: (player, legalActions) =>
       askClient(
         gr,

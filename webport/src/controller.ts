@@ -75,6 +75,10 @@ export interface Controller {
   /** Generic single-target picker with no built-in filter -- `candidates` is pre-filtered by
    *  the caller. Return null to decline. */
   chooseAnyPlayerTarget(player: GamePlayer, candidates: GamePlayer[]): Promise<GamePlayer | null>;
+  /** Draw phase: `player` is about to draw `count` cards from the pile. Resolves once they've
+   *  confirmed (e.g. clicked the face-down draw pile) -- lets a human seat draw on their own
+   *  timing instead of cards silently appearing in hand. Bots resolve immediately. */
+  wantsToDrawNow(player: GamePlayer, count: number): Promise<void>;
   /** If defined (only ever set for a human-controlled seat -- see server.ts's HumanController),
    *  Room hands the ENTIRE Play phase over to `runFreeformPlayPhase` instead of the fixed
    *  automatic pass below: called repeatedly with the full current legal-action list, resolves
@@ -133,6 +137,9 @@ export function makeBotController(rng: () => number): Controller {
     },
     async chooseAnyPlayerTarget(_player, candidates) {
       return pickRandom(candidates);
+    },
+    async wantsToDrawNow() {
+      // bots draw immediately, no pause
     },
   };
 }

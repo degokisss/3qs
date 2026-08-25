@@ -204,11 +204,20 @@ async function testEquipTriggersLiveUpdateCallback(): Promise<void> {
   const weapon = deck.find((c) => c.kind === CardKind.Weapon)!;
   lord.hand = [weapon];
 
-  let callbackCount = 0;
+  // The Draw phase (now itself live-broadcasting -- see Milestone 16) fires its own callback
+  // earlier in the same turn, before the weapon is ever equipped. Isolate specifically the
+  // FIRST callback where the weapon transitions from unset to set, instead of assuming the
+  // equip is the only call all turn.
+  let equipTransitions = 0;
   let weaponSeenAtCallbackTime: string | null = null;
+  let sawWeapon = false;
   room.setLiveUpdateCallback(() => {
-    callbackCount++;
-    weaponSeenAtCallbackTime = lord.weapon?.weaponName ?? null;
+    const current = lord.weapon?.weaponName ?? null;
+    if (current && !sawWeapon) {
+      equipTransitions++;
+      weaponSeenAtCallbackTime = current;
+      sawWeapon = true;
+    }
   });
 
   let equipped = false;
@@ -225,7 +234,7 @@ async function testEquipTriggersLiveUpdateCallback(): Promise<void> {
 
   await room.playTurn(); // the lord acts first
 
-  strict.equal(callbackCount, 1, "the live-update callback must fire exactly once for the single equip action");
+  strict.equal(equipTransitions, 1, "the weapon must transition from unset to set in exactly one live-update callback");
   strict.equal(
     weaponSeenAtCallbackTime,
     weapon.weaponName,
@@ -250,12 +259,21 @@ async function testSlashTriggersLiveUpdateCallback(): Promise<void> {
   lord.hand = [slash];
   for (const p of room.players) if (p !== lord) p.hand = []; // nobody holds a jink -- damage is guaranteed
 
-  let callbackCount = 0;
+  // The Draw phase (now itself live-broadcasting -- see Milestone 16) fires its own callback
+  // earlier in the same turn, before the target is even chosen. Isolate specifically the FIRST
+  // callback where the target's hp actually drops, instead of assuming the slash is the only
+  // call all turn.
+  let damageTransitions = 0;
   let targetHpAtCallbackTime: number | null = null;
+  let sawDamage = false;
   const targetRef: { current: GamePlayer | null } = { current: null };
   room.setLiveUpdateCallback(() => {
-    callbackCount++;
-    targetHpAtCallbackTime = targetRef.current?.hp ?? null;
+    const t = targetRef.current;
+    if (t && !sawDamage && t.hp < t.maxHp) {
+      damageTransitions++;
+      targetHpAtCallbackTime = t.hp;
+      sawDamage = true;
+    }
   });
 
   let played = false;
@@ -281,7 +299,7 @@ async function testSlashTriggersLiveUpdateCallback(): Promise<void> {
   strict.ok(played, "the freeform legalActions list must have offered the seeded slash card");
   strict.ok(targetRef.current, "chooseSlashTarget must have been asked and picked a target");
   const target = targetRef.current;
-  strict.equal(callbackCount, 1, "the live-update callback must fire exactly once for the single slash action");
+  strict.equal(damageTransitions, 1, "the target's hp must transition (drop) in exactly one live-update callback");
   strict.equal(
     targetHpAtCallbackTime,
     target.hp,
@@ -447,6 +465,43 @@ async function testDiscardChoiceLetsHumanPickWhichCards(): Promise<void> {
   console.log(
     "PASS testDiscardChoiceLetsHumanPickWhichCards: chooseDiscards's exact chosen cards were discarded (not an arbitrary default set)",
   );
+}
+
+/**
+ * Regression proof: the Draw phase must ask the controller's `wantsToDrawNow` BEFORE any card
+ * is actually drawn to hand -- lets a human seat draw on their own timing (click the pile)
+ * instead of cards silently appearing. Deterministic without needing to simulate real-time
+ * pausing: `Room.runPhase`'s Draw case `await`s the controller's answer before ever calling
+ * `drawCards`, so the ask's own hand-size snapshot (captured synchronously as its very first
+ * statement, before it returns) reliably proves the ordering regardless of resolution speed.
+ */
+async function testDrawPhaseAsksBeforeDrawing(): Promise<void> {
+  const room = new Room(playerIds(8), seededRng(1));
+  await room.pickGenerals();
+  const lord = room.players.find((p) => p.role === Role.Lord)!;
+  const handBeforeDraw = lord.handcardNum;
+
+  let askedCount = 0;
+  let countAsked: number | null = null;
+  let handSizeAtAskTime: number | null = null;
+  room.setController(lord.id, {
+    wantsToDrawNow: async (player, count) => {
+      askedCount++;
+      countAsked = count;
+      handSizeAtAskTime = player.handcardNum;
+    },
+  });
+
+  await room.playTurn(); // the lord acts first
+
+  strict.equal(askedCount, 1, "wantsToDrawNow must be asked exactly once per Draw phase");
+  strict.equal(countAsked, 2, "default draw count is 2 with no yingzi/luoyi modifier");
+  strict.equal(
+    handSizeAtAskTime,
+    handBeforeDraw,
+    "the ask must fire BEFORE drawCards runs -- hand size at ask time must still be the pre-draw count",
+  );
+  console.log("PASS testDrawPhaseAsksBeforeDrawing: wantsToDrawNow asked exactly once, correct count, strictly before the draw itself");
 }
 
 /**
@@ -1086,6 +1141,7 @@ await testSlashTriggersLiveUpdateCallback();
 await testFreeformPlayAOECardIsOfferedAndResolves();
 await testAmazingGraceIsATurnOrderDraft();
 await testDiscardChoiceLetsHumanPickWhichCards();
+await testDrawPhaseAsksBeforeDrawing();
 await testEmergentCombatReachesWinCondition();
 await testEquipAndTricksAppearInPlay();
 await testGeneralSkillsAppearInPlay();

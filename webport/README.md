@@ -987,6 +987,51 @@ box is `pointer-events:auto`, so a candidate hidden underneath couldn't be click
   (`align-items`/`padding-bottom` on a `position:fixed` flex container), and the underlying
   candidate-highlight mechanism it wraps (Milestone 14) was already screenshot-verified unchanged.
 
+## Milestone 16 — DONE (click-to-draw pile + own-role privacy toggle)
+
+Two user requests: (1) the Draw phase gave no interaction at all -- cards just silently appeared
+in hand every turn; wanted a face-down draw-pile card in the middle of the table you click to
+draw, like a physical deck. (2) a toggle to hide your OWN role, so someone sitting/looking near a
+shared screen can't read it off just by glancing over.
+
+### Click-to-draw pile
+- `src/controller.ts` -- new required `Controller.wantsToDrawNow(player, count): Promise<void>`;
+  bot default resolves immediately (no pause, byte-for-byte unchanged bot behavior/turn speed).
+- `src/room.ts` -- `runPhase`'s `Phase.Draw` case now `await`s `wantsToDrawNow` BEFORE calling
+  `drawCards`, and fires `onLiveUpdate` right after (same "broadcast the moment it actually
+  happens" pattern as every other action since Milestone 9.1) so a human's own draw-pile click is
+  immediately visible to spectators/other seats too, not just at turn-end.
+- `src/server.ts` -- new `confirmDrawCard` human ask sending `{ actorId, count }`; times out to
+  auto-draw (matches the bot default) so an idle/disconnected human never stalls the table.
+- `public/index.html` -- a clickable face-down draw-pile card (`image/system/card-back.png`)
+  overlays the table's center emblem exactly while a `confirmDrawCard` prompt for MY seat is
+  pending, with an always-on pulsing gold glow and a "Rút N lá" label; clicking sends the ack.
+  Everywhere else (not my Draw phase, or I'm a bot/spectator) it stays hidden and the normal
+  emblem/turn indicator shows through.
+- New deterministic test `testDrawPhaseAsksBeforeDrawing`: proves `wantsToDrawNow` is asked
+  exactly once, with the correct card count, and the hand-size snapshot captured AT ask time
+  still matches the pre-draw count (i.e. the ask genuinely precedes `drawCards`, not just
+  logged after the fact).
+- **Verification**: live 1-socket WS test with a deliberate 800ms delay before responding to the
+  first `confirmDrawCard` -- the state broadcasts during that window all show the pre-draw hand
+  count (3) unchanged; the instant the delayed response is sent, the very next broadcast jumps to
+  the post-draw count (5 = 3+2), proving the server genuinely blocks the real draw on the human's
+  answer, not racing ahead regardless of it. `npx tsc --noEmit` clean; `npm run sim` 30/30 passing.
+
+### Own-role privacy toggle
+- `public/index.html` only (pure client-side render toggle, no protocol change -- the server
+  already only ever reveals a claiming socket's own role to that socket; this just controls
+  whether THIS TAB chooses to display what it already received). New header button (👁/🙈,
+  preference persisted in `localStorage`) masks the role text/color/icon specifically for
+  `p.id === mySeat` in both the table's own seat card and the big hero panel -- every other
+  player's role display is completely unaffected by the toggle.
+- **Verification**: unit-tested the exact masking expressions (extracted verbatim from the
+  shipped file) against both a "self" and an "other player" input -- confirms hiding masks the
+  role label, its color-coded CSS class, AND the lord/renegade icon together (no partial leak via
+  any one of the three), and that toggling never touches another player's role display. (A full
+  click-through browser screenshot hit the same headless-browser tool outage noted in Milestone
+  15 -- unrelated to this change; every other verification layer above is unaffected by it.)
+
 ## Run
 
 ```

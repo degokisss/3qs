@@ -78,6 +78,19 @@
     transition: background 0.15s, color 0.15s;
   }
   #newGame:hover { background: var(--gold); color: var(--ink); }
+  #toggleRoleBtn {
+    background: transparent;
+    color: var(--gold-dim);
+    border: 1px solid var(--gold-dim);
+    border-radius: 3px;
+    padding: 6px 14px;
+    cursor: pointer;
+    font-family: var(--font-label);
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    transition: background 0.15s, color 0.15s;
+  }
+  #toggleRoleBtn:hover { background: var(--gold-dim); color: var(--ink); }
   #startGameBtn {
     background: var(--gold);
     color: var(--ink);
@@ -308,8 +321,42 @@
     width: 100%;
     max-width: 212px;
     background: radial-gradient(circle at 50% 40%, rgba(201,162,74,0.10), transparent 70%);
+    position: relative; /* anchors #drawPileBtn's overlay below */
   }
-  #centerEmblem img { width: 68px; opacity: 0.7; margin-bottom: 10px; filter: drop-shadow(0 0 6px rgba(201,162,74,0.3)); }
+  /* Draw phase: a clickable face-down draw-pile card overlays the center emblem so a human
+     seat draws on their own timing (click it) instead of cards silently appearing in hand. */
+  #drawPileBtn {
+    display: none;
+    position: absolute;
+    inset: 0;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    background: rgba(8,9,13,0.92);
+    border: none;
+    border-radius: 50%;
+    cursor: pointer;
+    padding: 0;
+  }
+  #drawPileBtn.active { display: flex; }
+  #drawPileBtn img {
+    width: 62px;
+    height: 87px;
+    object-fit: cover;
+    border-radius: 5px;
+    border: 1px solid var(--gold);
+    box-shadow: 0 0 0 2px var(--gold), 0 0 20px rgba(201,162,74,0.6);
+    animation: drawPilePulse 1.2s ease-in-out infinite;
+    transition: transform 0.15s;
+  }
+  #drawPileBtn:hover img { transform: translateY(-4px) scale(1.05); }
+  #drawPileLabel { font-family: var(--font-label); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--gold); }
+  @keyframes drawPilePulse {
+    0%, 100% { box-shadow: 0 0 0 2px var(--gold), 0 0 18px rgba(201,162,74,0.55); }
+    50% { box-shadow: 0 0 0 2px var(--gold), 0 0 32px rgba(201,162,74,0.9); }
+  }
+  #centerEmblem img.logo { width: 68px; opacity: 0.7; margin-bottom: 10px; filter: drop-shadow(0 0 6px rgba(201,162,74,0.3)); }
   #centerTurn { font-size: 12px; color: var(--gold); letter-spacing: 1px; }
   #centerActing { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
 
@@ -642,6 +689,7 @@
       <span id="status" class="disconnected">connecting…</span>
       <span id="roomIdLabel"></span>
       <span id="myseat"></span>
+      <button id="toggleRoleBtn" style="display:none" onclick="window.__toggleRole()"></button>
       <button id="leaveRoom" style="display:none">Rời phòng</button>
       <button id="newGame" style="display:none">Ván mới</button>
     </div>
@@ -687,9 +735,13 @@
 
     <div id="table">
       <div id="centerEmblem">
-        <img src="../../image/logo/logo.png" alt="" onerror="this.style.display='none'">
+        <img class="logo" src="../../image/logo/logo.png" alt="" onerror="this.style.display='none'">
         <div id="centerTurn"></div>
         <div id="centerActing"></div>
+        <button id="drawPileBtn" onclick="window.__drawNow()">
+          <img src="../../image/system/card-back.png" alt="">
+          <span id="drawPileLabel"></span>
+        </button>
       </div>
       <div class="slot-top1" data-slot="top1"></div>
       <div class="slot-top2" data-slot="top2"></div>
@@ -755,6 +807,9 @@
     const myHandWrapEl = document.getElementById("myHandWrap");
     const myHandCardsEl = document.getElementById("myHandCards");
     const freeActionBarEl = document.getElementById("freeActionBar");
+    const toggleRoleBtnEl = document.getElementById("toggleRoleBtn");
+    const drawPileBtnEl = document.getElementById("drawPileBtn");
+    const drawPileLabelEl = document.getElementById("drawPileLabel");
 
     let ws = null;
     let pendingFreeAction = null; // { requestId, legalActions } while our turn's Play-phase prompt is active
@@ -766,6 +821,11 @@
     let pendingPrompt = null; // { requestId, candidateIds } while awaiting our own answer
     let lastState = null; // most recent state snapshot, for looking up a player's general/etc.
     let amICreator = false; // true if this tab created the room it's currently watching
+    let pendingDraw = null; // { requestId, count } while it's our Draw phase, waiting for us to click the pile
+    // Privacy toggle for shared-screen local play: masks OUR OWN role (hero panel + own table
+    // card) so someone sitting/looking nearby can't read it off the screen unless we choose to
+    // reveal it. Persisted so the preference survives a reload.
+    let hideOwnRole = localStorage.getItem("hideOwnRole") === "1";
 
     function send(obj) {
       if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
@@ -785,6 +845,30 @@
     window.__claim = claim;
     window.__answer = answerPrompt;
     window.answerPromptNoop = () => {};
+    function updateToggleRoleBtn() {
+      toggleRoleBtnEl.textContent = hideOwnRole ? "🙈 Hiện vai trò" : "👁 Ẩn vai trò";
+    }
+    window.__toggleRole = () => {
+      hideOwnRole = !hideOwnRole;
+      localStorage.setItem("hideOwnRole", hideOwnRole ? "1" : "0");
+      updateToggleRoleBtn();
+      if (lastState) render(lastState); // re-render the hero panel + own table card with the new mask state
+    };
+    updateToggleRoleBtn();
+
+    /** Draw phase: our own click-to-draw pile. `wantsToDrawNow` pauses the server until we
+     *  answer (or it times out and auto-draws) -- clicking sends any ack, the actual card(s)
+     *  arrive via the next state broadcast right after. */
+    window.__drawNow = () => {
+      if (!pendingDraw) return;
+      send({ type: "response", requestId: pendingDraw.requestId, value: true });
+      pendingDraw = null;
+      renderDrawPile();
+    };
+    function renderDrawPile() {
+      drawPileBtnEl.className = pendingDraw ? "active" : "";
+      drawPileLabelEl.textContent = pendingDraw ? `Rút ${pendingDraw.count} lá` : "";
+    }
 
     function showLobbyError(message) {
       lobbyErrorEl.textContent = message;
@@ -802,16 +886,19 @@
       flippedGeneralIndices = new Set();
       pendingDiscard = null;
       selectedDiscardIds = new Set();
+      pendingDraw = null;
       promptOverlayEl.className = "";
       promptEl.innerHTML = "";
       lobbyEl.style.display = "";
       gameViewEl.style.display = "none";
       leaveRoomBtn.style.display = "none";
       newGameBtn.style.display = "none";
+      toggleRoleBtnEl.style.display = "none";
       startGameBtn.style.display = "none";
       myHandWrapEl.className = "";
       roomIdLabelEl.textContent = "";
       myseatEl.textContent = "";
+      renderDrawPile();
     }
 
     function showGameView(roomId) {
@@ -885,9 +972,10 @@
     }
     function renderPlayer(p, state) {
       const gems = Array.from({ length: p.maxHp }, (_, i) => `<span class="gem ${i < p.hp ? "" : "lost"}"></span>`).join("");
-      const roleCls = p.role ? "role-" + p.role : "role-hidden";
-      const roleLabel = p.role ? ROLE_LABEL[p.role] : "?";
-      const roleIcon = p.role && ROLE_ICON[p.role] ? `<img class="roleIcon" src="${IMG}/system/roles/${p.role}.png" alt="">` : "";
+      const maskRole = hideOwnRole && p.id === mySeat; // shared-screen privacy toggle -- see hideOwnRole
+      const roleCls = maskRole ? "role-hidden" : p.role ? "role-" + p.role : "role-hidden";
+      const roleLabel = maskRole ? "🙈" : p.role ? ROLE_LABEL[p.role] : "?";
+      const roleIcon = !maskRole && p.role && ROLE_ICON[p.role] ? `<img class="roleIcon" src="${IMG}/system/roles/${p.role}.png" alt="">` : "";
 
       const skillsHtml = (p.skills || [])
         .map((s) => `<div class="skill"><span class="skillName">◆ ${s.name}</span><span class="skillDesc">${s.description}</span></div>`)
@@ -952,7 +1040,7 @@
           <div class="heroLabel">Tướng của bạn — ${p.id}${p.alive ? "" : " (đã mất)"}</div>
           <div class="heroTopRow">
             <span class="heroName">${p.generalName || p.general}</span>
-            <span class="heroGeneral">${p.role ? ROLE_LABEL[p.role] : ""}</span>
+            <span class="heroGeneral">${hideOwnRole ? "🙈 Ẩn" : p.role ? ROLE_LABEL[p.role] : ""}</span>
           </div>
           <div class="heroHp">${gems}</div>
           <div class="equipRow">${equipIcons(p) || '<span class="equipEmpty">Không trang bị</span>'}</div>
@@ -1174,6 +1262,13 @@
       myseatEl.textContent = mySeat
         ? `Đang điều khiển: ${mySeat}`
         : "Đang xem — bấm \"Chiếm ghế\" để điều khiển quyết định Sát.";
+      toggleRoleBtnEl.style.display = mySeat ? "" : "none";
+      // Safety net: if the current player has already moved past us (or we're no longer alive)
+      // while pendingDraw is still set, our click/timeout answer must have gone astray -- drop
+      // the stale prompt instead of leaving an un-clickable draw pile showing forever.
+      if (pendingDraw && state.currentPlayerId !== mySeat) {
+        pendingDraw = null;
+      }
 
       renderPlayers();
       renderHero(!picking && mySeat ? state.players.find((p) => p.id === mySeat) : null);
@@ -1182,6 +1277,7 @@
       } else {
         renderMyHand();
       }
+      renderDrawPile();
 
       logEl.textContent = state.log.join("\n");
       logEl.scrollTop = logEl.scrollHeight;
@@ -1306,6 +1402,12 @@
           showCardPicker(msg);
           return;
         }
+        if (msg.type === "confirmDrawCard") {
+          if (msg.actorId !== mySeat) return; // a prompt for a seat this tab doesn't control
+          pendingDraw = msg;
+          renderDrawPile();
+          return;
+        }
         const isPromptType = [
           "chooseSlashTarget",
           "chooseTrickTarget",
@@ -1364,6 +1466,8 @@
         flippedGeneralIndices = new Set();
         pendingDiscard = null;
         selectedDiscardIds = new Set();
+        pendingDraw = null;
+        renderDrawPile();
         promptOverlayEl.className = "";
         promptEl.innerHTML = "";
         send({ type: "new" });

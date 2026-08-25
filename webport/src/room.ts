@@ -734,8 +734,12 @@ export class Room {
       case Phase.Draw: {
         // Draw phase card count: 2 by default, raised/lowered by e.g. Yingzi/Luoyi (skill.ts).
         const drawBonus = player.skills.reduce((sum, skill) => sum + (skill.drawPhaseBonus?.(player) ?? 0), 0);
-        this.drawCards(player, Math.max(0, 2 + drawBonus));
+        const drawCount = Math.max(0, 2 + drawBonus);
+        await this.controllers.get(player.id)!.wantsToDrawNow(player, drawCount);
+        this.drawCards(player, drawCount);
         if (drawBonus !== 0) this.log.push(`${player.id} draws ${2 + drawBonus} card(s) this phase (${drawBonus > 0 ? "yingzi" : "luoyi"})`);
+        this.onLiveUpdate?.(); // the human seat's own draw-pile click is otherwise invisible to
+        // spectators/other seats until the whole turn finishes -- broadcast the hand right away
         for (const skill of player.skills) {
           await skill.afterDrawPhase?.(this.makeContext(this.players.filter((p) => p.alive)), player, this.rng);
         }
