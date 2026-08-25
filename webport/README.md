@@ -1032,6 +1032,62 @@ shared screen can't read it off just by glancing over.
   click-through browser screenshot hit the same headless-browser tool outage noted in Milestone
   15 -- unrelated to this change; every other verification layer above is unaffected by it.)
 
+## Milestone 17 — DONE (Peach: proactive self-heal + ally rescue)
+
+User report: "lá đào có thể dùng trong lượt để hồi máu cho bản thân" (Peach should be usable
+during your own turn to heal yourself), plus real Sanguosha's other Peach behavior this port was
+still missing: when a player is dying, every OTHER alive player (not just the dying player
+themself) should get a chance to spend their own held Peach to save them, in turn order starting
+right after the dying player.
+
+### Proactive self-heal
+- `src/trick.ts` -- new `resolvePeachSelfHeal(ctx, player)`: heals 1 hp, logs it.
+- `src/room.ts` -- `computeLegalActions` now offers every held Peach as a `playCard` action
+  whenever `player.isWounded()`; `resolveFreeAction`'s switch gained a `CardKind.Peach` case
+  (spend the card, heal, live-update). This is the ONLY path a claimed human seat needs --
+  freeform play already lists/resolves every action generically, no protocol change required.
+- `src/controller.ts` -- new `Controller.wantsToUsePeachSelfHeal(player)`, bot default `false`:
+  the fixed automatic bot pass declines it (preserves the pre-existing "bots never proactively
+  burn Peach/Analeptic outside a real dying emergency" behavior other tests already depend on);
+  a small bot-pass loop in `room.ts` wires the hook for parity/testability even though real
+  human seats never reach it (they always have `chooseFreeAction`, which skips the fixed pass).
+- New deterministic test `testFreeformPlayLetsHumanSelfHealWithPeach`: wounds the lord by 1 via
+  `damagePlayer`, seeds exactly 1 Peach in hand, drives a real `playTurn()` through a
+  `chooseFreeAction` controller, and confirms the card appeared in `legalActions`, healed exactly
+  1 hp, left the hand, and logged.
+
+### Ally rescue
+- `src/combat.ts` -- new `EngineContext.askPeachForOther(rescuer, dyingPlayer): Promise<boolean>`;
+  `resolveDying` rewritten: after the dying player's own self-rescue (`askPeach`) declines/runs
+  out, it now loops every OTHER alive player once, in turn order starting right after the dying
+  player and wrapping the table, offering each a chance to spend their own held Peach to save
+  them -- stops at the first acceptance, repeats the whole self-then-others cycle if still <=0
+  hp afterward, and only gives up (recording the death) once nobody at all can or will help.
+- `src/controller.ts` -- new `Controller.wantsToUsePeachForOther(rescuer, dyingPlayer)`. Bot
+  default `false` (deliberately, unlike every other self-serving ask's `true` default): whether
+  to spend YOUR OWN card to save someone ELSE is a genuinely strategic, role-aware decision this
+  simple greedy policy doesn't model, and defaulting it to `true` would have made bots spend
+  Peaches on allies unconditionally -- breaking `testCascadingDeathDoesNotOverwriteGameOver`'s
+  premise (confirmed live: that regression failed until this default was set to `false`).
+- `src/server.ts` -- new `confirmPeachForOther` human ask, sending `{ actorId, dyingPlayerId }`;
+  times out to `false` (declining), matching the bot default and the existing "offensive/
+  optional-resource action" fallback policy.
+- `public/index.html` -- new prompt branch showing the dying ally's general name/portrait art
+  ("`<Tên tướng>` đang hấp hối! Dùng Đào để cứu đồng minh?"), reusing the existing generic
+  `showConfirm` yes/no prompt component.
+- New deterministic test `testAllyRescuePeachSavesADyingPlayer`, driven directly through
+  `resolveSlash` (pure): dying player declines self-rescue, the first ally in turn order holds a
+  Peach but declines, the second accepts -- proves the exact turn order, that a decline doesn't
+  stop the loop, that the accepting rescuer's card (and only theirs) is spent, and the correct
+  log line/credited outcome.
+- **Verification**: `npx tsc --noEmit` clean; `npm run sim` 32/32 passing (including both new
+  tests above). Live browser check: injected a `WebSocket` spy via `page.evaluateOnNewDocument`
+  to capture the real page's `onmessage` handler before its own `connect()` ran, fed it a
+  synthetic `state` broadcast + `confirmPeachForOther` message, and confirmed the rendered prompt
+  showed the correct dying player's name ("Tôn Kiên đang hấp hối!") with the Peach card art, and
+  that clicking "Đồng ý" sent back the exact expected `{ type: "response", requestId, value:
+  true }` payload.
+
 ## Run
 
 ```

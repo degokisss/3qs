@@ -53,6 +53,13 @@ export interface Controller {
   wantsToDodge(player: GamePlayer): Promise<boolean>;
   /** `player` holds a Peach and is at 0 hp (or below) right now. */
   wantsToUsePeach(player: GamePlayer): Promise<boolean>;
+  /** `rescuer` holds a Peach and another player is dying right now -- spend it to save THEM
+   *  instead of self? Only called when `rescuer` actually holds one. */
+  wantsToUsePeachForOther(rescuer: GamePlayer, dyingPlayer: GamePlayer): Promise<boolean>;
+  /** Play phase: `player` is wounded and holds a Peach -- play it proactively (not while dying)
+   *  to heal 1 hp right now? Real Sanguosha lets this repeat as long as still wounded and still
+   *  holding one, no once-per-turn cap (only Slash has an explicit limit). */
+  wantsToUsePeachSelfHeal(player: GamePlayer): Promise<boolean>;
   /** `player` holds a Slash and must decide whether to play it to continue a Duel exchange. */
   wantsToPlaySlashInDuel(player: GamePlayer): Promise<boolean>;
   /** `player` (the source of damage to a Ganglie holder) has >=2 cards and can choose to discard
@@ -113,6 +120,16 @@ export function makeBotController(rng: () => number): Controller {
     },
     async wantsToUsePeach() {
       return true;
+    },
+    async wantsToUsePeachForOther() {
+      return false; // ally-rescue is a genuinely strategic (role-aware) decision this simple
+      // greedy bot policy doesn't model -- unlike every other ask above, spending a card here
+      // helps someone ELSE, not the bot itself, so it declines by default (a claimed human seat
+      // gets the real choice instead, see server.ts's askClient wiring)
+    },
+    async wantsToUsePeachSelfHeal() {
+      return false; // matches the pre-existing bot behavior: the fixed pass never proactively
+      // burns a Peach outside a real dying emergency (see room.ts's runPlayPhase)
     },
     async wantsToPlaySlashInDuel() {
       return true;

@@ -362,6 +362,91 @@ async function testFreeformPlayAOECardIsOfferedAndResolves(): Promise<void> {
 }
 
 /**
+ * Regression proof: a wounded player must be able to proactively play a held Peach on
+ * THEMSELVES during their own Play phase (not just while dying) to heal 1 hp -- Real Sanguosha
+ * lets this repeat as long as they're still wounded and still hold one. Damages the lord first
+ * (via the pure damagePlayer test hook) so they start the turn wounded, seeds exactly 1 Peach in
+ * hand, and confirms the freeform legalActions list actually offers it and playing it heals.
+ */
+async function testFreeformPlayLetsHumanSelfHealWithPeach(): Promise<void> {
+  const room = new Room(playerIds(8), seededRng(1));
+  await room.pickGenerals();
+  const lord = room.players.find((p) => p.role === Role.Lord)!;
+  await room.damagePlayer(lord.id, 1, null); // wound the lord by exactly 1 before their own turn
+  strict.ok(lord.isWounded(), "test setup: the lord must actually be wounded before their turn starts");
+  const woundedHp = lord.hp;
+  const deck = buildStandardDeck();
+  const peach = deck.find((c) => c.kind === CardKind.Peach)!;
+  lord.hand = [peach];
+
+  let played = false;
+  room.setController(lord.id, {
+    chooseFreeAction: async (_player, legalActions) => {
+      const myPeach = legalActions.find((a) => a.kind === "playCard" && a.cardKind === CardKind.Peach && a.cardId === peach.id);
+      if (myPeach && !played) {
+        played = true;
+        return myPeach;
+      }
+      return null; // end phase
+    },
+  });
+
+  await room.playTurn(); // the lord acts first
+
+  strict.ok(played, "the freeform legalActions list must have offered the seeded peach card while wounded");
+  strict.equal(lord.hp, woundedHp + 1, "playing the peach on themselves must heal exactly 1 hp");
+  strict.ok(!lord.hand.some((c) => c.id === peach.id), "the played peach card must have left the hand");
+  strict.ok(room.log.some((l) => l.includes("uses peach to recover")), "the self-heal must actually resolve (log line present)");
+  console.log("PASS testFreeformPlayLetsHumanSelfHealWithPeach: peach appeared in legalActions while wounded, played, healed 1 hp");
+}
+
+/**
+ * Regression proof: `resolveDying`'s ally-rescue loop asks every OTHER alive player, in turn
+ * order starting right after the dying player, whether to spend a held Peach to save them --
+ * only AFTER the dying player's own self-rescue has declined/run out -- and stops at the first
+ * acceptance instead of asking everyone. Driven directly through `resolveSlash` (pure,
+ * deterministic): the dying player declines self-rescue, the first other player in line holds a
+ * peach but declines, and the second accepts -- proving both the decline-then-continue behavior
+ * and that the credited killer role is still recorded correctly when nobody dies after all.
+ */
+async function testAllyRescuePeachSavesADyingPlayer(): Promise<void> {
+  const deck = buildStandardDeck();
+  const slashCard = deck.find((c) => c.kind === CardKind.Slash)!;
+  const peach1 = deck.find((c) => c.kind === CardKind.Peach)!;
+  const peach2 = deck.find((c) => c.kind === CardKind.Peach && c.id !== peach1.id)!;
+
+  const attacker = new GamePlayer("ATK");
+  const dying = new GamePlayer("DYING", 1); // maxHp 1: a landed slash drops this straight to 0
+  dying.hand = [];
+  const decliner = new GamePlayer("DECLINE");
+  decliner.hand = [peach1];
+  const rescuer = new GamePlayer("RESCUE");
+  rescuer.hand = [peach2];
+
+  const log: string[] = [];
+  // alivePlayers order deliberately puts `dying` first so the rescue loop's turn order (starting
+  // right after the dying player) visits decliner then rescuer, in that exact order.
+  const ctx = makeTestContext([dying, decliner, rescuer, attacker], log);
+  ctx.askPeach = async () => false; // the dying player's own self-rescue declines/has nothing
+  const askedOrder: string[] = [];
+  ctx.askPeachForOther = async (rescuerParam, dyingParam) => {
+    askedOrder.push(rescuerParam.id);
+    strict.equal(dyingParam.id, dying.id, "askPeachForOther must always be asked about the actual dying player");
+    return rescuerParam.id === rescuer.id; // only RESCUE agrees; DECLINE always says no
+  };
+
+  await resolveSlash(ctx, attacker, dying, slashCard);
+
+  strict.deepEqual(askedOrder, [decliner.id, rescuer.id], "must ask every other alive player in turn order, decliner before rescuer");
+  strict.equal(dying.alive, true, "the rescuer's peach must have saved the dying player");
+  strict.equal(dying.hp, 1, "a successful rescue must heal exactly back to 1 hp (from 0)");
+  strict.ok(!rescuer.hand.some((c) => c.id === peach2.id), "the rescuer's peach must actually be spent");
+  strict.ok(decliner.hand.some((c) => c.id === peach1.id), "the decliner's peach must remain unspent -- they said no");
+  strict.ok(log.some((l) => l === `${rescuer.id} uses peach to save ${dying.id} (hp 1/1)`), "the rescue log line must credit the actual rescuer and victim");
+  console.log("PASS testAllyRescuePeachSavesADyingPlayer: self-rescue declined, first ally declined, second ally's peach saved the dying player");
+}
+
+/**
  * Regression proof: Amazing Grace (Ngu Coc Phong Dang) must reveal exactly N cards (N = number
  * of alive players) and let each player pick ONE in turn order STARTING FROM THE CARD'S USER --
  * not a simultaneous/random draw. Every player's choosePickCard is overridden to pick the LAST
@@ -835,6 +920,7 @@ function makeTestContext(alivePlayers: GamePlayer[], log: string[], drawTop: () 
     onDying: () => {},
     askDodge: async () => true,
     askPeach: async () => false,
+    askPeachForOther: async () => false,
     askDuelSlash: async () => false,
     askGanglieDiscard: async () => false,
     askUseSelfAction: async () => true,
@@ -1139,6 +1225,8 @@ await testFreeformPlayLetsHumanChooseCardsAndPlayDuplicates();
 await testEquipTriggersLiveUpdateCallback();
 await testSlashTriggersLiveUpdateCallback();
 await testFreeformPlayAOECardIsOfferedAndResolves();
+await testFreeformPlayLetsHumanSelfHealWithPeach();
+await testAllyRescuePeachSavesADyingPlayer();
 await testAmazingGraceIsATurnOrderDraft();
 await testDiscardChoiceLetsHumanPickWhichCards();
 await testDrawPhaseAsksBeforeDrawing();

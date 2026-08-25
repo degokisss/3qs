@@ -30,6 +30,7 @@ import {
   resolveDuel,
   resolveExNihilo,
   resolveGodSalvation,
+  resolvePeachSelfHeal,
   resolveSavageAssault,
   resolveSnatch,
   snatchCandidates,
@@ -260,6 +261,7 @@ export class Room {
       onDamageDealt: (source, target, amount) => this.triggerOnDamageDealt(source, target, amount),
       askDodge: (player) => this.controllers.get(player.id)!.wantsToDodge(player),
       askPeach: (player) => this.controllers.get(player.id)!.wantsToUsePeach(player),
+      askPeachForOther: (rescuer, dyingPlayer) => this.controllers.get(rescuer.id)!.wantsToUsePeachForOther(rescuer, dyingPlayer),
       askDuelSlash: (player) => this.controllers.get(player.id)!.wantsToPlaySlashInDuel(player),
       askGanglieDiscard: (player) => this.controllers.get(player.id)!.wantsToDiscardForGanglie(player),
       askUseSelfAction: (player, skillName) => this.controllers.get(player.id)!.wantsToUseSelfAction(player, skillName),
@@ -435,6 +437,23 @@ export class Room {
       }
     }
 
+    // Proactive Peach self-heal: real Sanguosha lets a player spend a held Peach on themselves
+    // any time during their own turn while wounded. Gated by its own dedicated ask (bots decline
+    // by default -- see controller.ts's wantsToUsePeachSelfHeal -- preserving the pre-existing
+    // fixed-pass behavior of never proactively burning Peach/Analeptic outside a real dying
+    // emergency); a claimed human seat gets the real choice via the freeform path below instead.
+    for (let i = player.hand.length - 1; i >= 0 && player.alive && !this.gameOver; i--) {
+      if (!player.isWounded()) break;
+      const c = player.hand[i];
+      if (c.kind !== CardKind.Peach) continue;
+      if (!(await controller.wantsToUsePeachSelfHeal(player))) continue;
+      player.hand.splice(i, 1);
+      this.discardPile.push(c);
+      await this.checkHandEmptied(player);
+      await resolvePeachSelfHeal(this.makeContext(this.players.filter((p) => p.alive)), player);
+      this.onLiveUpdate?.();
+    }
+
     // Proactive self-action skills (e.g. Kurou, Dianwei's Qiangxi, Huatuo's Qingnang): once each
     // per Play phase, gated by wantsToUseSelfAction. Run before the other tricks so any cards
     // drawn (e.g. Kurou's) are available for the rest of the phase.
@@ -556,6 +575,9 @@ export class Room {
     addPlayCard(player.hand.filter((c) => c.kind === CardKind.ArcheryAttack), CardKind.ArcheryAttack);
     addPlayCard(player.hand.filter((c) => c.kind === CardKind.GodSalvation), CardKind.GodSalvation);
     addPlayCard(player.hand.filter((c) => c.kind === CardKind.AmazingGrace), CardKind.AmazingGrace);
+    if (player.isWounded()) {
+      addPlayCard(player.hand.filter((c) => c.kind === CardKind.Peach), CardKind.Peach);
+    }
 
     for (const skill of player.skills) {
       if (usedSkillsThisTurn.has(skill.name)) continue;
@@ -696,6 +718,13 @@ export class Room {
           (_c, alive) => resolveAmazingGrace(this.makeContext(alive), player),
           card,
         );
+        return false;
+      case CardKind.Peach:
+        player.hand.splice(player.hand.indexOf(card), 1);
+        this.discardPile.push(card);
+        await this.checkHandEmptied(player);
+        await resolvePeachSelfHeal(this.makeContext(this.players.filter((p) => p.alive)), player);
+        this.onLiveUpdate?.();
         return false;
       default:
         return false;

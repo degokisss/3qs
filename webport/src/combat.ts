@@ -197,6 +197,11 @@ export interface EngineContext {
    *  `candidates` pool. Must return one of `candidates` -- an invalid/missing return falls back
    *  to `candidates[0]` (see trick.ts's resolveAmazingGrace). */
   askPickCard: (player: GamePlayer, candidates: Card[]) => Promise<Card>;
+  /** Ally rescue: does `rescuer` want to play a held Peach (or viewAs, e.g. Jijiu) to save
+   *  `dyingPlayer`? Only called when `rescuer` actually holds one -- asked of every OTHER alive
+   *  player, in turn order starting right after the dying player, only once the dying player's
+   *  own self-rescue (`askPeach`) has declined or run out. */
+  askPeachForOther: (rescuer: GamePlayer, dyingPlayer: GamePlayer) => Promise<boolean>;
   /** Fired once, right when a player's hp first drops to <=0, before the Peach-rescue loop --
    *  broadcast to every OTHER alive player's skills (e.g. Tianfeng's Suishi). */
   onDyingStarted?: (player: GamePlayer) => Promise<void> | void;
@@ -319,21 +324,45 @@ export async function heal(ctx: EngineContext, player: GamePlayer, amount: numbe
 }
 
 /**
- * Player::askForPeaches equivalent: while hp <= 0, offer Peach to the dying player first (only
- * self-rescue is modeled for now -- real ally-aware rescue needs the AI this milestone defers),
- * then give up and let the caller record the death with the credited killer role.
+ * Player::askForPeaches equivalent: while hp <= 0, offer Peach to the dying player first
+ * (self-rescue), then -- if they can't or won't -- every OTHER alive player in turn order
+ * (starting right after the dying player, wrapping around the table) gets one chance to play
+ * their own held Peach to save them. Repeats (self first, then the rescue round) each time hp is
+ * still <=0 after a successful save's +1, same as the real "keep asking until >0 or nobody can
+ * help" loop, until nobody at all can or will help, then gives up and records the death.
  */
 async function resolveDying(ctx: EngineContext, player: GamePlayer, killerRole: Role | null): Promise<void> {
   ctx.log.push(`${player.id} is dying (hp ${player.hp})`);
   await ctx.onDyingStarted?.(player);
   while (player.hp <= 0) {
-    const peach = findPeachLikeCard(player);
-    if (!peach || !(await ctx.askPeach(player))) break;
-    player.hand.splice(player.hand.indexOf(peach), 1);
-    ctx.discardPile.push(peach);
-    if (peach.kind !== CardKind.Peach) ctx.log.push(`${player.id} views a card as peach (viewAs skill)`);
-    await heal(ctx, player, 1);
-    ctx.log.push(`${player.id} uses peach to recover (hp ${player.hp}/${player.maxHp})`);
+    const selfPeach = findPeachLikeCard(player);
+    if (selfPeach && (await ctx.askPeach(player))) {
+      player.hand.splice(player.hand.indexOf(selfPeach), 1);
+      ctx.discardPile.push(selfPeach);
+      if (selfPeach.kind !== CardKind.Peach) ctx.log.push(`${player.id} views a card as peach (viewAs skill)`);
+      await heal(ctx, player, 1);
+      ctx.log.push(`${player.id} uses peach to recover (hp ${player.hp}/${player.maxHp})`);
+      continue;
+    }
+
+    // Self-rescue declined/unavailable -- offer every OTHER alive player one chance each, in
+    // turn order starting right after the dying player.
+    const dyingIdx = ctx.alivePlayers.indexOf(player);
+    const n = ctx.alivePlayers.length;
+    let rescued = false;
+    for (let i = 1; i < n; i++) {
+      const rescuer = ctx.alivePlayers[(dyingIdx + i) % n];
+      const peach = findPeachLikeCard(rescuer);
+      if (!peach || !(await ctx.askPeachForOther(rescuer, player))) continue;
+      rescuer.hand.splice(rescuer.hand.indexOf(peach), 1);
+      ctx.discardPile.push(peach);
+      if (peach.kind !== CardKind.Peach) ctx.log.push(`${rescuer.id} views a card as peach (viewAs skill)`);
+      await heal(ctx, player, 1);
+      ctx.log.push(`${rescuer.id} uses peach to save ${player.id} (hp ${player.hp}/${player.maxHp})`);
+      rescued = true;
+      break;
+    }
+    if (!rescued) break; // nobody could or would help this round -- give up
   }
   if (player.hp <= 0) ctx.onDying(player, killerRole);
 }

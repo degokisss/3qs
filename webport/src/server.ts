@@ -201,6 +201,16 @@ function makeHumanController(gr: GameRoom, playerId: string): Partial<Controller
       askClient(gr, playerId, { type: "confirmDodge", actorId: playerId }, (msg) => msg.value !== false, true),
     wantsToUsePeach: () =>
       askClient(gr, playerId, { type: "confirmPeach", actorId: playerId }, (msg) => msg.value !== false, true),
+    wantsToUsePeachForOther: (_rescuer, dyingPlayer) =>
+      askClient(
+        gr,
+        playerId,
+        { type: "confirmPeachForOther", actorId: playerId, dyingPlayerId: dyingPlayer.id },
+        (msg) => msg.value === true,
+        false, // fallback on timeout/disconnect: matches the bot default -- ally rescue spends
+        // MY resource to help someone else, so a silent human is assumed to decline, same
+        // "offensive/optional-resource action" policy as wantsToPlayTrick above
+      ),
     wantsToPlaySlashInDuel: () =>
       askClient(gr, playerId, { type: "confirmDuelSlash", actorId: playerId }, (msg) => msg.value !== false, true),
     wantsToDiscardForGanglie: () =>

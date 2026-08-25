@@ -1415,6 +1415,7 @@
           "confirmTrick",
           "confirmDodge",
           "confirmPeach",
+          "confirmPeachForOther",
           "confirmDuelSlash",
           "confirmGanglieDiscard",
           "confirmSavageAssaultSlash",
@@ -1438,6 +1439,15 @@
             showConfirm(msg, `${IMG}/card/${msg.kind}.png`, `Dùng ${TRICK_LABEL[msg.kind] || msg.kind}?`, "Bạn có muốn dùng lá bài này không?");
           else if (msg.type === "confirmDodge") showConfirm(msg, `${IMG}/card/jink.png`, "Bị Sát!", "Dùng Thiểm để né?");
           else if (msg.type === "confirmPeach") showConfirm(msg, `${IMG}/card/peach.png`, "Đang hấp hối!", "Dùng Đào để tự cứu?");
+          else if (msg.type === "confirmPeachForOther") {
+            const dying = lastState?.players.find((p) => p.id === msg.dyingPlayerId);
+            showConfirm(
+              msg,
+              `${IMG}/card/peach.png`,
+              `${dying?.generalName || dying?.general || msg.dyingPlayerId} đang hấp hối!`,
+              "Dùng Đào để cứu đồng minh?",
+            );
+          }
           else if (msg.type === "confirmDuelSlash")
             showConfirm(msg, `${IMG}/card/slash.png`, "Đang trong Quyết Đấu!", "Đánh ra Sát để tiếp tục?");
           else if (msg.type === "confirmGanglieDiscard")

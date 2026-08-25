@@ -153,6 +153,15 @@ export async function resolveGodSalvation(ctx: EngineContext): Promise<void> {
   }
 }
 
+/** Peach played proactively (not during a dying rescue): heals the player 1 hp. Real Sanguosha
+ *  lets a player play any number of held Peaches on themselves during their own Play phase
+ *  while wounded -- no once-per-turn cap (only Slash has an explicit per-turn limit). */
+export async function resolvePeachSelfHeal(ctx: EngineContext, player: GamePlayer): Promise<void> {
+  await heal(ctx, player, 1);
+  ctx.log.push(`${player.id} uses peach to recover (hp ${player.hp}/${player.maxHp})`);
+}
+
+
 /** Amazing Grace: reveals `n` cards (n = number of alive players) face-up, then each player in
  *  turn order STARTING FROM `source` (the player who played it) picks exactly one, one at a
  *  time, until the pool is empty -- not a random/simultaneous draw. If the draw pile runs out
