@@ -230,7 +230,7 @@ export async function resolveSlash(
   slashCard: Card,
 ): Promise<void> {
   ctx.discardPile.push(slashCard);
-  ctx.log.push(`${attacker.id} slashes ${target.id}`);
+  ctx.log.push(`${attacker.id} xuất Sát vào ${target.id}`);
   attacker.playedSlashThisTurn = true;
   // Analeptic's damage-boost mark ("drank") is consumed the instant a Slash begins resolving --
   // matches the upstream engine's `Slash::onEffect`, which reads/clears it before the Jink-dodge
@@ -245,11 +245,11 @@ export async function resolveSlash(
     if (!skill.onIncomingSlash) continue;
     const result = await skill.onIncomingSlash(ctx, attacker, target);
     if (result?.nullify) {
-      ctx.log.push(`${target.id} nullifies the slash`);
+      ctx.log.push(`${target.id} vô hiệu hóa Sát`);
       return;
     }
     if (result?.redirectTo && result.redirectTo.alive && result.redirectTo !== target) {
-      ctx.log.push(`${target.id} redirects the slash to ${result.redirectTo.id}`);
+      ctx.log.push(`${target.id} chuyển hướng Sát sang ${result.redirectTo.id}`);
       effectiveTarget = result.redirectTo;
       break;
     }
@@ -282,9 +282,9 @@ export async function resolveSlash(
     if (allFound) {
       ctx.discardPile.push(...spent);
       for (const c of spent) {
-        if (c.kind !== CardKind.Jink) ctx.log.push(`${effectiveTarget.id} views a card as jink (viewAs skill)`);
+        if (c.kind !== CardKind.Jink) ctx.log.push(`${effectiveTarget.id} biến 1 lá bài thành Thiểm (kỹ năng biến hóa)`);
       }
-      ctx.log.push(`${effectiveTarget.id} dodges with jink${spent.length > 1 ? ` (x${spent.length})` : ""}`);
+      ctx.log.push(`${effectiveTarget.id} né bằng Thiểm${spent.length > 1 ? ` (x${spent.length})` : ""}`);
       for (const skill of attacker.skills) await skill.onSlashDodged?.(ctx, attacker, effectiveTarget);
       for (const skill of effectiveTarget.skills) await skill.onSlashDodged?.(ctx, attacker, effectiveTarget);
       return;
@@ -292,7 +292,7 @@ export async function resolveSlash(
     // Couldn't complete the required set (e.g. only 1 of Wushuang's 2 jinks): nothing was
     // actually played, so return the tentatively-removed card(s) to hand instead of discarding.
     effectiveTarget.hand.push(...spent);
-    ctx.log.push(`${effectiveTarget.id} could not find ${requiredJinks} jinks and takes the hit`);
+    ctx.log.push(`${effectiveTarget.id} không đủ ${requiredJinks} lá Thiểm nên chịu đòn`);
   }
 
   await applyDamage(ctx, effectiveTarget, 1 + analepticBonus, attacker);
@@ -311,12 +311,12 @@ export async function applyDamage(ctx: EngineContext, target: GamePlayer, amount
     if (skill.reduceDamage) finalAmount = await skill.reduceDamage(ctx, target, source, finalAmount);
   }
   if (finalAmount <= 0) {
-    ctx.log.push(`${target.id} takes no damage (reduced to 0)`);
+    ctx.log.push(`${target.id} không chịu sát thương (đã giảm về 0)`);
     return;
   }
 
   target.hp -= finalAmount;
-  ctx.log.push(`${target.id} takes ${finalAmount} damage (hp ${target.hp}/${target.maxHp})`);
+  ctx.log.push(`${target.id} chịu ${finalAmount} sát thương (máu ${target.hp}/${target.maxHp})`);
   await ctx.onDamage?.(target, source);
   await ctx.onDamageDealt?.(source, target, finalAmount);
   if (target.hp <= 0) await resolveDying(ctx, target, source.role);
@@ -327,7 +327,7 @@ export async function applyDamage(ctx: EngineContext, target: GamePlayer, amount
  *  self-inflicted loss credits no side (e.g. Kurou). */
 export async function loseHp(ctx: EngineContext, player: GamePlayer, amount: number): Promise<void> {
   player.hp -= amount;
-  ctx.log.push(`${player.id} loses ${amount} hp (hp ${player.hp}/${player.maxHp})`);
+  ctx.log.push(`${player.id} mất ${amount} máu (máu ${player.hp}/${player.maxHp})`);
   if (player.hp <= 0) await resolveDying(ctx, player, null);
 }
 
@@ -352,7 +352,7 @@ export async function heal(ctx: EngineContext, player: GamePlayer, amount: numbe
  * help" loop, until nobody at all can or will help, then gives up and records the death.
  */
 async function resolveDying(ctx: EngineContext, player: GamePlayer, killerRole: Role | null): Promise<void> {
-  ctx.log.push(`${player.id} is dying (hp ${player.hp})`);
+  ctx.log.push(`${player.id} đang hấp hối (máu ${player.hp})`);
   await ctx.onDyingStarted?.(player);
   while (player.hp <= 0) {
     const selfCard = findRescueCard(player);
@@ -360,9 +360,10 @@ async function resolveDying(ctx: EngineContext, player: GamePlayer, killerRole: 
       player.hand.splice(player.hand.indexOf(selfCard), 1);
       ctx.discardPile.push(selfCard);
       const label = rescueCardLabel(selfCard);
-      if (!label) ctx.log.push(`${player.id} views a card as peach (viewAs skill)`);
+      const vnLabel = label === "analeptic" ? "Tửu" : "Đào";
+      if (!label) ctx.log.push(`${player.id} biến 1 lá bài thành Đào (kỹ năng biến hóa)`);
       await heal(ctx, player, 1);
-      ctx.log.push(`${player.id} uses ${label ?? "peach"} to recover (hp ${player.hp}/${player.maxHp})`);
+      ctx.log.push(`${player.id} dùng ${vnLabel} để hồi phục (máu ${player.hp}/${player.maxHp})`);
       continue;
     }
 
@@ -378,9 +379,10 @@ async function resolveDying(ctx: EngineContext, player: GamePlayer, killerRole: 
       rescuer.hand.splice(rescuer.hand.indexOf(card), 1);
       ctx.discardPile.push(card);
       const label = rescueCardLabel(card);
-      if (!label) ctx.log.push(`${rescuer.id} views a card as peach (viewAs skill)`);
+      const vnLabel = label === "analeptic" ? "Tửu" : "Đào";
+      if (!label) ctx.log.push(`${rescuer.id} biến 1 lá bài thành Đào (kỹ năng biến hóa)`);
       await heal(ctx, player, 1);
-      ctx.log.push(`${rescuer.id} uses ${label ?? "peach"} to save ${player.id} (hp ${player.hp}/${player.maxHp})`);
+      ctx.log.push(`${rescuer.id} dùng ${vnLabel} cứu ${player.id} (máu ${player.hp}/${player.maxHp})`);
       rescued = true;
       break;
     }

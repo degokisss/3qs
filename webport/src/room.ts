@@ -7,7 +7,7 @@
 import { Card, CardKind, Suit, buildStandardDeck, shuffle } from "./card.js";
 import { GamePlayer } from "./player.js";
 import { Phase, PHASE_ORDER, Role } from "./types.js";
-import { assignRoles, checkWinCondition, WinResult } from "./gamerule.js";
+import { assignRoles, checkWinCondition, ROLE_LABEL_VI, WinResult } from "./gamerule.js";
 import {
   EngineContext,
   allDismantlementLikeCards,
@@ -36,6 +36,15 @@ import {
   resolveSnatch,
   snatchCandidates,
 } from "./trick.js";
+
+// Vietnamese labels for the trick kinds tryPlayTargeted's viewAs/weimu-immune log lines embed --
+// mirrors the client's own TRICK_LABEL (public/index.html); only Dismantlement/Snatch/Duel ever
+// reach tryPlayTargeted, so those are the only entries needed here.
+const TRICK_LABEL_VI: Partial<Record<CardKind, string>> = {
+  [CardKind.Dismantlement]: "Quá Hạ Sách Kiều",
+  [CardKind.Snatch]: "Thuận Thủ Khiên Dương",
+  [CardKind.Duel]: "Quyết Đấu",
+};
 
 export class Room {
   readonly players: GamePlayer[];
@@ -119,14 +128,14 @@ export class Room {
       player.skills = chosen.skillNames.map((s) => SKILLS[s]);
       player.maxHp = chosen.maxHp;
       player.hp = chosen.maxHp;
-      this.log.push(`${player.id} chooses ${chosen.displayName}`);
+      this.log.push(`${player.id} chọn tướng ${chosen.displayName}`);
       onStep?.();
     }
     this.pickTurnPlayerId = null;
     for (const player of this.players) {
       player.hand = this.drawPile.splice(0, player.maxHp); // initial hand size == max hp
     }
-    this.log.push(`Game start: ${this.players.map((p) => `${p.id}=${p.role}/${p.general}`).join(", ")}`);
+    this.log.push(`Bắt đầu ván đấu: ${this.players.map((p) => `${p.id}=${ROLE_LABEL_VI[p.role]}/${p.generalName}`).join(", ")}`);
     onStep?.();
   }
 
@@ -160,7 +169,7 @@ export class Room {
 
   private async discardDownToLimit(player: GamePlayer): Promise<void> {
     if (player.skills.some((s) => s.skipsDiscardPhase?.(player))) {
-      this.log.push(`${player.id} skips the discard phase (keji)`);
+      this.log.push(`${player.id} bỏ qua giai đoạn Bỏ bài (keji)`);
       return;
     }
     const over = player.handcardNum - player.maxCards;
@@ -173,7 +182,7 @@ export class Room {
     const discarded = distinctHeld.length === over ? distinctHeld : player.hand.slice(0, over);
     for (const c of discarded) player.hand.splice(player.hand.indexOf(c), 1);
     this.discardPile.push(...discarded);
-    this.log.push(`${player.id} discards ${discarded.length} card(s) (hand limit ${player.maxCards})`);
+    this.log.push(`${player.id} bỏ ${discarded.length} lá bài (giới hạn bài ${player.maxCards})`);
 
     // Guzheng (Erzhang): every OTHER alive player may claim one of these discarded cards.
     for (const p of this.players.filter((p) => p.alive && p !== player)) {
@@ -190,7 +199,7 @@ export class Room {
     const target = this.players.find((p) => p.id === targetId);
     if (!target || !target.alive) return;
     target.hp -= amount;
-    this.log.push(`${target.id} takes ${amount} damage (hp ${target.hp}/${target.maxHp})`);
+    this.log.push(`${target.id} chịu ${amount} sát thương (máu ${target.hp}/${target.maxHp})`);
     if (target.hp <= 0) await this.killPlayer(target, sourceRole);
   }
 
@@ -203,19 +212,19 @@ export class Room {
     const claimant = this.players.find((p) => p.alive && p !== player && p.skills.some((s) => s.claimsDeathCards));
     if (claimant && player.hand.length > 0) {
       claimant.hand.push(...player.hand);
-      this.log.push(`${claimant.id} claims ${player.id}'s hand (xingshang)`);
+      this.log.push(`${claimant.id} nhận toàn bộ bài của ${player.id} (xingshang)`);
     } else {
       this.discardPile.push(...player.hand);
     }
     player.hand = [];
-    this.log.push(`${player.id} (${player.role}) dies`);
+    this.log.push(`${player.id} (${ROLE_LABEL_VI[player.role]}) qua đời`);
 
     if (!this.gameOver) {
       const lordKilledBy = player.role === Role.Lord ? killerRole : null;
       const result = checkWinCondition(this.players, lordKilledBy);
       if (result) {
         this.gameOver = result;
-        this.log.push(`Game over: ${result.winners.join("+")} win`);
+        this.log.push(`Kết thúc ván: ${result.winners.map((r) => ROLE_LABEL_VI[r]).join(" + ")} thắng`);
       }
     }
 
@@ -294,7 +303,7 @@ export class Room {
       replaced = player.offenseHorse;
       player.offenseHorse = equipCard;
     }
-    this.log.push(`${player.id} equips ${equipCard.weaponName ?? equipCard.horseName}`);
+    this.log.push(`${player.id} trang bị ${equipCard.weaponName ?? equipCard.horseName}`);
     if (replaced) {
       this.discardPile.push(replaced);
       // Xiaoji (Sunshangxiang): draws 2 whenever an equip of hers leaves the equip zone.
@@ -349,7 +358,7 @@ export class Room {
         if (pileIdx !== -1) {
           this.discardPile.splice(pileIdx, 1);
           claimant.hand.push(card);
-          this.log.push(`${claimant.id} takes the savage assault card (juxiang)`);
+          this.log.push(`${claimant.id} nhận lại lá Nam Man Nhập Xâm vừa dùng (juxiang)`);
         }
       }
     }
@@ -386,11 +395,11 @@ export class Room {
 
     player.hand.splice(player.hand.indexOf(card), 1);
     this.discardPile.push(card);
-    if (card.kind !== kind) this.log.push(`${player.id} views a card as ${kind} (viewAs skill)`);
+    if (card.kind !== kind) this.log.push(`${player.id} biến 1 lá bài thành ${TRICK_LABEL_VI[kind] ?? kind} (kỹ năng biến hóa)`);
     await this.checkHandEmptied(player);
 
     if (blackTrickBlocked) {
-      this.log.push(`${target.id} is immune to this ${kind} (weimu)`);
+      this.log.push(`${target.id} miễn nhiễm với ${TRICK_LABEL_VI[kind] ?? kind} này (weimu)`);
       for (const skill of player.skills) await skill.onTrickPlayed?.(this.makeContext(alive), player, kind);
       this.onLiveUpdate?.();
       return;
@@ -410,7 +419,7 @@ export class Room {
     if (candidates.length === 0) return false;
     const target = await this.controllers.get(player.id)!.chooseSlashTarget(player, candidates);
     if (!target) return false;
-    if (slashCard.kind !== CardKind.Slash) this.log.push(`${player.id} views a card as slash (viewAs skill)`);
+    if (slashCard.kind !== CardKind.Slash) this.log.push(`${player.id} biến 1 lá bài thành Sát (kỹ năng biến hóa)`);
     player.hand.splice(player.hand.indexOf(slashCard), 1);
     await this.checkHandEmptied(player);
     await resolveSlash(this.makeContext(alive), player, target, slashCard);
@@ -789,7 +798,7 @@ export class Room {
         const drawCount = Math.max(0, 2 + drawBonus);
         await this.controllers.get(player.id)!.wantsToDrawNow(player, drawCount);
         this.drawCards(player, drawCount);
-        if (drawBonus !== 0) this.log.push(`${player.id} draws ${2 + drawBonus} card(s) this phase (${drawBonus > 0 ? "yingzi" : "luoyi"})`);
+        if (drawBonus !== 0) this.log.push(`${player.id} bốc ${2 + drawBonus} lá trong giai đoạn này (${drawBonus > 0 ? "yingzi" : "luoyi"})`);
         this.onLiveUpdate?.(); // the human seat's own draw-pile click is otherwise invisible to
         // spectators/other seats until the whole turn finishes -- broadcast the hand right away
         for (const skill of player.skills) {
@@ -822,7 +831,7 @@ export class Room {
       return;
     }
     this.turnNumber++;
-    this.log.push(`--- Turn ${this.turnNumber}: ${player.id} (${player.role}) ---`);
+    this.log.push(`--- Lượt ${this.turnNumber}: ${player.id} (${ROLE_LABEL_VI[player.role]}) ---`);
     player.playedSlashThisTurn = false;
     player.luoyiArmedThisTurn = false;
     player.duelViewAsBlackAllowed = null;

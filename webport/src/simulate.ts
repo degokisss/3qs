@@ -347,7 +347,7 @@ async function testFreeformPlayAOECardIsOfferedAndResolves(): Promise<void> {
 
   strict.ok(played, "the freeform legalActions list must have offered the seeded savage assault card");
   strict.ok(!lord.hand.some((c) => c.id === savageAssault.id), "the played savage assault card must have left the hand");
-  strict.ok(room.log.some((l) => l.includes("uses savage assault")), "savage assault must have actually resolved (log line present)");
+  strict.ok(room.log.some((l) => l.includes("dùng Nam Man Nhập Xâm")), "savage assault must have actually resolved (log line present)");
   for (const before of othersBefore) {
     const after = room.players.find((p) => p.id === before.id)!;
     const immune = after.skills.some((s) => s.immuneToSavageAssault?.(after));
@@ -398,7 +398,7 @@ async function testFreeformPlayLetsHumanSelfHealWithPeach(): Promise<void> {
   strict.ok(played, "the freeform legalActions list must have offered the seeded peach card while wounded");
   strict.equal(lord.hp, woundedHp + 1, "playing the peach on themselves must heal exactly 1 hp");
   strict.ok(!lord.hand.some((c) => c.id === peach.id), "the played peach card must have left the hand");
-  strict.ok(room.log.some((l) => l.includes("uses peach to recover")), "the self-heal must actually resolve (log line present)");
+  strict.ok(room.log.some((l) => l.includes("dùng Đào để hồi phục")), "the self-heal must actually resolve (log line present)");
   console.log("PASS testFreeformPlayLetsHumanSelfHealWithPeach: peach appeared in legalActions while wounded, played, healed 1 hp");
 }
 
@@ -453,7 +453,7 @@ async function testFreeformPlayLetsHumanBuffSlashWithAnaleptic(): Promise<void> 
   strict.ok(slashPlayed, "the freeform legalActions list must have offered the seeded slash card");
   strict.ok(targetRef.current, "chooseSlashTarget must have been asked and picked a target");
   strict.equal(targetRef.current!.hp, hpBefore - 2, "the buffed slash must deal 2 damage (1 base + 1 analeptic bonus), not 1");
-  strict.ok(room.log.some((l) => l.includes("drinks analeptic")), "the buff-arm must actually resolve (log line present)");
+  strict.ok(room.log.some((l) => l.includes("uống Tửu")), "the buff-arm must actually resolve (log line present)");
   strict.equal(lord.pendingSlashBonusDamage, 0, "the bonus must be fully consumed by the one slash it buffed, none left pending");
   console.log("PASS testFreeformPlayLetsHumanBuffSlashWithAnaleptic: analeptic armed +1, the following slash dealt 2 damage total");
 }
@@ -500,7 +500,7 @@ async function testAllyRescuePeachSavesADyingPlayer(): Promise<void> {
   strict.equal(dying.hp, 1, "a successful rescue must heal exactly back to 1 hp (from 0)");
   strict.ok(!rescuer.hand.some((c) => c.id === peach2.id), "the rescuer's peach must actually be spent");
   strict.ok(decliner.hand.some((c) => c.id === peach1.id), "the decliner's peach must remain unspent -- they said no");
-  strict.ok(log.some((l) => l === `${rescuer.id} uses peach to save ${dying.id} (hp 1/1)`), "the rescue log line must credit the actual rescuer and victim");
+  strict.ok(log.some((l) => l === `${rescuer.id} dùng Đào cứu ${dying.id} (máu 1/1)`), "the rescue log line must credit the actual rescuer and victim");
   console.log("PASS testAllyRescuePeachSavesADyingPlayer: self-rescue declined, first ally declined, second ally's peach saved the dying player");
 }
 
@@ -531,8 +531,8 @@ async function testAnalepticSelfRescuesADyingPlayer(): Promise<void> {
   strict.equal(dying.alive, true, "the analeptic self-rescue must have saved the dying player");
   strict.equal(dying.hp, 1, "a successful rescue must heal exactly back to 1 hp (from 0)");
   strict.ok(!dying.hand.some((c) => c.id === analeptic.id), "the analeptic must actually be spent");
-  strict.ok(log.some((l) => l === `${dying.id} uses analeptic to recover (hp 1/1)`), "the log must credit analeptic by name, not peach");
-  strict.ok(!log.some((l) => l.includes("views a card as peach")), "a REAL analeptic card is not a viewAs-skill substitution -- must not log as one");
+  strict.ok(log.some((l) => l === `${dying.id} dùng Tửu để hồi phục (máu 1/1)`), "the log must credit analeptic by name, not peach");
+  strict.ok(!log.some((l) => l.includes("biến 1 lá bài thành Đào")), "a REAL analeptic card is not a viewAs-skill substitution -- must not log as one");
   console.log("PASS testAnalepticSelfRescuesADyingPlayer: a real analeptic card saved the dying player, logged correctly as analeptic");
 }
 
@@ -712,15 +712,15 @@ async function testEmergentCombatReachesWinCondition(): Promise<void> {
 async function testEquipAndTricksAppearInPlay(): Promise<void> {
   const seen = new Set<string>();
   const markers: [string, RegExp][] = [
-    ["equip", /equips/],
-    ["ex nihilo", /ex nihilo/],
-    ["dismantlement", /dismantlement/],
-    ["snatch", /snatches/],
-    ["duel", /duels|plays slash in the duel/],
-    ["savage assault", /savage assault/],
-    ["archery attack", /archery attack/],
-    ["amazing grace", /amazing grace/],
-    ["god salvation", /god salvation/],
+    ["equip", /trang bị/],
+    ["ex nihilo", /Vô Trung Sinh Hữu/],
+    ["dismantlement", /Quá Hạ Sách Kiều/],
+    ["snatch", /cướp 1 lá bài/],
+    ["duel", /Quyết Đấu/],
+    ["savage assault", /Nam Man Nhập Xâm/],
+    ["archery attack", /Vạn Tiễn Tề Phát/],
+    ["amazing grace", /Ngũ Cốc Phong Đăng/],
+    ["god salvation", /Đào Viên Kết Nghĩa/],
   ];
   for (let seed = 100; seed < 140; seed++) {
     const room = new Room(playerIds(8), seededRng(seed));
@@ -747,16 +747,16 @@ async function testGeneralSkillsAppearInPlay(): Promise<void> {
   const generalsSeen = new Set<string>();
   let sawMultiSlashTurn = false;
   const markers: [string, string][] = [
-    ["slashViewAs", "views a card as slash (viewAs skill)"],
-    ["jinkViewAs", "views a card as jink (viewAs skill)"],
-    ["dismantlementViewAs", "views a card as dismantlement (viewAs skill)"],
-    ["peachViewAs", "views a card as peach (viewAs skill)"], // jijiu
-    ["ganglieJudge", "ganglie judge"],
-    ["ganglieDiscard", "discards 2 cards (ganglie)"],
-    ["tieqiJudge", "tieqi judge"],
-    ["tieqiBlock", "cannot dodge this slash (tieqi)"],
+    ["slashViewAs", "biến 1 lá bài thành Sát (kỹ năng biến hóa)"],
+    ["jinkViewAs", "biến 1 lá bài thành Thiểm (kỹ năng biến hóa)"],
+    ["dismantlementViewAs", "biến 1 lá bài thành Quá Hạ Sách Kiều (kỹ năng biến hóa)"],
+    ["peachViewAs", "biến 1 lá bài thành Đào (kỹ năng biến hóa)"], // jijiu
+    ["ganglieJudge", "phán Cương Liệt"],
+    ["ganglieDiscard", "bỏ 2 lá bài (ganglie)"],
+    ["tieqiJudge", "phán Thiết Kỵ"],
+    ["tieqiBlock", "không thể né Sát này (tieqi)"],
     ["fankuiTake", "(fankui)"],
-    ["kurouUse", "uses kurou"],
+    ["kurouUse", "dùng Khổ Nhục"],
     ["kuangguRecover", "(kuanggu)"],
     ["jianxiongTake", "(jianxiong)"],
     ["yingziBonus", "(yingzi)"],
@@ -769,7 +769,7 @@ async function testGeneralSkillsAppearInPlay(): Promise<void> {
     ["tuxiSteal", "(tuxi)"],
     ["luoyi", "(luoyi)"],
     ["yiji", "(yiji)"],
-    ["qiangxi", "uses qiangxi on"],
+    ["qiangxi", "dùng Cường Tập lên"],
     ["jieming", "(jieming)"],
     ["xingshangClaim", "(xingshang)"],
     ["xiaoguo", "(xiaoguo)"],
@@ -781,11 +781,11 @@ async function testGeneralSkillsAppearInPlay(): Promise<void> {
     ["guzheng", "(guzheng)"],
     ["qingnang", "(qingnang)"],
     ["biyue", "(biyue)"],
-    ["shuangxiongJudge", "shuangxiong judge:"],
+    ["shuangxiongJudge", "phán Song Hùng:"],
     ["weimuBlock", "(weimu)"],
     ["mengjin", "(mengjin)"],
-    ["leijiJudge", "leiji judge:"],
-    ["beigeJudge", "beige judge:"],
+    ["leijiJudge", "phán Lôi Kích:"],
+    ["beigeJudge", "phán Bi Ca:"],
     ["mingshiReduce", "(mingshi)"],
     ["sijian", "(sijian)"],
     ["suishiDraw", "(suishi)"],
@@ -800,8 +800,8 @@ async function testGeneralSkillsAppearInPlay(): Promise<void> {
 
     let currentTurnSlashCount = 0;
     for (const line of room.log) {
-      if (line.startsWith("--- Turn")) currentTurnSlashCount = 0;
-      if (/ slashes /.test(line)) {
+      if (line.startsWith("--- Lượt")) currentTurnSlashCount = 0;
+      if (/ xuất Sát vào /.test(line)) {
         currentTurnSlashCount++;
         if (currentTurnSlashCount > 1) sawMultiSlashTurn = true;
       }
@@ -1049,7 +1049,7 @@ async function testTieqiBlocksDodge(): Promise<void> {
   strict.equal(askDodgeCalled, false, "tieqi must block the dodge decision itself, not just decline it");
   strict.equal(target.hp, target.maxHp - 1, "damage must land since tieqi blocked the dodge");
   strict.ok(target.hand.includes(jink), "target's jink must remain unspent since the dodge was blocked");
-  strict.ok(log.some((l) => l.includes("cannot dodge this slash (tieqi)")));
+  strict.ok(log.some((l) => l.includes("không thể né Sát này (tieqi)")));
   console.log("PASS testTieqiBlocksDodge: red judge blocked the dodge decision, jink stayed in hand, damage landed");
 }
 
@@ -1177,8 +1177,8 @@ async function testHumanControllerOverridesBot(): Promise<void> {
   room.setController("P1", { chooseSlashTarget: async () => null });
   await room.runUntilGameOver(300);
 
-  const p1Attacked = room.log.some((line) => line.startsWith("P1 slashes"));
-  const someoneElseAttacked = room.log.some((line) => /^P[2-8] slashes/.test(line));
+  const p1Attacked = room.log.some((line) => line.startsWith("P1 xuất Sát vào"));
+  const someoneElseAttacked = room.log.some((line) => /^P[2-8] xuất Sát vào/.test(line));
   strict.equal(p1Attacked, false, "P1's controller always declines to slash; it must never attack");
   strict.ok(someoneElseAttacked, "some other (still bot-controlled) seat must still attack normally");
   console.log(
@@ -1219,14 +1219,14 @@ async function testExpandedControllerHooksRespected(): Promise<void> {
     room.setController("P1", declineAll);
     await room.runUntilGameOver(300);
     for (const line of room.log) {
-      if (/^P1 equips/.test(line)) p1Equipped = true;
-      if (/^P1 (draws 2 cards \(ex nihilo\)|duels|uses savage assault|uses archery attack)/.test(line)) p1SelfTrickSourced = true;
-      if (/^P1 dodges with jink/.test(line)) p1Dodged = true;
-      if (/^P1 uses peach to recover/.test(line)) p1Peached = true;
-      if (/^P[2-8] equips/.test(line)) otherEquipped = true;
-      if (/^P[2-8] (draws 2 cards \(ex nihilo\)|duels|uses savage assault|uses archery attack)/.test(line)) otherSelfTrickSourced = true;
-      if (/^P[2-8] dodges with jink/.test(line)) otherDodged = true;
-      if (/^P[2-8] uses peach to recover/.test(line)) otherPeached = true;
+      if (/^P1 trang bị/.test(line)) p1Equipped = true;
+      if (/^P1 (bốc 2 lá \(Vô Trung Sinh Hữu\)|dùng Quyết Đấu|dùng Nam Man Nhập Xâm|dùng Vạn Tiễn Tề Phát)/.test(line)) p1SelfTrickSourced = true;
+      if (/^P1 né bằng Thiểm/.test(line)) p1Dodged = true;
+      if (/^P1 dùng Đào để hồi phục/.test(line)) p1Peached = true;
+      if (/^P[2-8] trang bị/.test(line)) otherEquipped = true;
+      if (/^P[2-8] (bốc 2 lá \(Vô Trung Sinh Hữu\)|dùng Quyết Đấu|dùng Nam Man Nhập Xâm|dùng Vạn Tiễn Tề Phát)/.test(line)) otherSelfTrickSourced = true;
+      if (/^P[2-8] né bằng Thiểm/.test(line)) otherDodged = true;
+      if (/^P[2-8] dùng Đào để hồi phục/.test(line)) otherPeached = true;
     }
   }
 
@@ -1263,7 +1263,7 @@ async function testChooseTrickTargetPicksExactPlayer(): Promise<void> {
     });
     await room.runUntilGameOver(300);
     const lastDuelChoice = lastChosenByKind.get("duel");
-    if (lastDuelChoice && room.log.includes(`P1 duels ${lastDuelChoice}`)) {
+    if (lastDuelChoice && room.log.includes(`P1 dùng Quyết Đấu với ${lastDuelChoice}`)) {
       sawDuelWithChosenTarget = true;
     }
   }
@@ -1292,10 +1292,10 @@ async function testDuelSlashAndGanglieDiscardRespected(): Promise<void> {
     });
     await room.runUntilGameOver(300);
     for (const line of room.log) {
-      if (line === "P1 plays slash in the duel") p1PlayedSlashInDuel = true;
-      if (line === "P1 discards 2 cards (ganglie)") p1DiscardedForGanglie = true;
-      if (/^P[2-8] plays slash in the duel$/.test(line)) otherPlayedSlashInDuel = true;
-      if (/^P[2-8] discards 2 cards \(ganglie\)$/.test(line)) otherDiscardedForGanglie = true;
+      if (line === "P1 đánh Sát trong Quyết Đấu") p1PlayedSlashInDuel = true;
+      if (line === "P1 bỏ 2 lá bài (ganglie)") p1DiscardedForGanglie = true;
+      if (/^P[2-8] đánh Sát trong Quyết Đấu$/.test(line)) otherPlayedSlashInDuel = true;
+      if (/^P[2-8] bỏ 2 lá bài \(ganglie\)$/.test(line)) otherDiscardedForGanglie = true;
     }
   }
 

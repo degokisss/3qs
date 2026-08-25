@@ -42,6 +42,15 @@ export function assignRoles(players: GamePlayer[], rng: () => number = Math.rand
 
 export type WinResult = { winners: Role[] } | null;
 
+/** Vietnamese display labels for Role, mirroring the client's own `ROLE_LABEL` (public/index.html)
+ *  -- used by room.ts to translate the few log lines that embed a raw `player.role`/winners list. */
+export const ROLE_LABEL_VI: Record<Role, string> = {
+  [Role.Lord]: "Chủ công",
+  [Role.Loyalist]: "Trung thần",
+  [Role.Rebel]: "Phản tặc",
+  [Role.Renegade]: "Nội gián",
+};
+
 /**
  * Mirrors GameRule's BeforeGameOverJudge check for identity mode:
  * - Lord dead -> if killer was Rebel, rebels win; if killer was Renegade, renegade wins alone;

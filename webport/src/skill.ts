@@ -198,6 +198,14 @@ function isBlack(card: Card): boolean {
   return card.suit === Suit.Spade || card.suit === Suit.Club;
 }
 
+/** Vietnamese card-suit names for judge-card log lines (Ganglie/Tieqi/Shuangxiong/Leiji/Beige). */
+const SUIT_LABEL_VI: Record<Suit, string> = {
+  [Suit.Spade]: "Bích",
+  [Suit.Heart]: "Cơ",
+  [Suit.Club]: "Chuồn",
+  [Suit.Diamond]: "Rô",
+};
+
 /** Discards a uniformly random card from `player`'s hand, if any. Used by several skills below
  *  that force a discard without a specific-card choice UI (matches the Fankui/Kongcheng
  *  precedent of collapsing "choose which card" down to random). */
@@ -214,7 +222,7 @@ async function ganglieOnDamaged(ctx: EngineContext, player: GamePlayer, source: 
   const judgeCard = ctx.drawTop();
   if (!judgeCard) return;
   ctx.discardPile.push(judgeCard);
-  ctx.log.push(`${player.id} ganglie judge: ${judgeCard.suit} ${judgeCard.point}`);
+  ctx.log.push(`${player.id} phán Cương Liệt: ${SUIT_LABEL_VI[judgeCard.suit]} ${judgeCard.point}`);
   if (judgeCard.suit === Suit.Heart) return; // judge "good" (triggers the punishment) means NOT heart
 
   if (source.handcardNum >= 2 && (await ctx.askGanglieDiscard(source))) {
@@ -224,7 +232,7 @@ async function ganglieOnDamaged(ctx: EngineContext, player: GamePlayer, source: 
       discarded.push(source.hand.splice(idx, 1)[0]);
     }
     ctx.discardPile.push(...discarded);
-    ctx.log.push(`${source.id} discards 2 cards (ganglie)`);
+    ctx.log.push(`${source.id} bỏ 2 lá bài (ganglie)`);
   } else {
     await applyDamage(ctx, source, 1, player);
   }
@@ -234,9 +242,9 @@ async function tieqiOnSlashTargeted(ctx: EngineContext, attacker: GamePlayer, ta
   const judgeCard = ctx.drawTop();
   if (!judgeCard) return false;
   ctx.discardPile.push(judgeCard);
-  ctx.log.push(`${attacker.id} tieqi judge: ${judgeCard.suit} ${judgeCard.point}`);
+  ctx.log.push(`${attacker.id} phán Thiết Kỵ: ${SUIT_LABEL_VI[judgeCard.suit]} ${judgeCard.point}`);
   if (!isRed(judgeCard)) return false;
-  ctx.log.push(`${target.id} cannot dodge this slash (tieqi)`);
+  ctx.log.push(`${target.id} không thể né Sát này (tieqi)`);
   return true;
 }
 
@@ -245,14 +253,14 @@ async function fankuiOnDamaged(ctx: EngineContext, player: GamePlayer, source: G
   const idx = Math.floor(rng() * source.hand.length);
   const [stolen] = source.hand.splice(idx, 1);
   player.hand.push(stolen);
-  ctx.log.push(`${player.id} takes a card from ${source.id} (fankui)`);
+  ctx.log.push(`${player.id} lấy 1 lá từ ${source.id} (fankui)`);
 }
 
 async function kurouSelfAction(ctx: EngineContext, player: GamePlayer, _rng: () => number): Promise<void> {
   await loseHp(ctx, player, 1);
   if (!player.alive) return; // died from the self-inflicted hp loss; card use never completes
   ctx.draw(player, 2);
-  ctx.log.push(`${player.id} uses kurou: loses 1 hp, draws 2 cards`);
+  ctx.log.push(`${player.id} dùng Khổ Nhục: mất 1 máu, bốc 2 lá`);
 }
 
 async function kuangguOnDamageDealt(ctx: EngineContext, source: GamePlayer, target: GamePlayer, amount: number): Promise<void> {
@@ -261,19 +269,19 @@ async function kuangguOnDamageDealt(ctx: EngineContext, source: GamePlayer, targ
   const healAmount = Math.min(amount, source.maxHp - source.hp);
   if (healAmount <= 0) return;
   await heal(ctx, source, healAmount);
-  ctx.log.push(`${source.id} recovers ${healAmount} hp (kuanggu)`);
+  ctx.log.push(`${source.id} hồi ${healAmount} máu (kuanggu)`);
 }
 
 function jianxiongOnDamaged(ctx: EngineContext, player: GamePlayer): void {
   const card = ctx.discardPile.pop();
   if (!card) return;
   player.hand.push(card);
-  ctx.log.push(`${player.id} takes the discarded card (jianxiong)`);
+  ctx.log.push(`${player.id} nhận lá bài vừa bỏ (jianxiong)`);
 }
 
 async function jizhiOnTrickPlayed(ctx: EngineContext, player: GamePlayer): Promise<void> {
   ctx.draw(player, 1);
-  ctx.log.push(`${player.id} draws a card (jizhi)`);
+  ctx.log.push(`${player.id} bốc 1 lá (jizhi)`);
 }
 
 function liegongOnSlashTargeted(_ctx: EngineContext, attacker: GamePlayer, target: GamePlayer): boolean {
@@ -291,7 +299,7 @@ async function xiangleOnIncomingSlash(
   if (basicIdx !== -1 && (await ctx.askUseSelfAction(attacker, "xiangle"))) {
     const [paid] = attacker.hand.splice(basicIdx, 1);
     ctx.discardPile.push(paid);
-    ctx.log.push(`${attacker.id} discards a basic card (xiangle)`);
+    ctx.log.push(`${attacker.id} bỏ 1 lá cơ bản (xiangle)`);
     return;
   }
   return { nullify: true };
@@ -309,7 +317,7 @@ async function shushenOnRecover(ctx: EngineContext, player: GamePlayer, amount: 
     const to = await ctx.askChooseAnyPlayer(player, friends);
     if (!to) return;
     ctx.draw(to, 1);
-    ctx.log.push(`${to.id} draws a card (shushen)`);
+    ctx.log.push(`${to.id} bốc 1 lá (shushen)`);
   }
 }
 
@@ -319,10 +327,10 @@ const shenzhiAction = {
     if (player.handcardNum === 0 || !(await ctx.askUseSelfAction(player, "shenzhi"))) return;
     const n = player.handcardNum;
     ctx.discardPile.push(...player.hand.splice(0));
-    ctx.log.push(`${player.id} discards ${n} card(s) (shenzhi)`);
+    ctx.log.push(`${player.id} bỏ ${n} lá bài (shenzhi)`);
     if (n >= player.hp) {
       await heal(ctx, player, 1);
-      ctx.log.push(`${player.id} recovers 1 hp (shenzhi)`);
+      ctx.log.push(`${player.id} hồi 1 máu (shenzhi)`);
     }
   },
 };
@@ -340,7 +348,7 @@ const tuxiAction = {
       const idx = Math.floor(rng() * to.hand.length);
       const [stolen] = to.hand.splice(idx, 1);
       player.hand.push(stolen);
-      ctx.log.push(`${player.id} takes a card from ${to.id} (tuxi)`);
+      ctx.log.push(`${player.id} lấy 1 lá từ ${to.id} (tuxi)`);
     }
   },
 };
@@ -351,7 +359,7 @@ const luoyiAction = {
     if (!(await ctx.askUseSelfAction(player, "luoyi"))) return;
     player.luoyiArmedThisTurn = true;
     player.pendingBonusDamage += 1;
-    ctx.log.push(`${player.id} draws 1 fewer card, next damage +1 (luoyi)`);
+    ctx.log.push(`${player.id} bốc ít hơn 1 lá, sát thương tiếp theo +1 (luoyi)`);
   },
 };
 
@@ -363,7 +371,7 @@ async function yijiOnDamaged(ctx: EngineContext, player: GamePlayer): Promise<vo
     const to = await ctx.askChooseAnyPlayer(player, ctx.alivePlayers);
     const recipient = to ?? player;
     recipient.hand.push(card);
-    ctx.log.push(`${recipient.id} takes a revealed card (yiji)`);
+    ctx.log.push(`${recipient.id} nhận 1 lá được lật (yiji)`);
   }
 }
 
@@ -374,7 +382,7 @@ const qiangxiAction = {
   async run(ctx: EngineContext, player: GamePlayer, target: GamePlayer): Promise<void> {
     await loseHp(ctx, player, 1);
     if (!player.alive) return;
-    ctx.log.push(`${player.id} uses qiangxi on ${target.id}`);
+    ctx.log.push(`${player.id} dùng Cường Tập lên ${target.id}`);
     await applyDamage(ctx, target, 1, player); // bypasses the Jink check entirely
   },
 };
@@ -387,7 +395,7 @@ async function jiemingOnDamaged(ctx: EngineContext, player: GamePlayer): Promise
   const x = upper - to.handcardNum;
   if (x > 0) {
     ctx.draw(to, x);
-    ctx.log.push(`${to.id} draws ${x} card(s) (jieming)`);
+    ctx.log.push(`${to.id} bốc ${x} lá (jieming)`);
   }
 }
 
@@ -398,7 +406,7 @@ async function xiaoguoFinishReaction(ctx: EngineContext, yuejin: GamePlayer, fin
   if (basicIdx === -1 || !(await ctx.askUseSelfAction(yuejin, "xiaoguo"))) return;
   const [paid] = yuejin.hand.splice(basicIdx, 1);
   ctx.discardPile.push(paid);
-  ctx.log.push(`${yuejin.id} discards a basic card (xiaoguo)`);
+  ctx.log.push(`${yuejin.id} bỏ 1 lá cơ bản (xiaoguo)`);
 
   const equipped = finishingPlayer.weapon || finishingPlayer.defenseHorse || finishingPlayer.offenseHorse;
   if (equipped && (await ctx.askUseSelfAction(finishingPlayer, "xiaoguo-defend"))) {
@@ -409,7 +417,7 @@ async function xiaoguoFinishReaction(ctx: EngineContext, yuejin: GamePlayer, fin
         : "offenseHorse";
     ctx.discardPile.push(finishingPlayer[slot]!);
     finishingPlayer[slot] = null;
-    ctx.log.push(`${finishingPlayer.id} discards an equipped card (xiaoguo)`);
+    ctx.log.push(`${finishingPlayer.id} bỏ 1 lá trang bị (xiaoguo)`);
   } else {
     await applyDamage(ctx, finishingPlayer, 1, yuejin);
   }
@@ -431,13 +439,13 @@ async function liuliOnIncomingSlash(
   const idx = Math.floor(Math.random() * defender.hand.length);
   const [paid] = defender.hand.splice(idx, 1);
   ctx.discardPile.push(paid);
-  ctx.log.push(`${defender.id} discards a card (liuli)`);
+  ctx.log.push(`${defender.id} bỏ 1 lá bài (liuli)`);
   return { redirectTo: to };
 }
 
 async function xiaojiOnEquipLost(ctx: EngineContext, player: GamePlayer): Promise<void> {
   ctx.draw(player, 2);
-  ctx.log.push(`${player.id} draws 2 cards (xiaoji)`);
+  ctx.log.push(`${player.id} bốc 2 lá (xiaoji)`);
 }
 
 const yinghunAction = {
@@ -451,7 +459,7 @@ const yinghunAction = {
     const x = player.maxHp - player.hp;
     ctx.draw(to, x === 1 ? 1 : x);
     discardRandom(ctx, to, rng);
-    ctx.log.push(`${to.id} draws and discards (yinghun)`);
+    ctx.log.push(`${to.id} bốc rồi bỏ bài (yinghun)`);
   },
 };
 
@@ -464,7 +472,7 @@ async function haoshiAfterDrawPhase(ctx: EngineContext, lusu: GamePlayer): Promi
   const n = Math.floor(lusu.handcardNum / 2);
   const given = lusu.hand.splice(0, n);
   beggar.hand.push(...given);
-  ctx.log.push(`${lusu.id} gives ${n} card(s) to ${beggar.id} (haoshi)`);
+  ctx.log.push(`${lusu.id} cho ${beggar.id} ${n} lá bài (haoshi)`);
 }
 
 async function guzhengOnOtherPlayerOverDiscard(
@@ -481,7 +489,7 @@ async function guzhengOnOtherPlayerOverDiscard(
   if (pileIdx === -1) return;
   ctx.discardPile.splice(pileIdx, 1);
   erzhang.hand.push(card);
-  ctx.log.push(`${erzhang.id} takes ${discardingPlayer.id}'s discarded card (guzheng)`);
+  ctx.log.push(`${erzhang.id} lấy lá bài vừa bỏ của ${discardingPlayer.id} (guzheng)`);
 }
 
 const qingnangAction = {
@@ -492,7 +500,7 @@ const qingnangAction = {
     if (player.handcardNum === 0) return;
     discardRandom(ctx, player, rng);
     await heal(ctx, target, 1);
-    ctx.log.push(`${target.id} recovers 1 hp (qingnang)`);
+    ctx.log.push(`${target.id} hồi 1 máu (qingnang)`);
   },
 };
 
@@ -501,7 +509,7 @@ const biyueAction = {
   async run(ctx: EngineContext, player: GamePlayer): Promise<void> {
     if (!(await ctx.askUseSelfAction(player, "biyue"))) return;
     ctx.draw(player, 1);
-    ctx.log.push(`${player.id} draws a card (biyue)`);
+    ctx.log.push(`${player.id} bốc 1 lá (biyue)`);
   },
 };
 
@@ -513,13 +521,13 @@ const shuangxiongAction = {
     if (!judgeCard) return;
     player.hand.push(judgeCard);
     player.duelViewAsBlackAllowed = isRed(judgeCard);
-    ctx.log.push(`${player.id} shuangxiong judge: ${judgeCard.suit} ${judgeCard.point}, takes it into hand`);
+    ctx.log.push(`${player.id} phán Song Hùng: ${SUIT_LABEL_VI[judgeCard.suit]} ${judgeCard.point}, nhận vào tay`);
   },
 };
 
 function mengjinOnSlashDodged(ctx: EngineContext, attacker: GamePlayer, target: GamePlayer): void {
   if (!discardRandom(ctx, target, ctx.rng)) return;
-  ctx.log.push(`${target.id} discards a card (mengjin)`);
+  ctx.log.push(`${target.id} bỏ 1 lá bài (mengjin)`);
   void attacker;
 }
 
@@ -530,7 +538,7 @@ async function leijiOnSlashDodged(ctx: EngineContext, _attacker: GamePlayer, zha
   const judgeCard = ctx.drawTop();
   if (!judgeCard) return;
   ctx.discardPile.push(judgeCard);
-  ctx.log.push(`${zhangjiao.id} leiji judge: ${judgeCard.suit} ${judgeCard.point}`);
+  ctx.log.push(`${zhangjiao.id} phán Lôi Kích: ${SUIT_LABEL_VI[judgeCard.suit]} ${judgeCard.point}`);
   if (judgeCard.suit === Suit.Spade) await applyDamage(ctx, to, 2, zhangjiao);
 }
 
@@ -540,20 +548,20 @@ async function beigeOnDamaged(ctx: EngineContext, player: GamePlayer, source: Ga
   const judgeCard = ctx.drawTop();
   if (!judgeCard) return;
   ctx.discardPile.push(judgeCard);
-  ctx.log.push(`${player.id} beige judge: ${judgeCard.suit} ${judgeCard.point}`);
+  ctx.log.push(`${player.id} phán Bi Ca: ${SUIT_LABEL_VI[judgeCard.suit]} ${judgeCard.point}`);
   switch (judgeCard.suit) {
     case Suit.Heart:
       await heal(ctx, player, 1);
-      ctx.log.push(`${player.id} recovers 1 hp (beige)`);
+      ctx.log.push(`${player.id} hồi 1 máu (beige)`);
       break;
     case Suit.Diamond:
       ctx.draw(player, 2);
-      ctx.log.push(`${player.id} draws 2 cards (beige)`);
+      ctx.log.push(`${player.id} bốc 2 lá (beige)`);
       break;
     case Suit.Club:
       if (source.alive) {
         for (let i = 0; i < 2; i++) discardRandom(ctx, source, rng);
-        ctx.log.push(`${source.id} discards 2 cards (beige)`);
+        ctx.log.push(`${source.id} bỏ 2 lá bài (beige)`);
       }
       break;
     case Suit.Spade:
@@ -562,7 +570,7 @@ async function beigeOnDamaged(ctx: EngineContext, player: GamePlayer, source: Ga
 }
 
 function mingshiReduceDamage(ctx: EngineContext, target: GamePlayer, _source: GamePlayer, amount: number): number {
-  if (amount > 0) ctx.log.push(`${target.id} reduces incoming damage by 1 (mingshi)`);
+  if (amount > 0) ctx.log.push(`${target.id} giảm 1 sát thương (mingshi)`);
   return amount - 1;
 }
 
@@ -571,13 +579,13 @@ async function sijianOnHandEmptied(ctx: EngineContext, player: GamePlayer, rng: 
   if (candidates.length === 0 || !(await ctx.askUseSelfAction(player, "sijian"))) return;
   const to = await ctx.askChooseAnyPlayer(player, candidates);
   if (!to) return;
-  if (discardRandom(ctx, to, rng)) ctx.log.push(`${to.id} discards a card (sijian)`);
+  if (discardRandom(ctx, to, rng)) ctx.log.push(`${to.id} bỏ 1 lá bài (sijian)`);
 }
 
 async function suishiOnAllyDying(ctx: EngineContext, self: GamePlayer, dyingAlly: GamePlayer): Promise<void> {
   if (!isAlly(self, dyingAlly)) return;
   ctx.draw(self, 1);
-  ctx.log.push(`${self.id} draws a card (suishi)`);
+  ctx.log.push(`${self.id} bốc 1 lá (suishi)`);
 }
 
 async function suishiOnAllyDeath(ctx: EngineContext, self: GamePlayer, deadAlly: GamePlayer): Promise<void> {

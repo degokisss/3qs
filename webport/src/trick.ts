@@ -38,7 +38,7 @@ export function duelCandidates(actor: GamePlayer, alive: GamePlayer[]): GamePlay
 
 export function resolveExNihilo(ctx: EngineContext, target: GamePlayer): void {
   ctx.draw(target, 2);
-  ctx.log.push(`${target.id} draws 2 cards (ex nihilo)`);
+  ctx.log.push(`${target.id} bốc 2 lá (Vô Trung Sinh Hữu)`);
 }
 
 export function resolveDismantlement(ctx: EngineContext, target: GamePlayer, rng: () => number): void {
@@ -46,7 +46,7 @@ export function resolveDismantlement(ctx: EngineContext, target: GamePlayer, rng
   if (!stolen) return;
   target.hand.splice(target.hand.indexOf(stolen), 1);
   ctx.discardPile.push(stolen);
-  ctx.log.push(`${target.id} discards a card (dismantlement)`);
+  ctx.log.push(`${target.id} bỏ 1 lá bài (Quá Hạ Sách Kiều)`);
 }
 
 export function resolveSnatch(ctx: EngineContext, source: GamePlayer, target: GamePlayer, rng: () => number): void {
@@ -54,14 +54,14 @@ export function resolveSnatch(ctx: EngineContext, source: GamePlayer, target: Ga
   if (!stolen) return;
   target.hand.splice(target.hand.indexOf(stolen), 1);
   source.hand.push(stolen);
-  ctx.log.push(`${source.id} snatches a card from ${target.id}`);
+  ctx.log.push(`${source.id} cướp 1 lá bài từ ${target.id}`);
 }
 
 /** Alternating Slash exchange starting with `target`; first to fail to play Slash takes 1 damage.
  *  `responseCountRequired` (e.g. Lu Bu's Wushuang) can require more than 1 Slash per exchange
  *  turn, same shape as resolveSlash's Jink requirement. */
 export async function resolveDuel(ctx: EngineContext, source: GamePlayer, target: GamePlayer): Promise<void> {
-  ctx.log.push(`${source.id} duels ${target.id}`);
+  ctx.log.push(`${source.id} dùng Quyết Đấu với ${target.id}`);
   let responder = target;
   let other = source;
   while (true) {
@@ -85,14 +85,14 @@ export async function resolveDuel(ctx: EngineContext, source: GamePlayer, target
     }
     ctx.discardPile.push(...spent);
     for (const c of spent) {
-      if (c.kind !== CardKind.Slash) ctx.log.push(`${responder.id} views a card as slash (viewAs skill)`);
+      if (c.kind !== CardKind.Slash) ctx.log.push(`${responder.id} biến 1 lá bài thành Sát (kỹ năng biến hóa)`);
     }
     if (!allFound) {
-      ctx.log.push(`${responder.id} could not find ${required} slashes and takes the hit`);
+      ctx.log.push(`${responder.id} không đủ ${required} lá Sát nên chịu đòn`);
       await applyDamage(ctx, responder, 1, other);
       return;
     }
-    ctx.log.push(`${responder.id} plays slash in the duel${spent.length > 1 ? ` (x${spent.length})` : ""}`);
+    ctx.log.push(`${responder.id} đánh Sát trong Quyết Đấu${spent.length > 1 ? ` (x${spent.length})` : ""}`);
     [responder, other] = [other, responder];
   }
 }
@@ -104,7 +104,7 @@ export async function resolveDuel(ctx: EngineContext, source: GamePlayer, target
  *  prefer to keep it and take the 1 damage instead, same as resolveSlash's Jink/resolveDuel's
  *  Slash asks. */
 export async function resolveSavageAssault(ctx: EngineContext, source: GamePlayer): Promise<void> {
-  ctx.log.push(`${source.id} uses savage assault`);
+  ctx.log.push(`${source.id} dùng Nam Man Nhập Xâm`);
   let creditedSource = source;
   for (const p of ctx.alivePlayers) {
     for (const skill of p.skills) {
@@ -112,7 +112,7 @@ export async function resolveSavageAssault(ctx: EngineContext, source: GamePlaye
       const hijacker = await skill.hijackAoeSource(ctx, p, source);
       if (hijacker && hijacker.alive) {
         creditedSource = hijacker;
-        ctx.log.push(`${hijacker.id} takes credit for the savage assault (huoshou)`);
+        ctx.log.push(`${hijacker.id} nhận công dùng Nam Man Nhập Xâm (huoshou)`);
       }
     }
   }
@@ -122,7 +122,7 @@ export async function resolveSavageAssault(ctx: EngineContext, source: GamePlaye
     if (slash && (await ctx.askSavageAssaultSlash(p))) {
       p.hand.splice(p.hand.indexOf(slash), 1);
       ctx.discardPile.push(slash);
-      if (slash.kind !== CardKind.Slash) ctx.log.push(`${p.id} views a card as slash (viewAs skill)`);
+      if (slash.kind !== CardKind.Slash) ctx.log.push(`${p.id} biến 1 lá bài thành Sát (kỹ năng biến hóa)`);
     } else {
       await applyDamage(ctx, p, 1, creditedSource);
     }
@@ -132,13 +132,13 @@ export async function resolveSavageAssault(ctx: EngineContext, source: GamePlaye
 /** Archery Attack: discarding a held Jink (viewAs-aware, e.g. Longdan/Qingguo) is the player's
  *  own choice, not automatic -- same rule as Savage Assault's Slash above. */
 export async function resolveArcheryAttack(ctx: EngineContext, source: GamePlayer): Promise<void> {
-  ctx.log.push(`${source.id} uses archery attack`);
+  ctx.log.push(`${source.id} dùng Vạn Tiễn Tề Phát`);
   for (const p of ctx.alivePlayers.filter((p) => p !== source && p.alive)) {
     const jink = findJinkLikeCard(p);
     if (jink && (await ctx.askArcheryAttackJink(p))) {
       p.hand.splice(p.hand.indexOf(jink), 1);
       ctx.discardPile.push(jink);
-      if (jink.kind !== CardKind.Jink) ctx.log.push(`${p.id} views a card as jink (viewAs skill)`);
+      if (jink.kind !== CardKind.Jink) ctx.log.push(`${p.id} biến 1 lá bài thành Thiểm (kỹ năng biến hóa)`);
     } else {
       await applyDamage(ctx, p, 1, source);
     }
@@ -147,7 +147,7 @@ export async function resolveArcheryAttack(ctx: EngineContext, source: GamePlaye
 
 
 export async function resolveGodSalvation(ctx: EngineContext): Promise<void> {
-  ctx.log.push("god salvation: healing every wounded player");
+  ctx.log.push("Đào Viên Kết Nghĩa: hồi máu mọi người bị thương");
   for (const p of ctx.alivePlayers) {
     if (p.isWounded()) await heal(ctx, p, 1);
   }
@@ -158,7 +158,7 @@ export async function resolveGodSalvation(ctx: EngineContext): Promise<void> {
  *  while wounded -- no once-per-turn cap (only Slash has an explicit per-turn limit). */
 export async function resolvePeachSelfHeal(ctx: EngineContext, player: GamePlayer): Promise<void> {
   await heal(ctx, player, 1);
-  ctx.log.push(`${player.id} uses peach to recover (hp ${player.hp}/${player.maxHp})`);
+  ctx.log.push(`${player.id} dùng Đào để hồi phục (máu ${player.hp}/${player.maxHp})`);
 }
 
 /** Analeptic (Tửu) played proactively during your own Play phase (not for a dying rescue): arms
@@ -174,7 +174,7 @@ export async function resolvePeachSelfHeal(ctx: EngineContext, player: GamePlaye
  */
 export function resolveAnalepticBuff(ctx: EngineContext, player: GamePlayer): void {
   player.pendingSlashBonusDamage += 1;
-  ctx.log.push(`${player.id} drinks analeptic (next slash this turn +1 damage)`);
+  ctx.log.push(`${player.id} uống Tửu (Sát tiếp theo trong lượt +1 sát thương)`);
 }
 
 
@@ -184,7 +184,7 @@ export function resolveAnalepticBuff(ctx: EngineContext, player: GamePlayer): vo
  *  partway (rare), fewer cards are revealed than players and the last players in line get none,
  *  same as any other draw-pile-exhaustion case. */
 export async function resolveAmazingGrace(ctx: EngineContext, source: GamePlayer): Promise<void> {
-  ctx.log.push("amazing grace");
+  ctx.log.push("Ngũ Cốc Phong Đăng");
   const n = ctx.alivePlayers.length;
   const pool: Card[] = [];
   for (let i = 0; i < n; i++) {
@@ -202,6 +202,6 @@ export async function resolveAmazingGrace(ctx: EngineContext, source: GamePlayer
     const idx = pool.some((c) => c.id === chosen.id) ? pool.findIndex((c) => c.id === chosen.id) : 0;
     const [card] = pool.splice(idx, 1);
     player.hand.push(card);
-    ctx.log.push(`${player.id} takes a card from amazing grace`);
+    ctx.log.push(`${player.id} nhận 1 lá từ Ngũ Cốc Phong Đăng`);
   }
 }
