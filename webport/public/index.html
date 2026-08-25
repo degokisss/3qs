@@ -1,0 +1,1370 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8" />
+<title>Lãng Khách — Quốc Chiến Web</title>
+<style>
+  @font-face { font-family: "ThuPhap"; src: url("../../font/UTMThuPhap.ttf") format("truetype"); font-display: swap; }
+  @font-face { font-family: "RobotoCond"; src: url("../../font/RobotoCondensed.ttf") format("truetype"); font-display: swap; }
+
+  :root {
+    color-scheme: dark;
+    --ink: #0a0b0f;
+    --ink-2: #14161d;
+    --ink-3: #1d212b;
+    --gold: #c9a24a;
+    --gold-dim: #7a6531;
+    --parchment: #e8dcc0;
+    --blood: #a3312f;
+    --text: #d8d2c4;
+    --text-dim: #837d6c;
+    --wei: #6f9bc2;
+    --shu: #d98d7c;
+    --wu: #5cc98c;
+    --qun: #a39a89;
+    --font-display: "ThuPhap", serif;
+    --font-label: "RobotoCond", "Segoe UI", sans-serif;
+    --font-mono: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    font-family: var(--font-label);
+    color: var(--text);
+    margin: 0;
+    min-height: 100vh;
+    background:
+      linear-gradient(180deg, rgba(6,7,10,0.88), rgba(6,7,10,0.94)),
+      url("../../image/backdrop/bg.jpg") center/cover fixed;
+    padding: 22px 26px 40px;
+  }
+
+  header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px 20px;
+    border-bottom: 1px solid var(--gold-dim);
+    padding-bottom: 12px;
+    margin-bottom: 18px;
+  }
+  h1 {
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 34px;
+    letter-spacing: 0.5px;
+    color: var(--parchment);
+    margin: 0;
+    text-shadow: 0 0 18px rgba(201,162,74,0.25);
+  }
+  .headerMeta { display: flex; align-items: center; gap: 14px; font-size: 12px; }
+  #status { color: var(--text-dim); letter-spacing: 0.5px; text-transform: uppercase; font-size: 11px; }
+  #status.connected::before { content: "● "; color: #5cc98c; }
+  #status.disconnected::before { content: "● "; color: var(--blood); }
+  #myseat { color: var(--gold); font-size: 12px; }
+  #newGame {
+    background: transparent;
+    color: var(--gold);
+    border: 1px solid var(--gold-dim);
+    border-radius: 3px;
+    padding: 6px 16px;
+    cursor: pointer;
+    font-family: var(--font-label);
+    font-size: 12px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    transition: background 0.15s, color 0.15s;
+  }
+  #newGame:hover { background: var(--gold); color: var(--ink); }
+  #startGameBtn {
+    background: var(--gold);
+    color: var(--ink);
+    border: 1px solid var(--gold);
+    border-radius: 3px;
+    padding: 8px 22px;
+    cursor: pointer;
+    font-family: var(--font-label);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    display: block;
+    margin: 0 auto 16px;
+  }
+  #startGameBtn:hover { background: #ddb95c; }
+
+  #turnBanner {
+    text-align: center;
+    font-size: 13px;
+    color: var(--text-dim);
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    margin-bottom: 16px;
+  }
+  #turnBanner.over { color: var(--blood); font-size: 16px; font-family: var(--font-display); letter-spacing: 1px; text-transform: none; }
+
+  /* --- "your general": a large, prominent panel for the seat you're controlling --- */
+  #myHero {
+    display: none;
+    max-width: 1280px;
+    margin: 0 auto 22px;
+    padding: 18px 28px;
+    border-radius: 10px;
+    border: 1px solid var(--kcolor, var(--gold));
+    background: linear-gradient(120deg, rgba(28,23,16,0.92), rgba(18,20,27,0.92));
+    box-shadow: 0 0 0 1px var(--kcolor, var(--gold)), 0 0 44px rgba(201,162,74,0.16), 0 14px 40px rgba(0,0,0,0.5);
+    align-items: center;
+    gap: 24px;
+  }
+  #myHero.active { display: flex; }
+  .heroAvatarRing {
+    width: 104px; height: 104px; flex-shrink: 0; border-radius: 50%; padding: 3px;
+    background: conic-gradient(from 0deg, var(--kcolor, var(--gold)), transparent 65%, var(--kcolor, var(--gold)));
+  }
+  .heroAvatar {
+    width: 100%; height: 100%; object-fit: cover; object-position: center 15%;
+    border-radius: 50%; display: block; background: var(--ink); border: 2px solid var(--ink);
+  }
+  .heroInfo { flex: 1; min-width: 0; }
+  .heroLabel { font-size: 10px; letter-spacing: 2.5px; text-transform: uppercase; color: var(--text-dim); margin-bottom: 3px; }
+  .heroTopRow { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .heroName { font-family: var(--font-display); font-size: 34px; color: var(--parchment); letter-spacing: 0.5px; }
+  .heroGeneral { font-size: 13px; color: var(--text-dim); text-transform: capitalize; letter-spacing: 0.5px; }
+  .heroHp { display: flex; gap: 4px; margin: 8px 0 10px; }
+  .heroHp .gem { width: 15px; height: 15px; }
+  .heroSkillName { font-weight: 700; font-size: 14.5px; color: var(--gold); letter-spacing: 0.4px; }
+  .heroSkillDesc { display: block; font-size: 13px; color: var(--text); line-height: 1.5; margin: 2px 0 8px; max-width: 680px; }
+
+  /* --- your hand: real cards, click one during your Play phase to play it --- */
+  #myHandWrap {
+    display: none;
+    max-width: 1280px;
+    margin: 0 auto 18px;
+    padding: 14px 20px;
+    border-radius: 8px;
+    border: 1px solid #2a2e39;
+    background: linear-gradient(180deg, var(--ink-3), var(--ink-2));
+  }
+  #myHandWrap.active { display: block; }
+  #myHandLabel { font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: var(--text-dim); margin-bottom: 8px; }
+  #myHandCards { display: flex; gap: 14px; flex-wrap: wrap; }
+  .handCard {
+    position: relative;
+    width: 112px; height: 156px;
+    border-radius: 7px;
+    overflow: hidden;
+    background: var(--ink);
+    border: 1px solid #2a2e39;
+    opacity: 0.5;
+    transition: transform 0.15s, box-shadow 0.15s, border-color 0.15s, opacity 0.15s;
+  }
+  .handCard.playable { opacity: 1; cursor: pointer; border-color: var(--gold-dim); }
+  .handCard.playable:hover { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold), 0 0 14px rgba(201,162,74,0.4); transform: translateY(-4px); }
+  .handCard.discardable { opacity: 1; cursor: pointer; border-color: #3a3f4d; }
+  .handCard.discardable:hover { border-color: var(--blood); transform: translateY(-4px); }
+  .handCard.selectedForDiscard { border-color: var(--blood); box-shadow: 0 0 0 1px var(--blood), 0 0 14px rgba(163,49,47,0.5); transform: translateY(-4px); }
+  .handCardImg { width: 100%; height: 100%; object-fit: cover; }
+  .handCard.equipCard .handCardImg { object-fit: contain; padding: 14px 8px; background: var(--ink); }
+  .handCardSuit { position: absolute; top: 6px; left: 6px; width: 20px; height: 20px; filter: drop-shadow(0 0 2px #000); }
+  .handCardPoint { position: absolute; top: 4px; right: 8px; font-family: var(--font-mono); font-size: 18px; font-weight: 700; color: var(--parchment); text-shadow: 0 0 3px #000, 0 0 3px #000; }
+  .handCardName {
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    padding: 4px 5px;
+    background: rgba(6,6,9,0.8);
+    color: var(--parchment);
+    font-family: var(--font-label);
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    text-align: center;
+    line-height: 1.2;
+    pointer-events: none;
+  }
+  #freeActionBar {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--gold-dim);
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .freeActionHint { font-size: 12px; color: var(--gold); letter-spacing: 0.3px; }
+  .skillActionBtn {
+    background: transparent;
+    color: var(--gold);
+    border: 1px solid var(--gold-dim);
+    border-radius: 3px;
+    padding: 5px 14px;
+    cursor: pointer;
+    font-family: var(--font-label);
+    font-size: 11.5px;
+  }
+  .skillActionBtn:hover { background: var(--gold); color: var(--ink); }
+  #endPhaseBtn {
+    margin-left: auto;
+    background: transparent;
+    color: var(--blood);
+    border: 1px solid var(--blood);
+    border-radius: 3px;
+    padding: 6px 16px;
+    cursor: pointer;
+    font-family: var(--font-label);
+    font-size: 11.5px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+  #endPhaseBtn:hover { background: var(--blood); color: var(--parchment); }
+  #confirmDiscardBtn {
+    margin-left: auto;
+    background: transparent;
+    color: var(--blood);
+    border: 1px solid var(--blood);
+    border-radius: 3px;
+    padding: 6px 16px;
+    cursor: pointer;
+    font-family: var(--font-label);
+    font-size: 11.5px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+  #confirmDiscardBtn:hover:not(:disabled) { background: var(--blood); color: var(--parchment); }
+  #confirmDiscardBtn:disabled { opacity: 0.4; cursor: default; }
+
+  /* --- pick a general: 3 face-down candidates, turn-based from the lord around the table --- */
+  #pickGeneralPanel { display: none; max-width: 900px; margin: 0 auto 24px; text-align: center; }
+  #pickGeneralHint {
+    font-family: var(--font-label);
+    font-size: 13px;
+    color: var(--gold);
+    letter-spacing: 0.5px;
+    margin-bottom: 18px;
+  }
+  #pickGeneralCards { display: flex; justify-content: center; gap: 22px; flex-wrap: wrap; }
+  .generalCard {
+    width: 232px;
+    border-radius: 8px;
+    overflow: hidden;
+    background: linear-gradient(180deg, var(--ink-3), var(--ink-2));
+    border: 1px solid #2a2e39;
+    text-align: left;
+  }
+  .generalCard.revealed { border-color: var(--gold-dim); box-shadow: 0 0 24px rgba(201,162,74,0.15); }
+  .generalCard img { width: 100%; height: 240px; object-fit: cover; object-position: center 15%; display: block; background: var(--ink); }
+  .generalCardBody { padding: 15px; }
+  .generalCardName { font-family: var(--font-display); font-size: 20px; color: var(--parchment); margin-bottom: 3px; text-align: center; }
+  .generalCardMeta { font-size: 11.5px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 9px; text-align: center; }
+  .generalCard .flipBtn, .generalCard .pickBtn {
+    display: block;
+    width: calc(100% - 24px);
+    margin: 0 12px 12px;
+    background: transparent;
+    border: 1px solid var(--gold-dim);
+    border-radius: 3px;
+    color: var(--gold);
+    padding: 7px 0;
+    cursor: pointer;
+    font-family: var(--font-label);
+    font-size: 12px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    text-align: center;
+  }
+  .generalCard .flipBtn:hover, .generalCard .pickBtn:hover { background: var(--gold); color: var(--ink); }
+  .generalCard .pickBtn { border-color: var(--gold); font-weight: 700; }
+
+  /* --- the table: 8 seats ringed around a center emblem, like sitting around the game table --- */
+  #table {
+    max-width: 1280px;
+    margin: 0 auto 22px;
+    display: grid;
+    grid-template-columns: 212px 1fr 1fr 1fr 212px;
+    grid-template-rows: auto auto auto;
+    grid-template-areas:
+      ".    top1  top2  top3  ."
+      "left  .    center .   right"
+      ".    bot1  bot2  bot3  .";
+    gap: 14px;
+    align-items: stretch;
+  }
+  .slot-top1 { grid-area: top1; } .slot-top2 { grid-area: top2; } .slot-top3 { grid-area: top3; }
+  .slot-bot1 { grid-area: bot1; } .slot-bot2 { grid-area: bot2; } .slot-bot3 { grid-area: bot3; }
+  .slot-left { grid-area: left; } .slot-right { grid-area: right; }
+
+  #centerEmblem {
+    grid-area: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 20px;
+    border: 1px solid var(--gold-dim);
+    border-radius: 50%;
+    aspect-ratio: 1;
+    margin: auto;
+    width: 100%;
+    max-width: 212px;
+    background: radial-gradient(circle at 50% 40%, rgba(201,162,74,0.10), transparent 70%);
+  }
+  #centerEmblem img { width: 68px; opacity: 0.7; margin-bottom: 10px; filter: drop-shadow(0 0 6px rgba(201,162,74,0.3)); }
+  #centerTurn { font-size: 12px; color: var(--gold); letter-spacing: 1px; }
+  #centerActing { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+
+  .player {
+    background: linear-gradient(180deg, var(--ink-3), var(--ink-2));
+    border: 1px solid #2a2e39;
+    border-radius: 8px;
+    padding: 10px;
+    position: relative;
+    transition: transform 0.15s, box-shadow 0.15s, border-color 0.15s;
+  }
+  .player.dead { opacity: 0.32; filter: grayscale(0.6); }
+  .player.current { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold), 0 0 16px rgba(201,162,74,0.35); }
+  .player.mine { border-color: #5cc98c; box-shadow: 0 0 0 1px #5cc98c; }
+  /* Target picker (Slash/trick): candidates get a strong ALWAYS-ON pulsing red glow (not just on
+     hover) so a legal target is unmistakable even through the dimmed overlay; everyone else
+     (except the acting player themself) fades into the background via .noncandidate below. */
+  .player.candidate {
+    border-color: var(--blood);
+    cursor: pointer;
+    z-index: 1;
+    animation: candidatePulse 1.3s ease-in-out infinite;
+  }
+  .player.candidate:hover { transform: translateY(-3px); box-shadow: 0 0 0 3px var(--blood), 0 0 36px rgba(163,49,47,1); }
+  .player.noncandidate { opacity: 0.3; filter: grayscale(0.6); }
+  @keyframes candidatePulse {
+    0%, 100% { box-shadow: 0 0 0 2px var(--blood), 0 0 20px rgba(163,49,47,0.65); }
+    50% { box-shadow: 0 0 0 2px var(--blood), 0 0 34px rgba(163,49,47,0.95); }
+  }
+
+  .playerHead { display: flex; gap: 9px; align-items: flex-start; }
+  .avatarRing {
+    width: 58px; height: 58px; flex-shrink: 0; border-radius: 50%;
+    padding: 2px;
+    background: conic-gradient(from 0deg, var(--kcolor, var(--gold-dim)), transparent 70%, var(--kcolor, var(--gold-dim)));
+  }
+  .avatar {
+    width: 100%; height: 100%; object-fit: cover; object-position: center 15%;
+    border-radius: 50%; display: block; background: var(--ink);
+    border: 1px solid var(--ink);
+  }
+  .info { flex: 1; min-width: 0; }
+  .id { font-family: var(--font-label); font-weight: 700; font-size: 14px; color: var(--parchment); letter-spacing: 0.5px; }
+  .role {
+    display: inline-flex; align-items: center; gap: 3px;
+    font-size: 9px; letter-spacing: 0.5px; text-transform: uppercase;
+    padding: 1px 6px; border-radius: 3px; margin-left: 5px; vertical-align: middle;
+  }
+  .role-lord { background: #4a3410; color: #f0c675; border: 1px solid #7a5c22; }
+  .role-loyalist { background: #123822; color: #8fe0ae; border: 1px solid #1f5c39; }
+  .role-rebel { background: #3a1414; color: #f2a3a3; border: 1px solid #6b2323; }
+  .role-renegade { background: #2c1338; color: #d3a3f2; border: 1px solid #52226b; }
+  .role-hidden { background: #23262f; color: var(--text-dim); border: 1px solid #2f3340; }
+  .roleIcon { width: 13px; height: 13px; }
+  .general { font-family: var(--font-label); font-size: 12px; color: var(--text-dim); text-transform: capitalize; margin-top: 1px; }
+  .hp { margin: 7px 0 3px; display: flex; gap: 2px; }
+  .gem { width: 10px; height: 10px; border-radius: 2px; transform: rotate(45deg); background: var(--blood); box-shadow: 0 0 4px rgba(163,49,47,0.6); }
+  .gem.lost { background: #2a2c33; box-shadow: none; }
+  .equipRow { display: flex; gap: 7px; align-items: center; min-height: 30px; margin: 6px 0 3px; flex-wrap: wrap; }
+  .equipItem { position: relative; display: inline-flex; }
+  .equipIcon { height: 28px; width: auto; border-radius: 3px; border: 1px solid #3a3f4d; opacity: 0.96; box-shadow: 0 1px 4px rgba(0,0,0,0.4); }
+  .equipBadge {
+    position: absolute; right: -5px; bottom: -5px;
+    min-width: 15px; height: 15px; padding: 0 3px;
+    border-radius: 8px; border: 1px solid var(--ink-3);
+    font-family: var(--font-mono); font-size: 9.5px; font-weight: 700;
+    line-height: 14px; text-align: center;
+  }
+  .equipBadge.weapon { background: var(--gold); color: var(--ink); } /* attack range */
+  .equipBadge.defense { background: #4db8ff; color: #06131c; } /* +1: others need +1 distance to reach you */
+  .equipBadge.offense { background: #f2795a; color: #260a03; } /* -1: your distance to others -1 */
+  .equipEmpty { font-size: 10px; color: var(--text-dim); font-style: italic; }
+  .hand { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dim); }
+  .hand b { color: var(--text); }
+  .claimBtn {
+    margin-top: 7px;
+    font-family: var(--font-label);
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    padding: 3px 9px;
+    background: transparent;
+    border: 1px solid #3a3f4d;
+    border-radius: 3px;
+    color: var(--text-dim);
+    cursor: pointer;
+    width: 100%;
+  }
+  .claimBtn:hover:not(:disabled) { border-color: var(--gold); color: var(--gold); }
+  .claimBtn:disabled { opacity: 0.5; cursor: default; }
+
+  /* --- decision prompt: an imperial scroll unrolling over the dimmed table --- */
+  #promptOverlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(4,4,6,0.7);
+    z-index: 50;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none; /* let clicks pass through to .player.candidate cards on the table
+                              underneath during target-picker prompts (showTargetPicker) */
+  }
+  #promptOverlay.active { display: flex; }
+  /* Target-picker prompts (Slash/trick target selection) use a lighter dim than confirm-style
+     prompts -- the candidate highlighting above needs to read clearly through it. */
+  #promptOverlay.picking { background: rgba(4,4,6,0.4); }
+  #prompt {
+    background: linear-gradient(180deg, #1c1710, #14100b);
+    border: 1px solid var(--gold);
+    border-radius: 6px;
+    padding: 22px 28px;
+    max-width: 420px;
+    text-align: center;
+    box-shadow: 0 0 60px rgba(201,162,74,0.15), 0 20px 60px rgba(0,0,0,0.6);
+    pointer-events: auto; /* the prompt box itself stays clickable */
+  }
+  #prompt img.cardArt { height: 72px; margin-bottom: 10px; border-radius: 6px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+  #prompt .promptTitle { font-family: var(--font-display); font-size: 22px; color: var(--parchment); margin-bottom: 4px; }
+  #prompt .promptSub { font-size: 11px; color: var(--text-dim); margin-bottom: 14px; letter-spacing: 0.5px; }
+  #promptPass {
+    margin-top: 4px;
+    background: transparent;
+    border: 1px solid var(--gold-dim);
+    border-radius: 3px;
+    color: var(--gold);
+    padding: 6px 18px;
+    cursor: pointer;
+    font-family: var(--font-label);
+    font-size: 12px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  #promptPass:hover { background: var(--gold); color: var(--ink); }
+  .confirmYes {
+    margin: 4px 10px 0 0;
+    background: var(--gold);
+    border: 1px solid var(--gold);
+    border-radius: 3px;
+    color: var(--ink);
+    padding: 6px 18px;
+    cursor: pointer;
+    font-family: var(--font-label);
+    font-size: 12px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    font-weight: 700;
+  }
+  .confirmYes:hover { background: #ddb95c; }
+  #prompt:has(#pickCardOptions) { max-width: 760px; }
+  #pickCardOptions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-top: 4px; }
+  .pickCardOption {
+    cursor: pointer;
+    width: 92px;
+    border: 1px solid #3a3f4d;
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--ink);
+    transition: transform 0.15s, border-color 0.15s, box-shadow 0.15s;
+  }
+  .pickCardOption:hover { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold), 0 0 14px rgba(201,162,74,0.4); transform: translateY(-4px); }
+  .pickCardOption img { width: 100%; height: 122px; object-fit: cover; display: block; }
+  .pickCardLabel { font-size: 10.5px; text-align: center; padding: 4px 3px; color: var(--parchment); font-family: var(--font-label); line-height: 1.25; }
+
+
+  #logWrap { max-width: 1280px; margin: 0 auto; }
+  #logLabel {
+    font-family: var(--font-label);
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+  }
+  #log {
+    background: rgba(10,11,15,0.75);
+    border: 1px solid #22252e;
+    border-left: 2px solid var(--gold-dim);
+    border-radius: 4px;
+    padding: 12px 16px;
+    height: 200px;
+    overflow-y: auto;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+  }
+  .skill { margin: 6px 0 4px; }
+  .skillName {
+    font-family: var(--font-label);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--gold);
+    letter-spacing: 0.3px;
+  }
+  .skillDesc { display: block; font-size: 11.5px; color: var(--text-dim); line-height: 1.45; margin-top: 2px; }
+
+  /* --- lobby: room list + create-room panel shown before joining a table --- */
+  #lobby { max-width: 780px; margin: 40px auto; }
+  #lobbyPanel {
+    background: linear-gradient(180deg, var(--ink-3), var(--ink-2));
+    border: 1px solid #2a2e39;
+    border-radius: 8px;
+    padding: 22px 26px;
+  }
+  #lobbyHeading {
+    font-family: var(--font-display);
+    font-size: 22px;
+    color: var(--parchment);
+    margin-bottom: 16px;
+  }
+  #createRoomRow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding-bottom: 16px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid var(--gold-dim);
+    flex-wrap: wrap;
+  }
+  #createRoomRow label { font-size: 12px; color: var(--text-dim); letter-spacing: 0.5px; }
+  #playerCountSelect {
+    background: var(--ink);
+    color: var(--text);
+    border: 1px solid #3a3f4d;
+    border-radius: 3px;
+    padding: 5px 8px;
+    font-family: var(--font-label);
+    font-size: 12px;
+  }
+  #createRoomBtn {
+    background: var(--gold);
+    color: var(--ink);
+    border: 1px solid var(--gold);
+    border-radius: 3px;
+    padding: 7px 18px;
+    cursor: pointer;
+    font-family: var(--font-label);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  #createRoomBtn:hover { background: #ddb95c; }
+  .roomEmpty { color: var(--text-dim); font-size: 13px; padding: 10px 0; }
+  .roomRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 4px;
+    border-bottom: 1px solid #22252e;
+  }
+  .roomRow:last-child { border-bottom: none; }
+  .roomCode {
+    font-family: var(--font-mono);
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--gold);
+    letter-spacing: 2px;
+    margin-right: 10px;
+  }
+  .roomMeta { font-size: 11.5px; color: var(--text-dim); }
+  .roomJoinBtn {
+    background: transparent;
+    color: var(--gold);
+    border: 1px solid var(--gold-dim);
+    border-radius: 3px;
+    padding: 5px 16px;
+    cursor: pointer;
+    font-family: var(--font-label);
+    font-size: 11.5px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .roomJoinBtn:hover { background: var(--gold); color: var(--ink); }
+  #lobbyError {
+    max-width: 780px;
+    margin: 0 auto 14px;
+    background: rgba(163,49,47,0.15);
+    border: 1px solid var(--blood);
+    border-radius: 4px;
+    padding: 8px 14px;
+    color: #f2a3a3;
+    font-size: 12.5px;
+  }
+  #roomIdLabel { color: var(--gold); font-size: 12px; letter-spacing: 0.5px; }
+  #leaveRoom {
+    background: transparent;
+    color: var(--gold);
+    border: 1px solid var(--gold-dim);
+    border-radius: 3px;
+    padding: 6px 16px;
+    cursor: pointer;
+    font-family: var(--font-label);
+    font-size: 12px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    transition: background 0.15s, color 0.15s;
+  }
+  #leaveRoom:hover { background: var(--gold); color: var(--ink); }
+
+  @media (max-width: 860px) {
+    #table {
+      grid-template-columns: 1fr 1fr;
+      grid-template-areas: "top1 top2" "top3 left" "right center" "bot1 bot2" "bot3 bot3";
+    }
+  }
+</style>
+</head>
+<body>
+  <header>
+    <h1>浪客・國戰　Lãng Khách Quốc Chiến</h1>
+    <div class="headerMeta">
+      <span id="status" class="disconnected">connecting…</span>
+      <span id="roomIdLabel"></span>
+      <span id="myseat"></span>
+      <button id="leaveRoom" style="display:none">Rời phòng</button>
+      <button id="newGame" style="display:none">Ván mới</button>
+    </div>
+  </header>
+
+  <div id="lobbyError" style="display:none"></div>
+
+  <div id="lobby">
+    <div id="lobbyPanel">
+      <div id="lobbyHeading">Danh sách phòng</div>
+      <div id="createRoomRow">
+        <label for="playerCountSelect">Số người chơi</label>
+        <select id="playerCountSelect">
+          <option value="5">5</option>
+          <option value="6">6</option>
+          <option value="7">7</option>
+          <option value="8" selected>8</option>
+          <option value="9">9</option>
+          <option value="10">10</option>
+        </select>
+        <button id="createRoomBtn">Tạo phòng mới</button>
+      </div>
+      <div id="roomListEl"></div>
+    </div>
+  </div>
+
+  <div id="gameView" style="display:none">
+    <div id="turnBanner"></div>
+    <button id="startGameBtn" style="display:none">Bắt đầu trận đấu</button>
+
+    <div id="pickGeneralPanel">
+      <div id="pickGeneralHint"></div>
+      <div id="pickGeneralCards"></div>
+    </div>
+
+    <div id="myHero"></div>
+
+    <div id="myHandWrap">
+      <div id="myHandLabel">Bài trên tay</div>
+      <div id="myHandCards"></div>
+      <div id="freeActionBar" style="display:none"></div>
+    </div>
+
+    <div id="table">
+      <div id="centerEmblem">
+        <img src="../../image/logo/logo.png" alt="" onerror="this.style.display='none'">
+        <div id="centerTurn"></div>
+        <div id="centerActing"></div>
+      </div>
+      <div class="slot-top1" data-slot="top1"></div>
+      <div class="slot-top2" data-slot="top2"></div>
+      <div class="slot-top3" data-slot="top3"></div>
+      <div class="slot-right" data-slot="right"></div>
+      <div class="slot-bot3" data-slot="bot3"></div>
+      <div class="slot-bot2" data-slot="bot2"></div>
+      <div class="slot-bot1" data-slot="bot1"></div>
+      <div class="slot-left" data-slot="left"></div>
+    </div>
+
+    <div id="logWrap">
+      <div id="logLabel">Biên niên trận đấu</div>
+      <div id="log"></div>
+    </div>
+  </div>
+
+  <div id="promptOverlay"><div id="prompt"></div></div>
+
+
+  <script>
+    const ROLE_LABEL = { lord: "Chủ công", loyalist: "Trung thần", rebel: "Phản tặc", renegade: "Nội gián" };
+    const ROLE_ICON = { lord: true, renegade: true }; // only these two ship an image/system/roles/*.png
+    const KINGDOM_VAR = { wei: "--wei", shu: "--shu", wu: "--wu", qun: "--qun" };
+    const KINGDOM_LABEL = { wei: "Ngụy", shu: "Thục", wu: "Ngô", qun: "Quần" };
+    const TRICK_LABEL = {
+      ex_nihilo: "Vô Trung Sinh Hữu",
+      dismantlement: "Quá Hạ Sách Kiều",
+      snatch: "Thuận Thủ Khiên Dương",
+      duel: "Quyết Đấu",
+      savage_assault: "Nam Man Nhập Xâm",
+      archery_attack: "Vạn Tiễn Tề Phát",
+      god_salvation: "Đào Viên Kết Nghĩa",
+      amazing_grace: "Ngũ Cốc Phong Đăng",
+    };
+    const CARD_LABEL = { ...TRICK_LABEL, slash: "Sát", jink: "Thiểm", peach: "Đào", analeptic: "Tửu" };
+    const SLOT_ORDER = ["top1", "top2", "top3", "right", "bot3", "bot2", "bot1", "left"]; // clockwise seating
+    const IMG = "../../image";
+
+    const statusEl = document.getElementById("status");
+    const myseatEl = document.getElementById("myseat");
+    const turnBannerEl = document.getElementById("turnBanner");
+    const centerTurnEl = document.getElementById("centerTurn");
+    const centerActingEl = document.getElementById("centerActing");
+    const promptOverlayEl = document.getElementById("promptOverlay");
+    const promptEl = document.getElementById("prompt");
+    const logEl = document.getElementById("log");
+    const myHeroEl = document.getElementById("myHero");
+    const lobbyEl = document.getElementById("lobby");
+    const gameViewEl = document.getElementById("gameView");
+    const lobbyErrorEl = document.getElementById("lobbyError");
+    const roomIdLabelEl = document.getElementById("roomIdLabel");
+    const leaveRoomBtn = document.getElementById("leaveRoom");
+    const newGameBtn = document.getElementById("newGame");
+    const roomListEl = document.getElementById("roomListEl");
+    const playerCountSelectEl = document.getElementById("playerCountSelect");
+    const slotEls = Object.fromEntries(SLOT_ORDER.map((s) => [s, document.querySelector(`[data-slot="${s}"]`)]));
+    const tableEl = document.getElementById("table");
+    const pickGeneralPanelEl = document.getElementById("pickGeneralPanel");
+    const pickGeneralHintEl = document.getElementById("pickGeneralHint");
+    const pickGeneralCardsEl = document.getElementById("pickGeneralCards");
+    const startGameBtn = document.getElementById("startGameBtn");
+    const myHandWrapEl = document.getElementById("myHandWrap");
+    const myHandCardsEl = document.getElementById("myHandCards");
+    const freeActionBarEl = document.getElementById("freeActionBar");
+
+    let ws = null;
+    let pendingFreeAction = null; // { requestId, legalActions } while our turn's Play-phase prompt is active
+    let pendingGeneralPick = null; // { requestId, candidates } while it's our turn to pick a general
+    let flippedGeneralIndices = new Set(); // which of our 3 candidate cards we've manually flipped face-up
+    let pendingDiscard = null; // { requestId, count, hand } while ending our turn with excess hand cards
+    let selectedDiscardIds = new Set(); // cardIds toggled for the pending discard
+    let myRoomId = null; // roomId this tab is currently watching, if any (null = in the lobby)
+    let pendingPrompt = null; // { requestId, candidateIds } while awaiting our own answer
+    let lastState = null; // most recent state snapshot, for looking up a player's general/etc.
+    let amICreator = false; // true if this tab created the room it's currently watching
+
+    function send(obj) {
+      if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+    }
+    function claim(playerId) {
+      mySeat = playerId;
+      send({ type: "claim", playerId });
+    }
+    function answerPrompt(targetId) {
+      if (!pendingPrompt) return;
+      send({ type: "response", requestId: pendingPrompt.requestId, targetId });
+      pendingPrompt = null;
+      promptOverlayEl.className = "";
+      promptEl.innerHTML = "";
+      renderPlayers(); // clear the candidate highlighting/click handlers we wired below
+    }
+    window.__claim = claim;
+    window.__answer = answerPrompt;
+    window.answerPromptNoop = () => {};
+
+    function showLobbyError(message) {
+      lobbyErrorEl.textContent = message;
+      lobbyErrorEl.style.display = "block";
+      setTimeout(() => { lobbyErrorEl.style.display = "none"; }, 4000);
+    }
+
+    function showLobbyView() {
+      myRoomId = null;
+      mySeat = null;
+      amICreator = false;
+      pendingPrompt = null;
+      pendingFreeAction = null;
+      pendingGeneralPick = null;
+      flippedGeneralIndices = new Set();
+      pendingDiscard = null;
+      selectedDiscardIds = new Set();
+      promptOverlayEl.className = "";
+      promptEl.innerHTML = "";
+      lobbyEl.style.display = "";
+      gameViewEl.style.display = "none";
+      leaveRoomBtn.style.display = "none";
+      newGameBtn.style.display = "none";
+      startGameBtn.style.display = "none";
+      myHandWrapEl.className = "";
+      roomIdLabelEl.textContent = "";
+      myseatEl.textContent = "";
+    }
+
+    function showGameView(roomId) {
+      myRoomId = roomId;
+      lobbyEl.style.display = "none";
+      gameViewEl.style.display = "";
+      leaveRoomBtn.style.display = "";
+      newGameBtn.style.display = "";
+      roomIdLabelEl.textContent = `Phòng ${roomId}`;
+    }
+
+    function renderLobby(rooms) {
+      if (rooms.length === 0) {
+        roomListEl.innerHTML = `<div class="roomEmpty">Chưa có phòng nào — hãy tạo phòng mới.</div>`;
+        return;
+      }
+      roomListEl.innerHTML = rooms
+        .map(
+          (r) => `
+        <div class="roomRow">
+          <div>
+            <span class="roomCode">${r.id}</span>
+            <span class="roomMeta">${r.playerCount} người · ${r.seatsClaimed} đã chiếm ghế · ${r.watchers} đang xem · ${
+              r.gameOver ? "đã kết thúc" : `lượt ${r.turnNumber}`
+            }</span>
+          </div>
+          <button class="roomJoinBtn" onclick="window.__joinRoom('${r.id}')">Vào</button>
+        </div>`,
+        )
+        .join("");
+    }
+    window.__joinRoom = (roomId) => send({ type: "joinRoom", roomId });
+
+    /** Re-renders just the 8 seat slots from `lastState` + current `pendingPrompt`/`mySeat` --
+     *  called both after a fresh state broadcast and whenever `pendingPrompt` itself changes
+     *  (a chooseSlashTarget/chooseTrickTarget ask does NOT come with its own state broadcast,
+     *  so without this the candidate highlighting + click handlers below would never appear). */
+    function renderPlayers() {
+      if (!lastState) return;
+      lastState.players.forEach((p, i) => {
+        const slot = SLOT_ORDER[i];
+        if (slotEls[slot]) slotEls[slot].innerHTML = renderPlayer(p, lastState);
+      });
+    }
+
+    /** Weapon/horse icons WITH their effect always visible (not hover-only): weapon shows its
+     *  Sát attack range, defense horse shows +1 (others need +1 distance to reach you), offense
+     *  horse shows -1 (your distance to others -1) -- so a glance at the icon row says what it
+     *  actually does, not just its name. */
+    function equipIcons(p) {
+      const parts = [];
+      if (p.weapon) {
+        parts.push(`<div class="equipItem" title="${p.weapon} — Tầm đánh Sát: ${p.weaponRange}">
+          <img class="equipIcon" src="${IMG}/equips/${p.weapon}.png" alt="${p.weapon}">
+          <span class="equipBadge weapon">${p.weaponRange}</span>
+        </div>`);
+      }
+      if (p.defenseHorse) {
+        parts.push(`<div class="equipItem" title="${p.defenseHorse} — Người khác cần +1 khoảng cách để đánh bạn">
+          <img class="equipIcon" src="${IMG}/equips/${p.defenseHorse}.png" alt="${p.defenseHorse}">
+          <span class="equipBadge defense">+1</span>
+        </div>`);
+      }
+      if (p.offenseHorse) {
+        parts.push(`<div class="equipItem" title="${p.offenseHorse} — Khoảng cách từ bạn đến người khác -1">
+          <img class="equipIcon" src="${IMG}/equips/${p.offenseHorse}.png" alt="${p.offenseHorse}">
+          <span class="equipBadge offense">-1</span>
+        </div>`);
+      }
+      return parts.join("");
+    }
+    function renderPlayer(p, state) {
+      const gems = Array.from({ length: p.maxHp }, (_, i) => `<span class="gem ${i < p.hp ? "" : "lost"}"></span>`).join("");
+      const roleCls = p.role ? "role-" + p.role : "role-hidden";
+      const roleLabel = p.role ? ROLE_LABEL[p.role] : "?";
+      const roleIcon = p.role && ROLE_ICON[p.role] ? `<img class="roleIcon" src="${IMG}/system/roles/${p.role}.png" alt="">` : "";
+
+      const skillsHtml = (p.skills || [])
+        .map((s) => `<div class="skill"><span class="skillName">◆ ${s.name}</span><span class="skillDesc">${s.description}</span></div>`)
+        .join("");
+      const classes = ["player"];
+      if (!p.alive) classes.push("dead");
+      if (p.id === state.currentPlayerId) classes.push("current");
+      if (p.id === mySeat) classes.push("mine");
+      const isCandidate = pendingPrompt && pendingPrompt.candidateIds.includes(p.id);
+      if (isCandidate) classes.push("candidate");
+      // Dim everyone who ISN'T a legal target (except the acting player themself, who stays
+      // full-brightness for context) so the highlighted candidates above are unmistakable.
+      else if (pendingPrompt && p.id !== pendingPrompt.actorId) classes.push("noncandidate");
+
+      const claimBtn =
+        p.id === mySeat
+          ? `<button class="claimBtn" onclick="answerPromptNoop()" disabled>Ghế của bạn</button>`
+          : p.alive && !p.claimed && !state.started
+          ? `<button class="claimBtn" onclick="window.__claim('${p.id}')">Chiếm ghế</button>`
+          : p.claimed
+          ? `<button class="claimBtn" disabled>Đã có người</button>`
+          : "";
+
+      const onclick = isCandidate ? ` onclick="window.__answer('${p.id}')"` : "";
+      const kcolorVar = KINGDOM_VAR[p.kingdom];
+      const style = kcolorVar ? ` style="--kcolor:var(${kcolorVar})"` : "";
+      return `<div class="${classes.join(" ")}"${onclick}${style}>
+        <div class="playerHead">
+          <div class="avatarRing"><img class="avatar" src="${IMG}/generals/avatar/${p.general}.png" alt="${p.general}"
+               onerror="this.parentElement.style.visibility='hidden'"></div>
+          <div class="info">
+            <div class="id">${p.id}<span class="role ${roleCls}">${roleLabel}</span>${roleIcon}</div>
+            <div class="general">${p.generalName || p.general}</div>
+            <div class="hp">${gems}</div>
+          </div>
+        </div>
+        ${skillsHtml}
+        <div class="equipRow">${equipIcons(p) || '<span class="equipEmpty">Không trang bị</span>'}</div>
+        <div class="hand">Bài: <b>${p.handcardNum}</b></div>
+        ${claimBtn}
+      </div>`;
+    }
+
+    function renderHero(p) {
+      if (!p) {
+        myHeroEl.className = "";
+        myHeroEl.innerHTML = "";
+        myHeroEl.style.removeProperty("--kcolor");
+        return;
+      }
+      const gems = Array.from({ length: p.maxHp }, (_, i) => `<span class="gem ${i < p.hp ? "" : "lost"}"></span>`).join("");
+      const skillsHtml = (p.skills || [])
+        .map((s) => `<div><span class="heroSkillName">◆ ${s.name}</span><span class="heroSkillDesc">${s.description}</span></div>`)
+        .join("");
+      const kcolorVar = KINGDOM_VAR[p.kingdom];
+      myHeroEl.className = "active";
+      if (kcolorVar) myHeroEl.style.setProperty("--kcolor", `var(${kcolorVar})`);
+      myHeroEl.innerHTML = `
+        <div class="heroAvatarRing"><img class="heroAvatar" src="${IMG}/generals/avatar/${p.general}.png" alt="${p.general}"
+             onerror="this.parentElement.style.visibility='hidden'"></div>
+        <div class="heroInfo">
+          <div class="heroLabel">Tướng của bạn — ${p.id}${p.alive ? "" : " (đã mất)"}</div>
+          <div class="heroTopRow">
+            <span class="heroName">${p.generalName || p.general}</span>
+            <span class="heroGeneral">${p.role ? ROLE_LABEL[p.role] : ""}</span>
+          </div>
+          <div class="heroHp">${gems}</div>
+          <div class="equipRow">${equipIcons(p) || '<span class="equipEmpty">Không trang bị</span>'}</div>
+          ${skillsHtml}
+        </div>`;
+    }
+
+    function cardImageSrc(card) {
+      if (card.kind === "weapon" || card.kind === "horse") return `${IMG}/equips/${card.weaponName || card.horseName}.png`;
+      return `${IMG}/card/${card.kind}.png`;
+    }
+    function cardLabel(card) {
+      if (card.kind === "weapon") return card.weaponName;
+      if (card.kind === "horse") return card.horseName;
+      return CARD_LABEL[card.kind] || card.kind;
+    }
+    function pointLabel(n) {
+      if (n === 1) return "A";
+      if (n === 11) return "J";
+      if (n === 12) return "Q";
+      if (n === 13) return "K";
+      return n > 0 ? String(n) : "";
+    }
+
+    /** Your actual hand, rendered as real card images. While a `chooseFreeAction` prompt is
+     *  pending, playable cards (per the server's legalActions list) light up and become
+     *  clickable; any selfAction/activeAction skills (not tied to a specific card) show as
+     *  buttons in the bar below, alongside "Kết thúc lượt". */
+    function renderMyHand() {
+      if (pendingDiscard) {
+        myHandWrapEl.className = "active";
+        myHandCardsEl.innerHTML = pendingDiscard.hand
+          .map((c) => {
+            const selected = selectedDiscardIds.has(c.id);
+            const isEquip = c.kind === "weapon" || c.kind === "horse";
+            const cls = `handCard discardable${isEquip ? " equipCard" : ""}${selected ? " selectedForDiscard" : ""}`;
+            const suitOverlay = !isEquip
+              ? `<img class="handCardSuit" src="${IMG}/system/cardsuit/${c.suit}.png" alt=""><span class="handCardPoint">${pointLabel(c.point)}</span>`
+              : "";
+            return `<div class="${cls}" onclick="window.__toggleDiscard(${c.id})" title="${cardLabel(c)}">
+              <img class="handCardImg" src="${cardImageSrc(c)}" alt="${cardLabel(c)}">
+              ${suitOverlay}
+              <div class="handCardName">${cardLabel(c)}</div>
+            </div>`;
+          })
+          .join("");
+        const remaining = pendingDiscard.count - selectedDiscardIds.size;
+        freeActionBarEl.style.display = "flex";
+        freeActionBarEl.innerHTML = `
+          <span class="freeActionHint">Bài trên tay vượt quá số máu — chọn ${pendingDiscard.count} lá để bỏ${remaining > 0 ? ` (còn ${remaining})` : ""}</span>
+          <button id="confirmDiscardBtn"${remaining !== 0 ? " disabled" : ""}>Xác nhận bỏ bài</button>`;
+        document.getElementById("confirmDiscardBtn").onclick = () => answerDiscard();
+        return;
+      }
+      if (!mySeat || !lastState || !lastState.myHand) {
+        myHandWrapEl.className = "";
+        return;
+      }
+      myHandWrapEl.className = "active";
+
+      const cardActionMap = new Map(); // cardId -> actionId
+      const skillActions = [];
+      if (pendingFreeAction) {
+        for (const a of pendingFreeAction.legalActions) {
+          if (a.kind === "equip" || a.kind === "playCard") {
+            if (!cardActionMap.has(a.cardId)) cardActionMap.set(a.cardId, a.actionId);
+          } else {
+            skillActions.push(a);
+          }
+        }
+      }
+
+      myHandCardsEl.innerHTML = lastState.myHand
+        .map((c) => {
+          const actionId = cardActionMap.get(c.id);
+          const playable = actionId !== undefined;
+          const isEquip = c.kind === "weapon" || c.kind === "horse";
+          const cls = `handCard${isEquip ? " equipCard" : ""}${playable ? " playable" : ""}`;
+          const onclick = playable ? ` onclick="window.__playCard(${actionId})"` : "";
+          const suitOverlay = !isEquip
+            ? `<img class="handCardSuit" src="${IMG}/system/cardsuit/${c.suit}.png" alt=""><span class="handCardPoint">${pointLabel(c.point)}</span>`
+            : "";
+          return `<div class="${cls}"${onclick} title="${cardLabel(c)}">
+            <img class="handCardImg" src="${cardImageSrc(c)}" alt="${cardLabel(c)}">
+            ${suitOverlay}
+            <div class="handCardName">${cardLabel(c)}</div>
+          </div>`;
+        })
+        .join("");
+
+      if (pendingFreeAction) {
+        const skillButtons = skillActions
+          .map((a) => `<button class="skillActionBtn" onclick="window.__playCard(${a.actionId})">${a.skillDisplayName}</button>`)
+          .join("");
+        freeActionBarEl.style.display = "flex";
+        freeActionBarEl.innerHTML = `
+          <span class="freeActionHint">Lượt của bạn — chọn 1 lá để đánh${skillActions.length ? ", hoặc dùng kỹ năng" : ""}</span>
+          ${skillButtons}
+          <button id="endPhaseBtn">Kết thúc lượt</button>`;
+        document.getElementById("endPhaseBtn").onclick = () => answerFreeAction(null);
+      } else {
+        freeActionBarEl.style.display = "none";
+        freeActionBarEl.innerHTML = "";
+      }
+    }
+
+    function answerFreeAction(actionId) {
+      if (!pendingFreeAction) return;
+      send({ type: "response", requestId: pendingFreeAction.requestId, actionId });
+      pendingFreeAction = null;
+      renderMyHand();
+    }
+    window.__playCard = answerFreeAction;
+
+    /** End-of-turn Discard phase: click cards to toggle them for discard (up to the required
+     *  count), then confirm -- a real choice instead of the server arbitrarily picking for you. */
+    window.__toggleDiscard = (cardId) => {
+      if (!pendingDiscard) return;
+      if (selectedDiscardIds.has(cardId)) {
+        selectedDiscardIds.delete(cardId);
+      } else if (selectedDiscardIds.size < pendingDiscard.count) {
+        selectedDiscardIds.add(cardId);
+      }
+      renderMyHand();
+    };
+    function answerDiscard() {
+      if (!pendingDiscard || selectedDiscardIds.size !== pendingDiscard.count) return;
+      send({ type: "response", requestId: pendingDiscard.requestId, cardIds: [...selectedDiscardIds] });
+      pendingDiscard = null;
+      selectedDiscardIds = new Set();
+      renderMyHand();
+    }
+
+    /** Renders the pick-a-general screen: while it's OUR turn (`pendingGeneralPick` set from a
+     *  `pickGeneral` message), 3 face-down candidates you must manually flip before picking one
+     *  ("thao tác thủ công thay vì tự động"); otherwise a "waiting for X" placeholder, since only
+     *  the asked player's own candidates are ever sent to that player's socket. */
+    function renderPickGeneral() {
+      if (pendingGeneralPick) {
+        pickGeneralHintEl.textContent = "Lượt của bạn — lật và chọn 1 trong 3 tướng";
+        pickGeneralCardsEl.innerHTML = pendingGeneralPick.candidates
+          .map((g, i) => {
+            if (!flippedGeneralIndices.has(i)) {
+              return `<div class="generalCard">
+                <img src="${IMG}/generals/big/anjiang.png" alt="" onerror="this.style.display='none'">
+                <div class="generalCardBody">
+                  <div class="generalCardName">Tướng ẩn</div>
+                  <div class="generalCardMeta">?</div>
+                </div>
+                <button class="flipBtn" onclick="window.__flipGeneral(${i})">Lật bài</button>
+              </div>`;
+            }
+            const skillsHtml = g.skills
+              .map((s) => `<div class="skill"><span class="skillName">◆ ${s.name}</span><span class="skillDesc">${s.description}</span></div>`)
+              .join("");
+            return `<div class="generalCard revealed">
+              <img src="${IMG}/generals/big/${g.name}.png" alt="${g.displayName}" onerror="this.src='${IMG}/generals/avatar/${g.name}.png'">
+              <div class="generalCardBody">
+                <div class="generalCardName">${g.displayName}</div>
+                <div class="generalCardMeta">${KINGDOM_LABEL[g.kingdom] || g.kingdom} · ${g.maxHp} máu</div>
+                ${skillsHtml}
+              </div>
+              <button class="pickBtn" onclick="window.__pickGeneral(${i})">Chọn tướng này</button>
+            </div>`;
+          })
+          .join("");
+      } else {
+        const waitingFor = lastState?.pickTurnPlayerId;
+        pickGeneralHintEl.textContent = waitingFor ? `Đang chờ ${waitingFor} chọn tướng…` : "Đang chọn tướng…";
+        pickGeneralCardsEl.innerHTML = "";
+      }
+    }
+    window.__flipGeneral = (i) => {
+      flippedGeneralIndices.add(i);
+      renderPickGeneral();
+    };
+    window.__pickGeneral = (i) => {
+      if (!pendingGeneralPick) return;
+      const g = pendingGeneralPick.candidates[i];
+      send({ type: "response", requestId: pendingGeneralPick.requestId, generalName: g.name });
+      pendingGeneralPick = null;
+      flippedGeneralIndices = new Set();
+      renderPickGeneral();
+    };
+
+    function render(state) {
+      lastState = state;
+      amICreator = !!state.isCreator;
+      const started = !!state.started;
+      const picking = started && !!state.pickingGenerals;
+      const over = !!state.gameOver;
+      const mySeatAlive = mySeat ? state.players.find((p) => p.id === mySeat)?.alive : true;
+      if ((over || !mySeatAlive) && pendingFreeAction) pendingFreeAction = null; // no more decisions possible; drop the stale prompt
+      if (!picking) {
+        pendingGeneralPick = null; // picking just ended (or never started) -- drop any stale leftover
+        pickGeneralCardsEl.innerHTML = ""; // clear stale (now hidden) candidate cards from the last pick
+      }
+      startGameBtn.style.display = !started && amICreator ? "" : "none";
+      tableEl.style.display = picking ? "none" : "";
+      pickGeneralPanelEl.style.display = picking ? "block" : "none";
+      turnBannerEl.className = over ? "over" : "";
+      if (picking) {
+        turnBannerEl.textContent =
+          state.pickTurnPlayerId === mySeat ? "Lượt của bạn — chọn tướng" : `Đang chờ ${state.pickTurnPlayerId} chọn tướng…`;
+        centerTurnEl.textContent = "Đang chọn tướng";
+        centerActingEl.textContent = "";
+        renderPickGeneral();
+      } else if (!started) {
+        turnBannerEl.textContent = amICreator
+          ? "Phòng đang chờ — bấm \"Bắt đầu trận đấu\" khi đã sẵn sàng"
+          : "Đang chờ chủ phòng bắt đầu trận đấu…";
+        centerTurnEl.textContent = "Chưa bắt đầu";
+        centerActingEl.textContent = "";
+      } else {
+        turnBannerEl.textContent = over ? `${state.gameOver.winners.map((w) => ROLE_LABEL[w]).join(" + ")} chiến thắng` : "";
+        centerTurnEl.textContent = `Lượt ${state.turnNumber}`;
+        centerActingEl.textContent = over ? "Ván đấu kết thúc" : `Đang đi: ${state.currentPlayerId ?? "-"}`;
+      }
+      myseatEl.textContent = mySeat
+        ? `Đang điều khiển: ${mySeat}`
+        : "Đang xem — bấm \"Chiếm ghế\" để điều khiển quyết định Sát.";
+
+      renderPlayers();
+      renderHero(!picking && mySeat ? state.players.find((p) => p.id === mySeat) : null);
+      if (picking) {
+        myHandWrapEl.className = ""; // no hand dealt yet during general selection
+      } else {
+        renderMyHand();
+      }
+
+      logEl.textContent = state.log.join("\n");
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    /** Target picker (Slash or a single-target trick): click a highlighted candidate, or Bỏ qua. */
+    function showTargetPicker(msg, imgSrc, title, sub) {
+      pendingPrompt = msg;
+      promptOverlayEl.className = "active picking";
+      promptEl.innerHTML = `
+        <img class="cardArt" src="${imgSrc}" alt="">
+        <div class="promptTitle">${title}</div>
+        <div class="promptSub">${sub} — ${msg.timeoutMs / 1000}s để trả lời</div>
+        <button id="promptPass">Bỏ qua</button>`;
+      document.getElementById("promptPass").onclick = () => answerPrompt(null);
+      renderPlayers(); // apply the .candidate highlighting + click handlers for msg.candidateIds now
+    }
+
+    /** Yes/No confirmation prompt shared by equip/trick/dodge/peach asks. */
+    function showConfirm(msg, imgSrc, title, sub) {
+      promptOverlayEl.className = "active";
+      promptEl.innerHTML = `
+        <img class="cardArt" src="${imgSrc}" alt="">
+        <div class="promptTitle">${title}</div>
+        <div class="promptSub">${sub} — ${msg.timeoutMs / 1000}s để trả lời</div>
+        <button id="promptYes" class="confirmYes">Đồng ý</button>
+        <button id="promptPass">Không</button>`;
+      const close = () => {
+        promptOverlayEl.className = "";
+        promptEl.innerHTML = "";
+      };
+      document.getElementById("promptYes").onclick = () => {
+        send({ type: "response", requestId: msg.requestId, value: true });
+        close();
+      };
+      document.getElementById("promptPass").onclick = () => {
+        send({ type: "response", requestId: msg.requestId, value: false });
+        close();
+      };
+    }
+
+    /** Amazing Grace draft: click one of the still-face-up cards from the pool -- mandatory, no
+     *  "Bỏ qua" (real Sanguosha requires everyone in line to take exactly one). */
+    function showCardPicker(msg) {
+      promptOverlayEl.className = "active";
+      const cardsHtml = msg.cards
+        .map(
+          (c) => `<div class="pickCardOption" data-card-id="${c.id}">
+            <img src="${cardImageSrc(c)}" alt="${cardLabel(c)}">
+            <div class="pickCardLabel">${cardLabel(c)}</div>
+          </div>`,
+        )
+        .join("");
+      promptEl.innerHTML = `
+        <div class="promptTitle">${TRICK_LABEL.amazing_grace}</div>
+        <div class="promptSub">Lượt của bạn — chọn 1 trong ${msg.cards.length} lá đã lật — ${msg.timeoutMs / 1000}s để trả lời</div>
+        <div id="pickCardOptions">${cardsHtml}</div>`;
+      promptEl.querySelectorAll(".pickCardOption").forEach((el) => {
+        el.onclick = () => {
+          send({ type: "response", requestId: msg.requestId, cardId: Number(el.dataset.cardId) });
+          promptOverlayEl.className = "";
+          promptEl.innerHTML = "";
+        };
+      });
+    }
+
+    function connect() {
+      ws = new WebSocket(`ws://${location.hostname || "localhost"}:8787`);
+      ws.onopen = () => {
+        statusEl.textContent = "Đã kết nối";
+        statusEl.className = "connected";
+      };
+      ws.onclose = () => {
+        statusEl.textContent = "Mất kết nối — đang thử lại…";
+        statusEl.className = "disconnected";
+        showLobbyView();
+        roomListEl.innerHTML = "";
+        setTimeout(connect, 1000);
+      };
+      ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "roomList") {
+          showLobbyView();
+          renderLobby(msg.rooms);
+          return;
+        }
+        if (msg.type === "error") {
+          showLobbyError(msg.message);
+          return;
+        }
+        if (msg.type === "state") {
+          showGameView(msg.roomId);
+          render(msg);
+          return;
+        }
+        if (msg.type === "pickGeneral") {
+          if (msg.actorId !== mySeat) return; // a prompt for a seat this tab doesn't control
+          pendingGeneralPick = msg;
+          flippedGeneralIndices = new Set();
+          renderPickGeneral();
+          return;
+        }
+        if (msg.type === "chooseFreeAction") {
+          if (msg.actorId !== mySeat) return; // a prompt for a seat this tab doesn't control
+          if (lastState) lastState.myHand = msg.hand; // server only re-broadcasts full state once
+          // per completed turn; this ask carries the actor's live hand so mid-turn draws/plays
+          // (e.g. this turn's Draw phase, or an already-played card) never go stale.
+          pendingFreeAction = msg;
+          renderMyHand();
+          return;
+        }
+        if (msg.type === "chooseDiscards") {
+          if (msg.actorId !== mySeat) return; // a prompt for a seat this tab doesn't control
+          pendingDiscard = msg;
+          selectedDiscardIds = new Set();
+          if (lastState) lastState.myHand = msg.hand;
+          renderMyHand();
+          return;
+        }
+        if (msg.type === "choosePickCard") {
+          if (msg.actorId !== mySeat) return; // a prompt for a seat this tab doesn't control
+          showCardPicker(msg);
+          return;
+        }
+        const isPromptType = [
+          "chooseSlashTarget",
+          "chooseTrickTarget",
+          "confirmEquip",
+          "confirmTrick",
+          "confirmDodge",
+          "confirmPeach",
+          "confirmDuelSlash",
+          "confirmGanglieDiscard",
+          "confirmSavageAssaultSlash",
+          "confirmArcheryAttackJink",
+          "confirmSelfAction",
+        ].includes(msg.type);
+        if (isPromptType) {
+          if (msg.actorId !== mySeat) return; // a prompt for a seat this tab doesn't control
+          if (msg.type === "chooseSlashTarget")
+            showTargetPicker(msg, `${IMG}/card/slash.png`, `${msg.actorId} xuất Sát`, "Chọn mục tiêu trên bàn đấu");
+          else if (msg.type === "chooseTrickTarget")
+            showTargetPicker(
+              msg,
+              `${IMG}/card/${msg.kind}.png`,
+              `${msg.actorId} dùng ${TRICK_LABEL[msg.kind] || msg.kind}`,
+              "Chọn mục tiêu trên bàn đấu",
+            );
+          else if (msg.type === "confirmEquip")
+            showConfirm(msg, `${IMG}/equips/${msg.cardName}.png`, `Trang bị ${msg.cardName}?`, "Bạn có muốn trang bị lá này ngay bây giờ không?");
+          else if (msg.type === "confirmTrick")
+            showConfirm(msg, `${IMG}/card/${msg.kind}.png`, `Dùng ${TRICK_LABEL[msg.kind] || msg.kind}?`, "Bạn có muốn dùng lá bài này không?");
+          else if (msg.type === "confirmDodge") showConfirm(msg, `${IMG}/card/jink.png`, "Bị Sát!", "Dùng Thiểm để né?");
+          else if (msg.type === "confirmPeach") showConfirm(msg, `${IMG}/card/peach.png`, "Đang hấp hối!", "Dùng Đào để tự cứu?");
+          else if (msg.type === "confirmDuelSlash")
+            showConfirm(msg, `${IMG}/card/slash.png`, "Đang trong Quyết Đấu!", "Đánh ra Sát để tiếp tục?");
+          else if (msg.type === "confirmGanglieDiscard")
+            showConfirm(msg, `${IMG}/card/dismantlement.png`, "Cương Liệt!", "Bỏ 2 lá bài thay vì chịu 1 sát thương?");
+          else if (msg.type === "confirmSavageAssaultSlash")
+            showConfirm(msg, `${IMG}/card/savage_assault.png`, "Bị Nam Man Nhập Xâm!", "Đánh ra Sát để tránh 1 sát thương?");
+          else if (msg.type === "confirmArcheryAttackJink")
+            showConfirm(msg, `${IMG}/card/archery_attack.png`, "Bị Vạn Tiễn Tề Phát!", "Dùng Thiểm để tránh 1 sát thương?");
+          else if (msg.type === "confirmSelfAction") {
+            const general = lastState?.players.find((p) => p.id === msg.actorId)?.general;
+            showConfirm(
+              msg,
+              general ? `${IMG}/generals/avatar/${general}.png` : "",
+              `${msg.skillDisplayName}?`,
+              msg.skillDescription || "Bạn có muốn dùng kỹ năng này ngay bây giờ không?",
+            );
+          }
+          return;
+        }
+      };
+      newGameBtn.onclick = () => {
+        mySeat = null;
+        pendingPrompt = null;
+        pendingFreeAction = null;
+        pendingGeneralPick = null;
+        flippedGeneralIndices = new Set();
+        pendingDiscard = null;
+        selectedDiscardIds = new Set();
+        promptOverlayEl.className = "";
+        promptEl.innerHTML = "";
+        send({ type: "new" });
+      };
+      leaveRoomBtn.onclick = () => {
+        send({ type: "leaveRoom" });
+      };
+      createRoomBtn.onclick = () => {
+        const playerCount = Number(playerCountSelectEl.value);
+        send({ type: "createRoom", playerCount });
+      };
+      startGameBtn.onclick = () => {
+        send({ type: "startGame" });
+      };
+    }
+    connect();
+  </script>
+</body>
+</html>

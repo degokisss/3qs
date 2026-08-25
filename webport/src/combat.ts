@@ -1,0 +1,339 @@
+// Basic-card combat resolution: Slash -> Jink, dying -> Peach rescue. Structurally mirrors
+// Room::useCard/room->activate (src/server/room.cpp) and GameRule's AskForPeaches handling
+// (src/server/gamerule.cpp), simplified to the base rules with no equip-skill modifiers yet (no
+// Crossbow multi-slash, no Qinggang armor-ignore -- see webport/README.md).
+//
+// Whether to actually play a held Jink/Peach is now a real per-player decision (ctx.askDodge /
+// ctx.askPeach, routed through controller.ts) instead of always-auto-use -- this is what lets a
+// human seat choose to save a Jink/Peach for later instead of reflexively spending it.
+//
+// Milestone 2.6 (batch 3): resolveSlash grew 3 more hook points to cover a wider swath of
+// generals in one pass -- onIncomingSlash (nullify/redirect before the Jink check, e.g. Liushan/
+// Daqiao), responseCountRequired (Lu Bu's Wushuang: needs 2 Jinks, not 1), onSlashDodged (fired
+// on both sides after a successful dodge, e.g. Pangde/Zhangjiao). All 3 are no-ops for any player
+// with no matching skill, so the single-Jink/no-redirect path used by every earlier general is
+// byte-for-byte unchanged.
+
+import { Card, CardKind } from "./card.js";
+import { GamePlayer } from "./player.js";
+import { Role } from "./types.js";
+
+/**
+ * Player::distanceTo: shortest seat-circle hop count among currently ALIVE players, adjusted by
+ * equipped horses -- `to`'s defense horse (+1) and `from`'s offense horse (-1) -- and by
+ * `from`'s skills (e.g. Mashu's `attackDistanceDelta`, same -1-per-point shape as an offense
+ * horse) -- floored at 1.
+ */
+export function effectiveDistance(alive: GamePlayer[], from: GamePlayer, to: GamePlayer): number {
+  const i = alive.indexOf(from);
+  const j = alive.indexOf(to);
+  const n = alive.length;
+  const forward = (j - i + n) % n;
+  const seatDistance = Math.min(forward, n - forward);
+  const horseDelta = (to.defenseHorse?.horseDelta ?? 0) - (from.offenseHorse ? 1 : 0);
+  const skillDelta = from.skills.reduce((sum, skill) => sum + (skill.attackDistanceDelta?.(from) ?? 0), 0);
+  return Math.max(1, seatDistance + horseDelta - skillDelta);
+}
+
+function takeCard(hand: Card[], kind: CardKind): Card | null {
+  const idx = hand.findIndex((c) => c.kind === kind);
+  if (idx === -1) return null;
+  return hand.splice(idx, 1)[0];
+}
+
+/** A real Jink card, or (e.g. Longdan/Qingguo) the first card some skill allows viewing as Jink. */
+export function findJinkLikeCard(player: GamePlayer): Card | null {
+  const real = player.hand.find((c) => c.kind === CardKind.Jink);
+  if (real) return real;
+  for (const skill of player.skills) {
+    if (!skill.canViewAsJink) continue;
+    const viewed = player.hand.find((c) => skill.canViewAsJink!(c, player));
+    if (viewed) return viewed;
+  }
+  return null;
+}
+
+/** A real Peach card, or (e.g. Jijiu) the first card some skill allows viewing as one. */
+function findPeachLikeCard(player: GamePlayer): Card | null {
+  const real = player.hand.find((c) => c.kind === CardKind.Peach);
+  if (real) return real;
+  for (const skill of player.skills) {
+    if (!skill.canViewAsPeach) continue;
+    const viewed = player.hand.find((c) => skill.canViewAsPeach!(c, player));
+    if (viewed) return viewed;
+  }
+  return null;
+}
+
+/** A real Slash card, or (e.g. Wusheng/Longdan) the first card some skill allows viewing as Slash. */
+export function findSlashLikeCard(player: GamePlayer): Card | null {
+  const real = player.hand.find((c) => c.kind === CardKind.Slash);
+  if (real) return real;
+  for (const skill of player.skills) {
+    if (!skill.canViewAsSlash) continue;
+    const viewed = player.hand.find((c) => skill.canViewAsSlash!(c, player));
+    if (viewed) return viewed;
+  }
+  return null;
+}
+
+/** Every real Slash card plus every card a skill allows viewing as Slash (e.g. Wusheng/Longdan)
+ *  -- unlike `findSlashLikeCard`, returns ALL matches, not just the first, for a freeform Play
+ *  phase's legal-action list (see room.ts's `computeLegalActions`). */
+export function allSlashLikeCards(player: GamePlayer): Card[] {
+  const cards = player.hand.filter((c) => c.kind === CardKind.Slash);
+  for (const skill of player.skills) {
+    if (!skill.canViewAsSlash) continue;
+    for (const c of player.hand) {
+      if (c.kind !== CardKind.Slash && skill.canViewAsSlash(c, player) && !cards.includes(c)) cards.push(c);
+    }
+  }
+  return cards;
+}
+
+/** A real Dismantlement card, or (e.g. Qixi) the first card some skill allows viewing as one. */
+export function findDismantlementLikeCard(player: GamePlayer): Card | null {
+  const real = player.hand.find((c) => c.kind === CardKind.Dismantlement);
+  if (real) return real;
+  for (const skill of player.skills) {
+    if (!skill.canViewAsDismantlement) continue;
+    const viewed = player.hand.find((c) => skill.canViewAsDismantlement!(c, player));
+    if (viewed) return viewed;
+  }
+  return null;
+}
+
+/** Every real Dismantlement card plus every card a skill allows viewing as one (e.g. Qixi) --
+ *  see `allSlashLikeCards`'s header for why this exists alongside `findDismantlementLikeCard`. */
+export function allDismantlementLikeCards(player: GamePlayer): Card[] {
+  const cards = player.hand.filter((c) => c.kind === CardKind.Dismantlement);
+  for (const skill of player.skills) {
+    if (!skill.canViewAsDismantlement) continue;
+    for (const c of player.hand) {
+      if (c.kind !== CardKind.Dismantlement && skill.canViewAsDismantlement(c, player) && !cards.includes(c)) cards.push(c);
+    }
+  }
+  return cards;
+}
+
+/** A real Duel card, or (e.g. Shuangxiong) the first card some skill allows viewing as one. */
+export function findDuelLikeCard(player: GamePlayer): Card | null {
+  const real = player.hand.find((c) => c.kind === CardKind.Duel);
+  if (real) return real;
+  for (const skill of player.skills) {
+    if (!skill.canViewAsDuel) continue;
+    const viewed = player.hand.find((c) => skill.canViewAsDuel!(c, player));
+    if (viewed) return viewed;
+  }
+  return null;
+}
+
+/** Every real Duel card plus every card a skill allows viewing as one (e.g. Shuangxiong) -- see
+ *  `allSlashLikeCards`'s header for why this exists alongside `findDuelLikeCard`. */
+export function allDuelLikeCards(player: GamePlayer): Card[] {
+  const cards = player.hand.filter((c) => c.kind === CardKind.Duel);
+  for (const skill of player.skills) {
+    if (!skill.canViewAsDuel) continue;
+    for (const c of player.hand) {
+      if (c.kind !== CardKind.Duel && skill.canViewAsDuel(c, player) && !cards.includes(c)) cards.push(c);
+    }
+  }
+  return cards;
+}
+
+/** True if any of `player`'s skills (e.g. Kongcheng) make them immune to Slash/Duel targeting right now. */
+export function isImmuneToSlashAndDuel(player: GamePlayer): boolean {
+  return player.skills.some((skill) => skill.immuneToSlashAndDuel?.(player));
+}
+
+/** True if any of `player`'s skills (e.g. Qianxun) make them immune to Snatch targeting right now. */
+export function isImmuneToSnatch(player: GamePlayer): boolean {
+  return player.skills.some((skill) => skill.immuneToSnatch?.(player));
+}
+
+/** Shared engine-callback surface for combat.ts and trick.ts card resolution. */
+export interface EngineContext {
+  alivePlayers: GamePlayer[];
+  discardPile: Card[];
+  log: string[];
+  /** Shared PRNG, for skill hooks that need randomness without threading an `rng` param through
+   *  every call site (e.g. picking a random discarded card for Guzheng). */
+  rng: () => number;
+  draw: (player: GamePlayer, n: number) => void;
+  /** Pops one card off the draw pile (reshuffling the discard pile in if needed) without giving
+   *  it to any player -- for one-off judgment reveals (e.g. Ganglie). Caller must push it to
+   *  discardPile when done inspecting it. */
+  drawTop: () => Card | null;
+  /** `killerRole` is null for a self-inflicted loss of hp with no credited attacker (e.g. Kurou). */
+  onDying: (player: GamePlayer, killerRole: Role | null) => void;
+  /** Fired right after hp is reduced, before the dying/Peach-rescue check -- general skill hooks
+   *  on the DAMAGED player (e.g. Ganglie) attach here. */
+  onDamage?: (target: GamePlayer, source: GamePlayer) => Promise<void> | void;
+  /** Fired right after damage lands, before the dying/Peach-rescue check -- general skill hooks
+   *  on the ATTACKING player (e.g. Kuanggu) attach here. */
+  onDamageDealt?: (source: GamePlayer, target: GamePlayer, amount: number) => Promise<void> | void;
+  /** Does `player` want to play a held Jink against an incoming Slash? Only called when they hold one. */
+  askDodge: (player: GamePlayer) => Promise<boolean>;
+  /** Does `player` want to play a held Peach to recover while dying? Only called when they hold one. */
+  askPeach: (player: GamePlayer) => Promise<boolean>;
+  /** Does `player` want to play a held Slash to continue a Duel exchange? Only called when they hold one. */
+  askDuelSlash: (player: GamePlayer) => Promise<boolean>;
+  /** Does `player` want to discard 2 cards (vs. take 1 damage) for Ganglie? Only called when they have >=2 cards. */
+  askGanglieDiscard: (player: GamePlayer) => Promise<boolean>;
+  /** Does `player` want to invoke `skillName` right now? Generic optional-invoke gate reused by
+   *  every proactive/reactive skill added since Milestone 2.6 batch 2 (not just Play-phase self
+   *  actions like Kurou any more -- the name stuck, the shape is now "wants to use this skill"). */
+  askUseSelfAction: (player: GamePlayer, skillName: string) => Promise<boolean>;
+  /** Generic single-target picker with no built-in range/kind filter -- `candidates` is
+   *  pre-filtered by the caller (e.g. to allies, or to wounded players). Returns null to decline. */
+  askChooseAnyPlayer: (player: GamePlayer, candidates: GamePlayer[]) => Promise<GamePlayer | null>;
+  /** Does `player` want to discard a held Slash (vs. take 1 damage) for Savage Assault? Only
+   *  called when they hold one -- real Sanguosha makes this the player's choice, not automatic. */
+  askSavageAssaultSlash: (player: GamePlayer) => Promise<boolean>;
+  /** Does `player` want to discard a held Jink (vs. take 1 damage) for Archery Attack? Only
+   *  called when they hold one -- same "player's choice, not automatic" rule as above. */
+  askArcheryAttackJink: (player: GamePlayer) => Promise<boolean>;
+  /** Amazing Grace: `player`'s turn to take exactly one card from the still-face-up
+   *  `candidates` pool. Must return one of `candidates` -- an invalid/missing return falls back
+   *  to `candidates[0]` (see trick.ts's resolveAmazingGrace). */
+  askPickCard: (player: GamePlayer, candidates: Card[]) => Promise<Card>;
+  /** Fired once, right when a player's hp first drops to <=0, before the Peach-rescue loop --
+   *  broadcast to every OTHER alive player's skills (e.g. Tianfeng's Suishi). */
+  onDyingStarted?: (player: GamePlayer) => Promise<void> | void;
+}
+
+/** Resolves one Slash from `attacker` at `target`: Jink cancels it, otherwise 1 damage + dying check. */
+export async function resolveSlash(
+  ctx: EngineContext,
+  attacker: GamePlayer,
+  target: GamePlayer,
+  slashCard: Card,
+): Promise<void> {
+  ctx.discardPile.push(slashCard);
+  ctx.log.push(`${attacker.id} slashes ${target.id}`);
+  attacker.playedSlashThisTurn = true;
+
+  // Defender's onIncomingSlash (e.g. Liushan's Xiangle: nullify; Daqiao's Liuli: redirect) --
+  // evaluated before anything else, since a redirect changes who the rest of resolution targets.
+  let effectiveTarget = target;
+  for (const skill of target.skills) {
+    if (!skill.onIncomingSlash) continue;
+    const result = await skill.onIncomingSlash(ctx, attacker, target);
+    if (result?.nullify) {
+      ctx.log.push(`${target.id} nullifies the slash`);
+      return;
+    }
+    if (result?.redirectTo && result.redirectTo.alive && result.redirectTo !== target) {
+      ctx.log.push(`${target.id} redirects the slash to ${result.redirectTo.id}`);
+      effectiveTarget = result.redirectTo;
+      break;
+    }
+  }
+
+  let dodgeBlocked = false;
+  for (const skill of attacker.skills) {
+    if (skill.onSlashTargeted && (await skill.onSlashTargeted(ctx, attacker, effectiveTarget))) dodgeBlocked = true;
+  }
+
+  // responseCountRequired (e.g. Lu Bu's Wushuang: needs 2 Jinks) -- defaults to 1 for every
+  // skill/player that doesn't define it, so this is a no-op for the vast majority of dodges.
+  const requiredJinks = dodgeBlocked
+    ? 0
+    : Math.max(1, ...effectiveTarget.skills.map((s) => s.responseCountRequired?.("dodge", effectiveTarget) ?? 1));
+  const firstJink = requiredJinks > 0 ? findJinkLikeCard(effectiveTarget) : null;
+  if (firstJink && (await ctx.askDodge(effectiveTarget))) {
+    const spent = [firstJink];
+    effectiveTarget.hand.splice(effectiveTarget.hand.indexOf(firstJink), 1);
+    let allFound = true;
+    for (let i = 1; i < requiredJinks; i++) {
+      const next = findJinkLikeCard(effectiveTarget);
+      if (!next) {
+        allFound = false;
+        break;
+      }
+      effectiveTarget.hand.splice(effectiveTarget.hand.indexOf(next), 1);
+      spent.push(next);
+    }
+    if (allFound) {
+      ctx.discardPile.push(...spent);
+      for (const c of spent) {
+        if (c.kind !== CardKind.Jink) ctx.log.push(`${effectiveTarget.id} views a card as jink (viewAs skill)`);
+      }
+      ctx.log.push(`${effectiveTarget.id} dodges with jink${spent.length > 1 ? ` (x${spent.length})` : ""}`);
+      for (const skill of attacker.skills) await skill.onSlashDodged?.(ctx, attacker, effectiveTarget);
+      for (const skill of effectiveTarget.skills) await skill.onSlashDodged?.(ctx, attacker, effectiveTarget);
+      return;
+    }
+    // Couldn't complete the required set (e.g. only 1 of Wushuang's 2 jinks): nothing was
+    // actually played, so return the tentatively-removed card(s) to hand instead of discarding.
+    effectiveTarget.hand.push(...spent);
+    ctx.log.push(`${effectiveTarget.id} could not find ${requiredJinks} jinks and takes the hit`);
+  }
+
+  await applyDamage(ctx, effectiveTarget, 1, attacker);
+}
+
+/**
+ * Shared by Slash/Duel/AOE resolution: apply damage, then run the dying/Peach-rescue loop.
+ * `source.pendingBonusDamage` (armed by e.g. Luoyi) adds on top of `amount` once, then resets;
+ * `target`'s `reduceDamage` skills (e.g. Kongrong's Mingshi) run after that, and can floor the
+ * final amount at or below 0 to cancel the hit entirely (no `onDamage`/`onDamageDealt`/dying).
+ */
+export async function applyDamage(ctx: EngineContext, target: GamePlayer, amount: number, source: GamePlayer): Promise<void> {
+  let finalAmount = amount + source.pendingBonusDamage;
+  source.pendingBonusDamage = 0;
+  for (const skill of target.skills) {
+    if (skill.reduceDamage) finalAmount = await skill.reduceDamage(ctx, target, source, finalAmount);
+  }
+  if (finalAmount <= 0) {
+    ctx.log.push(`${target.id} takes no damage (reduced to 0)`);
+    return;
+  }
+
+  target.hp -= finalAmount;
+  ctx.log.push(`${target.id} takes ${finalAmount} damage (hp ${target.hp}/${target.maxHp})`);
+  await ctx.onDamage?.(target, source);
+  await ctx.onDamageDealt?.(source, target, finalAmount);
+  if (target.hp <= 0) await resolveDying(ctx, target, source.role);
+}
+
+/** Player::loseHp: reduces hp directly (no `onDamage`/`onDamageDealt` skill triggers -- this
+ *  isn't "damage"), still runs the dying/Peach-rescue check. `killerRole` is null: a
+ *  self-inflicted loss credits no side (e.g. Kurou). */
+export async function loseHp(ctx: EngineContext, player: GamePlayer, amount: number): Promise<void> {
+  player.hp -= amount;
+  ctx.log.push(`${player.id} loses ${amount} hp (hp ${player.hp}/${player.maxHp})`);
+  if (player.hp <= 0) await resolveDying(ctx, player, null);
+}
+
+/** Player::recover: heals `player` (capped at maxHp) and fires their `onRecover` skill hooks
+ *  (e.g. Ganfuren's Shushen) -- shared by Peach-rescue, GodSalvation, and Kuanggu so all 3
+ *  recovery sources trigger it uniformly, matching the real rule ("whenever you recover"). */
+export async function heal(ctx: EngineContext, player: GamePlayer, amount: number): Promise<void> {
+  const healed = Math.min(amount, player.maxHp - player.hp);
+  if (healed <= 0) return;
+  player.hp += healed;
+  for (const skill of player.skills) {
+    if (player.alive) await skill.onRecover?.(ctx, player, healed);
+  }
+}
+
+/**
+ * Player::askForPeaches equivalent: while hp <= 0, offer Peach to the dying player first (only
+ * self-rescue is modeled for now -- real ally-aware rescue needs the AI this milestone defers),
+ * then give up and let the caller record the death with the credited killer role.
+ */
+async function resolveDying(ctx: EngineContext, player: GamePlayer, killerRole: Role | null): Promise<void> {
+  ctx.log.push(`${player.id} is dying (hp ${player.hp})`);
+  await ctx.onDyingStarted?.(player);
+  while (player.hp <= 0) {
+    const peach = findPeachLikeCard(player);
+    if (!peach || !(await ctx.askPeach(player))) break;
+    player.hand.splice(player.hand.indexOf(peach), 1);
+    ctx.discardPile.push(peach);
+    if (peach.kind !== CardKind.Peach) ctx.log.push(`${player.id} views a card as peach (viewAs skill)`);
+    await heal(ctx, player, 1);
+    ctx.log.push(`${player.id} uses peach to recover (hp ${player.hp}/${player.maxHp})`);
+  }
+  if (player.hp <= 0) ctx.onDying(player, killerRole);
+}
