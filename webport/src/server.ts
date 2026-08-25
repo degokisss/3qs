@@ -487,7 +487,12 @@ const httpServer = createServer((req, res) => {
         res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("Not found");
         return;
       }
-      res.writeHead(200, { "Content-Type": file.contentType, "Cache-Control": "public, max-age=3600" }).end(file.body);
+      // The HTML shell changes on every deploy (client logic, tooltips, etc. all live inline in
+      // it) -- caching it would leave already-connected browsers stuck on a stale build with no
+      // way to revalidate (no ETag/Last-Modified support here). Only the true static assets
+      // (original QSanguosha images/fonts, which never change post-release) get the long cache.
+      const cacheControl = file.contentType.startsWith("text/html") ? "no-store" : "public, max-age=3600";
+      res.writeHead(200, { "Content-Type": file.contentType, "Cache-Control": cacheControl }).end(file.body);
     })
     .catch(() => res.writeHead(500).end("Internal error"));
 });

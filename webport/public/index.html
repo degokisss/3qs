@@ -456,6 +456,25 @@
   .equipBadge.defense { background: #4db8ff; color: #06131c; } /* +1: others need +1 distance to reach you */
   .equipBadge.offense { background: #f2795a; color: #260a03; } /* -1: your distance to others -1 */
   .equipEmpty { font-size: 10px; color: var(--text-dim); font-style: italic; }
+  /* --- custom floating tooltip: hover over equip icons (replaces the native `title` attribute,
+     which is slow to appear and tiny/easy to miss against this dark theme) --- */
+  #tooltip {
+    display: none;
+    position: fixed;
+    z-index: 90;
+    pointer-events: none;
+    max-width: 240px;
+    background: linear-gradient(180deg, #1c1710, #14100b);
+    border: 1px solid var(--gold);
+    border-radius: 5px;
+    padding: 7px 11px;
+    font-family: var(--font-label);
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--parchment);
+    box-shadow: 0 6px 24px rgba(0,0,0,0.6), 0 0 16px rgba(201,162,74,0.15);
+  }
+  #tooltip.visible { display: block; }
   .hand { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dim); }
   .hand b { color: var(--text); }
   .claimBtn {
@@ -788,6 +807,7 @@
   </div>
 
   <div id="promptOverlay"><div id="prompt"></div></div>
+  <div id="tooltip"></div>
 
 
   <script>
@@ -818,6 +838,7 @@
     const centerEmblemEl = document.getElementById("centerEmblem");
     const promptOverlayEl = document.getElementById("promptOverlay");
     const promptEl = document.getElementById("prompt");
+    const tooltipEl = document.getElementById("tooltip");
     const logEl = document.getElementById("log");
     const myHeroEl = document.getElementById("myHero");
     const lobbyEl = document.getElementById("lobby");
@@ -885,6 +906,43 @@
       if (lastState) render(lastState); // re-render the hero panel + own table card with the new mask state
     };
     updateToggleRoleBtn();
+
+    /** Custom hover tooltip for equip icons on the table (replaces the native `title` attribute,
+     *  which was slow to appear and easy to miss against this dark theme). Delegated to `tableEl`
+     *  itself (not the individual `.equipItem` nodes) so it keeps working across every re-render:
+     *  `renderPlayers()` replaces player card innerHTML on every state broadcast, which would
+     *  silently orphan any listener bound directly to a `.equipItem` mid-hover. */
+    let tooltipTarget = null;
+    function positionTooltip(x, y) {
+      const margin = 14;
+      tooltipEl.style.left = `${x + margin}px`;
+      tooltipEl.style.top = `${y + margin}px`;
+      const rect = tooltipEl.getBoundingClientRect();
+      let left = x + margin;
+      let top = y + margin;
+      if (left + rect.width > window.innerWidth - 8) left = x - rect.width - margin;
+      if (top + rect.height > window.innerHeight - 8) top = y - rect.height - margin;
+      tooltipEl.style.left = `${Math.max(4, left)}px`;
+      tooltipEl.style.top = `${Math.max(4, top)}px`;
+    }
+    tableEl.addEventListener("mousemove", (ev) => {
+      const item = ev.target.closest(".equipItem");
+      if (item) {
+        if (item !== tooltipTarget) {
+          tooltipTarget = item;
+          tooltipEl.textContent = item.dataset.tooltip || "";
+          tooltipEl.className = "visible";
+        }
+        positionTooltip(ev.clientX, ev.clientY);
+      } else if (tooltipTarget) {
+        tooltipTarget = null;
+        tooltipEl.className = "";
+      }
+    });
+    tableEl.addEventListener("mouseleave", () => {
+      tooltipTarget = null;
+      tooltipEl.className = "";
+    });
 
     /** Draw phase: our own click-to-draw pile. `wantsToDrawNow` pauses the server until we
      *  answer (or it times out and auto-draws) -- clicking sends any ack, the actual card(s)
@@ -978,22 +1036,25 @@
      *  Sát attack range, defense horse shows +1 (others need +1 distance to reach you), offense
      *  horse shows -1 (your distance to others -1) -- so a glance at the icon row says what it
      *  actually does, not just its name. */
+    function escHtmlAttr(s) {
+      return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
     function equipIcons(p) {
       const parts = [];
       if (p.weapon) {
-        parts.push(`<div class="equipItem" title="${p.weapon} — Tầm đánh Sát: ${p.weaponRange}">
+        parts.push(`<div class="equipItem" data-tooltip="${escHtmlAttr(`${p.weapon} — Tầm đánh Sát: ${p.weaponRange}`)}">
           <img class="equipIcon" src="${IMG}/equips/${p.weapon}.png" alt="${p.weapon}">
           <span class="equipBadge weapon">${p.weaponRange}</span>
         </div>`);
       }
       if (p.defenseHorse) {
-        parts.push(`<div class="equipItem" title="${p.defenseHorse} — Người khác cần +1 khoảng cách để đánh bạn">
+        parts.push(`<div class="equipItem" data-tooltip="${escHtmlAttr(`${p.defenseHorse} — Người khác cần +1 khoảng cách để đánh bạn`)}">
           <img class="equipIcon" src="${IMG}/equips/${p.defenseHorse}.png" alt="${p.defenseHorse}">
           <span class="equipBadge defense">+1</span>
         </div>`);
       }
       if (p.offenseHorse) {
-        parts.push(`<div class="equipItem" title="${p.offenseHorse} — Khoảng cách từ bạn đến người khác -1">
+        parts.push(`<div class="equipItem" data-tooltip="${escHtmlAttr(`${p.offenseHorse} — Khoảng cách từ bạn đến người khác -1`)}">
           <img class="equipIcon" src="${IMG}/equips/${p.offenseHorse}.png" alt="${p.offenseHorse}">
           <span class="equipBadge offense">-1</span>
         </div>`);
