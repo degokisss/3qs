@@ -962,6 +962,31 @@ only, easy to miss under a 70%-black overlay.
   `{ type: "response", requestId, targetId }` and closed the prompt. `npx tsc --noEmit` clean;
   `npm run sim` 29/29 passing.
 
+## Milestone 15 — DONE (target-picker box still covered/blocked candidate cards)
+
+User report (with screenshot): Milestone 14 made legal targets glow, but the prompt box itself
+was still centered on the viewport -- landing directly on top of whichever player card sat
+nearest the middle of the table (often a candidate), visually and physically blocking it (the
+box is `pointer-events:auto`, so a candidate hidden underneath couldn't be clicked either).
+
+- `public/index.html` (CSS only): `showTargetPicker`'s prompt (Slash/trick target picking) no
+  longer centers on the viewport. `#promptOverlay.picking` now docks it as a slim horizontal
+  banner (icon + title + sub + Bỏ qua, all in one row) pinned to the BOTTOM of the viewport
+  (`align-items: flex-end`) instead of the middle -- confirm/equip/dodge/peach/pick-card prompts
+  are unaffected (still centered, since they don't need to coexist with a visible table). Chose
+  bottom-docking over top-docking after measuring the real layout: the gap between the header and
+  the table's top row is too small (~18px) to fit even a slim banner without still clipping the
+  top-row seats; the bottom of the viewport has no such constraint regardless of how much content
+  (hero panel, hand, hand-count) sits above the table that turn.
+- **Verification**: `npx tsc --noEmit` clean; `npm run sim` 29/29 passing. Confirmed via computed
+  geometry (`getBoundingClientRect`) in a live headless-browser render that the repositioned
+  banner no longer overlaps any of the 8 player cards, before finalizing the bottom-dock choice.
+  A final post-fix screenshot re-check hit a headless-browser tool/daemon outage unrelated to
+  this repo (`browser: open` timed out repeatedly even after killing stale `omp.browser.headless`
+  Chrome processes) -- the fix itself is a single, well-understood CSS positioning change
+  (`align-items`/`padding-bottom` on a `position:fixed` flex container), and the underlying
+  candidate-highlight mechanism it wraps (Milestone 14) was already screenshot-verified unchanged.
+
 ## Run
 
 ```

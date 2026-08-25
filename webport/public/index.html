@@ -413,9 +413,24 @@
                               underneath during target-picker prompts (showTargetPicker) */
   }
   #promptOverlay.active { display: flex; }
-  /* Target-picker prompts (Slash/trick target selection) use a lighter dim than confirm-style
-     prompts -- the candidate highlighting above needs to read clearly through it. */
-  #promptOverlay.picking { background: rgba(4,4,6,0.4); }
+  /* Target-picker prompts (Slash/trick target selection): dock as a slim banner at the BOTTOM
+     of the viewport instead of dead-center -- a centered box was landing right on top of
+     whichever player card sits nearest the middle of the table, hiding/blocking that candidate.
+     Bottom-docking (plus the lighter dim below) keeps every seat fully visible and clickable
+     regardless of how much content (hero panel, hand) sits above the table that turn. */
+  #promptOverlay.picking { align-items: flex-end; justify-content: center; padding-bottom: 22px; background: rgba(4,4,6,0.4); }
+  #promptOverlay.picking #prompt {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    max-width: 640px;
+    padding: 10px 20px;
+    text-align: left;
+  }
+  #promptOverlay.picking #prompt img.cardArt { height: 46px; margin-bottom: 0; flex-shrink: 0; }
+  #promptOverlay.picking #prompt .promptTitle { font-size: 16px; margin-bottom: 2px; }
+  #promptOverlay.picking #prompt .promptSub { margin-bottom: 0; }
+  #promptOverlay.picking #promptPass { margin-top: 0; margin-left: auto; flex-shrink: 0; }
   #prompt {
     background: linear-gradient(180deg, #1c1710, #14100b);
     border: 1px solid var(--gold);
