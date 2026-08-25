@@ -161,6 +161,22 @@ export async function resolvePeachSelfHeal(ctx: EngineContext, player: GamePlaye
   ctx.log.push(`${player.id} uses peach to recover (hp ${player.hp}/${player.maxHp})`);
 }
 
+/** Analeptic (Tửu) played proactively during your own Play phase (not for a dying rescue): arms
+ *  a +1 damage bonus for the very next Slash `player` plays this turn -- consumed once that
+ *  Slash begins resolving (dodge or not, see combat.ts's resolveSlash), not generic like a
+ *  skill's `pendingBonusDamage`, since Analeptic's real card text specifically boosts a Slash,
+ *  not any other damage source. No once-per-Play-phase cap is enforced here, matching this
+ *  engine's existing "no once-per-kind-per-turn cap, only Slash has an explicit limit"
+ *  simplification already used by every other proactive trick-like card in the freeform Play
+ *  phase (see room.ts's computeLegalActions header) -- the real rule limits Analeptic itself to
+ *  1 use per Play phase; playing a second copy here simply stacks another +1 onto the pending
+ *  bonus instead of being rejected.
+ */
+export function resolveAnalepticBuff(ctx: EngineContext, player: GamePlayer): void {
+  player.pendingSlashBonusDamage += 1;
+  ctx.log.push(`${player.id} drinks analeptic (next slash this turn +1 damage)`);
+}
+
 
 /** Amazing Grace: reveals `n` cards (n = number of alive players) face-up, then each player in
  *  turn order STARTING FROM `source` (the player who played it) picks exactly one, one at a

@@ -53,15 +53,28 @@ export function findJinkLikeCard(player: GamePlayer): Card | null {
   return null;
 }
 
-/** A real Peach card, or (e.g. Jijiu) the first card some skill allows viewing as one. */
-function findPeachLikeCard(player: GamePlayer): Card | null {
-  const real = player.hand.find((c) => c.kind === CardKind.Peach);
+/** A real Peach or Analeptic card (both heal 1 hp during a dying rescue -- see Analeptic's OTHER,
+ *  Play-phase-only damage-boost use in `resolveAnalepticBuff`/`resolveSlash`'s consumption of
+ *  `pendingSlashBonusDamage` below), or (e.g. Jijiu) the first card some skill allows viewing as
+ *  a Peach. */
+function findRescueCard(player: GamePlayer): Card | null {
+  const real = player.hand.find((c) => c.kind === CardKind.Peach || c.kind === CardKind.Analeptic);
   if (real) return real;
   for (const skill of player.skills) {
     if (!skill.canViewAsPeach) continue;
     const viewed = player.hand.find((c) => skill.canViewAsPeach!(c, player));
     if (viewed) return viewed;
   }
+  return null;
+}
+
+/** "peach"/"analeptic" for a REAL Peach or Analeptic card (both are the card's own built-in
+ *  rescue ability, not a skill reinterpretation); null for anything else (a genuine viewAs
+ *  substitution, e.g. Jijiu's red card) -- resolveDying uses this to log the right card kind
+ *  instead of always assuming "peach". */
+function rescueCardLabel(card: Card): "peach" | "analeptic" | null {
+  if (card.kind === CardKind.Peach) return "peach";
+  if (card.kind === CardKind.Analeptic) return "analeptic";
   return null;
 }
 
@@ -174,7 +187,9 @@ export interface EngineContext {
   onDamageDealt?: (source: GamePlayer, target: GamePlayer, amount: number) => Promise<void> | void;
   /** Does `player` want to play a held Jink against an incoming Slash? Only called when they hold one. */
   askDodge: (player: GamePlayer) => Promise<boolean>;
-  /** Does `player` want to play a held Peach to recover while dying? Only called when they hold one. */
+  /** Does `player` want to play a held Peach (or Analeptic, which heals identically during a
+   *  rescue -- see its OTHER, unrelated Play-phase damage-boost use below) to recover while
+   *  dying? Only called when they hold one. */
   askPeach: (player: GamePlayer) => Promise<boolean>;
   /** Does `player` want to play a held Slash to continue a Duel exchange? Only called when they hold one. */
   askDuelSlash: (player: GamePlayer) => Promise<boolean>;
@@ -197,10 +212,10 @@ export interface EngineContext {
    *  `candidates` pool. Must return one of `candidates` -- an invalid/missing return falls back
    *  to `candidates[0]` (see trick.ts's resolveAmazingGrace). */
   askPickCard: (player: GamePlayer, candidates: Card[]) => Promise<Card>;
-  /** Ally rescue: does `rescuer` want to play a held Peach (or viewAs, e.g. Jijiu) to save
-   *  `dyingPlayer`? Only called when `rescuer` actually holds one -- asked of every OTHER alive
-   *  player, in turn order starting right after the dying player, only once the dying player's
-   *  own self-rescue (`askPeach`) has declined or run out. */
+  /** Ally rescue: does `rescuer` want to play a held Peach/Analeptic (or viewAs, e.g. Jijiu) to
+   *  save `dyingPlayer`? Only called when `rescuer` actually holds one -- asked of every OTHER
+   *  alive player, in turn order starting right after the dying player, only once the dying
+   *  player's own self-rescue (`askPeach`) has declined or run out. */
   askPeachForOther: (rescuer: GamePlayer, dyingPlayer: GamePlayer) => Promise<boolean>;
   /** Fired once, right when a player's hp first drops to <=0, before the Peach-rescue loop --
    *  broadcast to every OTHER alive player's skills (e.g. Tianfeng's Suishi). */
@@ -217,6 +232,11 @@ export async function resolveSlash(
   ctx.discardPile.push(slashCard);
   ctx.log.push(`${attacker.id} slashes ${target.id}`);
   attacker.playedSlashThisTurn = true;
+  // Analeptic's damage-boost mark ("drank") is consumed the instant a Slash begins resolving --
+  // matches the upstream engine's `Slash::onEffect`, which reads/clears it before the Jink-dodge
+  // check even runs. A dodged (or nullified) Slash still wastes an already-armed bonus.
+  const analepticBonus = attacker.pendingSlashBonusDamage;
+  attacker.pendingSlashBonusDamage = 0;
 
   // Defender's onIncomingSlash (e.g. Liushan's Xiangle: nullify; Daqiao's Liuli: redirect) --
   // evaluated before anything else, since a redirect changes who the rest of resolution targets.
@@ -275,7 +295,7 @@ export async function resolveSlash(
     ctx.log.push(`${effectiveTarget.id} could not find ${requiredJinks} jinks and takes the hit`);
   }
 
-  await applyDamage(ctx, effectiveTarget, 1, attacker);
+  await applyDamage(ctx, effectiveTarget, 1 + analepticBonus, attacker);
 }
 
 /**
@@ -335,13 +355,14 @@ async function resolveDying(ctx: EngineContext, player: GamePlayer, killerRole: 
   ctx.log.push(`${player.id} is dying (hp ${player.hp})`);
   await ctx.onDyingStarted?.(player);
   while (player.hp <= 0) {
-    const selfPeach = findPeachLikeCard(player);
-    if (selfPeach && (await ctx.askPeach(player))) {
-      player.hand.splice(player.hand.indexOf(selfPeach), 1);
-      ctx.discardPile.push(selfPeach);
-      if (selfPeach.kind !== CardKind.Peach) ctx.log.push(`${player.id} views a card as peach (viewAs skill)`);
+    const selfCard = findRescueCard(player);
+    if (selfCard && (await ctx.askPeach(player))) {
+      player.hand.splice(player.hand.indexOf(selfCard), 1);
+      ctx.discardPile.push(selfCard);
+      const label = rescueCardLabel(selfCard);
+      if (!label) ctx.log.push(`${player.id} views a card as peach (viewAs skill)`);
       await heal(ctx, player, 1);
-      ctx.log.push(`${player.id} uses peach to recover (hp ${player.hp}/${player.maxHp})`);
+      ctx.log.push(`${player.id} uses ${label ?? "peach"} to recover (hp ${player.hp}/${player.maxHp})`);
       continue;
     }
 
@@ -352,13 +373,14 @@ async function resolveDying(ctx: EngineContext, player: GamePlayer, killerRole: 
     let rescued = false;
     for (let i = 1; i < n; i++) {
       const rescuer = ctx.alivePlayers[(dyingIdx + i) % n];
-      const peach = findPeachLikeCard(rescuer);
-      if (!peach || !(await ctx.askPeachForOther(rescuer, player))) continue;
-      rescuer.hand.splice(rescuer.hand.indexOf(peach), 1);
-      ctx.discardPile.push(peach);
-      if (peach.kind !== CardKind.Peach) ctx.log.push(`${rescuer.id} views a card as peach (viewAs skill)`);
+      const card = findRescueCard(rescuer);
+      if (!card || !(await ctx.askPeachForOther(rescuer, player))) continue;
+      rescuer.hand.splice(rescuer.hand.indexOf(card), 1);
+      ctx.discardPile.push(card);
+      const label = rescueCardLabel(card);
+      if (!label) ctx.log.push(`${rescuer.id} views a card as peach (viewAs skill)`);
       await heal(ctx, player, 1);
-      ctx.log.push(`${rescuer.id} uses peach to save ${player.id} (hp ${player.hp}/${player.maxHp})`);
+      ctx.log.push(`${rescuer.id} uses ${label ?? "peach"} to save ${player.id} (hp ${player.hp}/${player.maxHp})`);
       rescued = true;
       break;
     }

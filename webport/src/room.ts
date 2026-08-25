@@ -25,6 +25,7 @@ import {
   dismantlementCandidates,
   duelCandidates,
   resolveAmazingGrace,
+  resolveAnalepticBuff,
   resolveArcheryAttack,
   resolveDismantlement,
   resolveDuel,
@@ -454,6 +455,20 @@ export class Room {
       this.onLiveUpdate?.();
     }
 
+    // Proactive Analeptic buff: real Sanguosha lets a player spend a held Analeptic during their
+    // own turn to arm +1 damage on their next Slash this turn. Same dedicated-ask/bot-declines
+    // pattern as the Peach self-heal loop above (see controller.ts's wantsToUseAnalepticBuff).
+    for (let i = player.hand.length - 1; i >= 0 && player.alive && !this.gameOver; i--) {
+      const c = player.hand[i];
+      if (c.kind !== CardKind.Analeptic) continue;
+      if (!(await controller.wantsToUseAnalepticBuff(player))) continue;
+      player.hand.splice(i, 1);
+      this.discardPile.push(c);
+      await this.checkHandEmptied(player);
+      resolveAnalepticBuff(this.makeContext(this.players.filter((p) => p.alive)), player);
+      this.onLiveUpdate?.();
+    }
+
     // Proactive self-action skills (e.g. Kurou, Dianwei's Qiangxi, Huatuo's Qingnang): once each
     // per Play phase, gated by wantsToUseSelfAction. Run before the other tricks so any cards
     // drawn (e.g. Kurou's) are available for the rest of the phase.
@@ -578,6 +593,7 @@ export class Room {
     if (player.isWounded()) {
       addPlayCard(player.hand.filter((c) => c.kind === CardKind.Peach), CardKind.Peach);
     }
+    addPlayCard(player.hand.filter((c) => c.kind === CardKind.Analeptic), CardKind.Analeptic);
 
     for (const skill of player.skills) {
       if (usedSkillsThisTurn.has(skill.name)) continue;
@@ -724,6 +740,13 @@ export class Room {
         this.discardPile.push(card);
         await this.checkHandEmptied(player);
         await resolvePeachSelfHeal(this.makeContext(this.players.filter((p) => p.alive)), player);
+        this.onLiveUpdate?.();
+        return false;
+      case CardKind.Analeptic:
+        player.hand.splice(player.hand.indexOf(card), 1);
+        this.discardPile.push(card);
+        await this.checkHandEmptied(player);
+        resolveAnalepticBuff(this.makeContext(this.players.filter((p) => p.alive)), player);
         this.onLiveUpdate?.();
         return false;
       default:

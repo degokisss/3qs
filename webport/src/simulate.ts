@@ -125,6 +125,8 @@ async function testCascadingDeathDoesNotOverwriteGameOver(): Promise<void> {
   const lord = room.players.find((p) => p.role === Role.Lord)!;
   const loyalist = room.players.find((p) => p.role === Role.Loyalist)!;
   loyalist.skills = [SKILLS.suishi];
+  loyalist.hand = []; // no Peach/Analeptic to self-rescue with -- keeps the death deterministic,
+  // this test is about the win-condition-overwrite bug, not whether a rescue happens to be available
   loyalist.hp = 1; // Suishi's -1 hp on the lord's death must kill this ally too, in the same cascade
 
   await room.damagePlayer(lord.id, lord.maxHp, Role.Rebel);
@@ -401,6 +403,62 @@ async function testFreeformPlayLetsHumanSelfHealWithPeach(): Promise<void> {
 }
 
 /**
+ * Regression proof: playing a held Analeptic during your own Play phase must arm a +1 damage
+ * bonus for the very next Slash you play THIS turn -- not any other damage source, and not
+ * carried into a later turn. Seeds exactly 1 Analeptic + 1 Slash in the lord's hand, drives a
+ * real freeform turn that plays the Analeptic THEN the Slash at an empty-handed target (no jink
+ * to complicate the outcome), and confirms the target actually takes 2 damage (1 base + 1
+ * bonus), not 1.
+ */
+async function testFreeformPlayLetsHumanBuffSlashWithAnaleptic(): Promise<void> {
+  const room = new Room(playerIds(8), seededRng(1));
+  await room.pickGenerals();
+  const lord = room.players.find((p) => p.role === Role.Lord)!;
+  const deck = buildStandardDeck();
+  const analeptic = deck.find((c) => c.kind === CardKind.Analeptic)!;
+  const slash = deck.find((c) => c.kind === CardKind.Slash)!;
+  lord.hand = [analeptic, slash];
+  for (const p of room.players) if (p !== lord) p.hand = []; // nobody holds a jink -- damage is guaranteed
+
+  let analepticPlayed = false;
+  let slashPlayed = false;
+  // Track whichever candidate chooseSlashTarget actually receives/picks -- not an arbitrary
+  // pre-chosen player, who might not even be within the lord's (weaponless) attack range.
+  const targetRef: { current: GamePlayer | null } = { current: null };
+  let hpBefore = 0;
+  room.setController(lord.id, {
+    chooseFreeAction: async (_player, legalActions) => {
+      const myAnaleptic = legalActions.find((a) => a.kind === "playCard" && a.cardKind === CardKind.Analeptic && a.cardId === analeptic.id);
+      if (myAnaleptic && !analepticPlayed) {
+        analepticPlayed = true;
+        return myAnaleptic;
+      }
+      const mySlash = legalActions.find((a) => a.kind === "playCard" && a.cardKind === CardKind.Slash && a.cardId === slash.id);
+      if (mySlash && !slashPlayed) {
+        slashPlayed = true;
+        return mySlash;
+      }
+      return null; // end phase
+    },
+    chooseSlashTarget: async (_player, candidates) => {
+      targetRef.current = candidates[0];
+      hpBefore = candidates[0].hp;
+      return targetRef.current;
+    },
+  });
+
+  await room.playTurn(); // the lord acts first
+
+  strict.ok(analepticPlayed, "the freeform legalActions list must have offered the seeded analeptic card");
+  strict.ok(slashPlayed, "the freeform legalActions list must have offered the seeded slash card");
+  strict.ok(targetRef.current, "chooseSlashTarget must have been asked and picked a target");
+  strict.equal(targetRef.current!.hp, hpBefore - 2, "the buffed slash must deal 2 damage (1 base + 1 analeptic bonus), not 1");
+  strict.ok(room.log.some((l) => l.includes("drinks analeptic")), "the buff-arm must actually resolve (log line present)");
+  strict.equal(lord.pendingSlashBonusDamage, 0, "the bonus must be fully consumed by the one slash it buffed, none left pending");
+  console.log("PASS testFreeformPlayLetsHumanBuffSlashWithAnaleptic: analeptic armed +1, the following slash dealt 2 damage total");
+}
+
+/**
  * Regression proof: `resolveDying`'s ally-rescue loop asks every OTHER alive player, in turn
  * order starting right after the dying player, whether to spend a held Peach to save them --
  * only AFTER the dying player's own self-rescue has declined/run out -- and stops at the first
@@ -444,6 +502,38 @@ async function testAllyRescuePeachSavesADyingPlayer(): Promise<void> {
   strict.ok(decliner.hand.some((c) => c.id === peach1.id), "the decliner's peach must remain unspent -- they said no");
   strict.ok(log.some((l) => l === `${rescuer.id} uses peach to save ${dying.id} (hp 1/1)`), "the rescue log line must credit the actual rescuer and victim");
   console.log("PASS testAllyRescuePeachSavesADyingPlayer: self-rescue declined, first ally declined, second ally's peach saved the dying player");
+}
+
+/**
+ * Regression proof: a real Analeptic card, not just Peach, must work for a dying self-rescue --
+ * `findRescueCard`'s whole reason for existing over the old Peach-only `findPeachLikeCard`. Also
+ * proves the log line correctly says "analeptic", not "peach" (a real card's own built-in rescue
+ * ability is NOT a viewAs-skill substitution, so it must not get the "views a card as peach
+ * (viewAs skill)" line real viewAs cards like Jijiu's get). Driven directly through resolveSlash
+ * (pure, deterministic): the dying player holds only an Analeptic (no Peach), accepts the
+ * self-rescue ask, and must end up alive with the Analeptic spent.
+ */
+async function testAnalepticSelfRescuesADyingPlayer(): Promise<void> {
+  const deck = buildStandardDeck();
+  const slashCard = deck.find((c) => c.kind === CardKind.Slash)!;
+  const analeptic = deck.find((c) => c.kind === CardKind.Analeptic)!;
+
+  const attacker = new GamePlayer("ATK");
+  const dying = new GamePlayer("DYING", 1); // maxHp 1: a landed slash drops this straight to 0
+  dying.hand = [analeptic];
+
+  const log: string[] = [];
+  const ctx = makeTestContext([dying, attacker], log);
+  ctx.askPeach = async () => true; // accept the self-rescue offer
+
+  await resolveSlash(ctx, attacker, dying, slashCard);
+
+  strict.equal(dying.alive, true, "the analeptic self-rescue must have saved the dying player");
+  strict.equal(dying.hp, 1, "a successful rescue must heal exactly back to 1 hp (from 0)");
+  strict.ok(!dying.hand.some((c) => c.id === analeptic.id), "the analeptic must actually be spent");
+  strict.ok(log.some((l) => l === `${dying.id} uses analeptic to recover (hp 1/1)`), "the log must credit analeptic by name, not peach");
+  strict.ok(!log.some((l) => l.includes("views a card as peach")), "a REAL analeptic card is not a viewAs-skill substitution -- must not log as one");
+  console.log("PASS testAnalepticSelfRescuesADyingPlayer: a real analeptic card saved the dying player, logged correctly as analeptic");
 }
 
 /**
@@ -1226,7 +1316,9 @@ await testEquipTriggersLiveUpdateCallback();
 await testSlashTriggersLiveUpdateCallback();
 await testFreeformPlayAOECardIsOfferedAndResolves();
 await testFreeformPlayLetsHumanSelfHealWithPeach();
+await testFreeformPlayLetsHumanBuffSlashWithAnaleptic();
 await testAllyRescuePeachSavesADyingPlayer();
+await testAnalepticSelfRescuesADyingPlayer();
 await testAmazingGraceIsATurnOrderDraft();
 await testDiscardChoiceLetsHumanPickWhichCards();
 await testDrawPhaseAsksBeforeDrawing();

@@ -1118,6 +1118,65 @@ support, which browsers require once the page is served over `https://`).
   browser tab end-to-end and confirmed the status line reads "Đã kết nối" (connected) -- the
   same-origin `wss`/`ws` auto-detection actually works, not just type-checks.
 
+## Milestone 19 — DONE (Analeptic: Slash damage buff + rescue-card parity with Peach)
+
+User asked what Tửu (Analeptic) does, then to implement it -- it existed only as a dealt card
+with zero effect (usable as a generic skill-cost payment or discarded when over the hand limit,
+nothing else). Real Sanguosha gives it 2 distinct effects, traced from the upstream engine's
+`Analeptic::onEffect`/`Slash::onEffect` (`src/package/standard-basics.cpp`,
+`src/server/gamerule.cpp`'s `SlashHit` handling): (1) played proactively during your own Play
+phase, it arms a +1 damage bonus for the very next Slash you play that turn; (2) played on a
+dying player (self or an ally), it heals 1 hp exactly like Peach -- the two effects are
+distinguished purely by WHEN it's played (a dying-rescue ask vs. a normal Play-phase action), not
+by any player choice.
+
+### Slash damage buff
+- `src/player.ts` -- new `pendingSlashBonusDamage` field, separate from the existing
+  `pendingBonusDamage` (Luoyi's more general "next damage of any kind"): Analeptic's real card
+  text specifically boosts a Slash, not Duel/AOE/self-inflicted skill damage, so it needed its
+  own dedicated, narrowly-scoped consumption point instead of reusing the generic one.
+- `src/combat.ts` -- `resolveSlash` now reads and clears `attacker.pendingSlashBonusDamage` the
+  instant a Slash begins resolving (before the Jink-dodge check even runs, matching the upstream
+  `Slash::onEffect`'s consumption timing exactly) and adds it to the final damage amount. A
+  dodged or nullified Slash still wastes an already-armed bonus, same as the real rule.
+- `src/trick.ts` -- new `resolveAnalepticBuff(ctx, player)`: increments the pending bonus, logs
+  it. No once-per-Play-phase cap is enforced (the real rule limits Analeptic itself to 1 use per
+  turn) -- deliberately consistent with this engine's existing "no once-per-kind-per-turn cap,
+  only Slash has an explicit limit" simplification already used by every other proactive
+  trick-like card in the freeform Play phase (ExNihilo, GodSalvation, etc.).
+- `src/controller.ts`/`src/room.ts` -- new `Controller.wantsToUseAnalepticBuff`, bot default
+  `false` (same reasoning as Milestone 17's `wantsToUsePeachSelfHeal`: bots never proactively
+  burn Peach/Analeptic outside a real dying emergency -- an EXISTING test,
+  `testDiscardChoiceLetsHumanPickWhichCards`, explicitly depends on this for Analeptic too).
+  Wired into `computeLegalActions`/`resolveFreeAction` (unconditional, like ExNihilo) for the
+  real human choice, plus a parity/testability-only bot-pass loop that's a no-op in practice
+  since the bot always declines.
+- New deterministic test `testFreeformPlayLetsHumanBuffSlashWithAnaleptic`: seeds exactly 1
+  Analeptic + 1 Slash, drives a real freeform turn playing both in order at an empty-handed
+  (guaranteed-hit) target, confirms 2 damage landed (not 1) and the bonus field is fully
+  consumed afterward.
+
+### Rescue-card parity with Peach
+- `src/combat.ts` -- the old Peach-only `findPeachLikeCard` renamed `findRescueCard` and
+  extended to match real Analeptic cards too (not just Peach/viewAs); new `rescueCardLabel`
+  helper so `resolveDying`'s log correctly says "analeptic" or "peach" by the REAL card kind
+  used, instead of mislabeling a genuine Analeptic rescue as a "views a card as peach (viewAs
+  skill)" substitution (that line is now reserved for actual viewAs skills, e.g. Jijiu).
+- New deterministic test `testAnalepticSelfRescuesADyingPlayer`: a dying player holding only an
+  Analeptic (no Peach) self-rescues, driven directly through `resolveSlash`; confirms survival,
+  the card being spent, and the exact log wording ("uses analeptic to recover", not "peach" and
+  not a "views a card as" viewAs-substitution line).
+- **Regression fix**: `testCascadingDeathDoesNotOverwriteGameOver`'s seeded loyalist could
+  randomly hold an Analeptic and now self-rescue from the Suishi cascade (bots always accept
+  self-rescue) -- fixed by explicitly clearing that player's hand in the test setup, since the
+  test's actual intent (the win-condition-overwrite bug) doesn't depend on what they're holding.
+- **Verification**: `npx tsc --noEmit` clean; `npm run sim` 34/34 passing (including both new
+  tests above). Live browser check: same `WebSocket`-spy technique as Milestone 17/18 --
+  injected a `chooseFreeAction` message with an Analeptic entry in `legalActions`, confirmed the
+  hand rendered it as a clickable "Tửu"-labeled card with working card art
+  (`GET /image/card/analeptic.png` 200), and that clicking it sent back the exact expected
+  `{ type: "response", requestId, actionId }` payload.
+
 ## Deploy
 
 This is a single stateless Node process (`src/server.ts`) with everything in memory -- no

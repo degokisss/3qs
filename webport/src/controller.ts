@@ -60,6 +60,10 @@ export interface Controller {
    *  to heal 1 hp right now? Real Sanguosha lets this repeat as long as still wounded and still
    *  holding one, no once-per-turn cap (only Slash has an explicit limit). */
   wantsToUsePeachSelfHeal(player: GamePlayer): Promise<boolean>;
+  /** Play phase: `player` holds an Analeptic -- play it proactively to arm a +1 damage bonus
+   *  for their next Slash this turn? Only called when they hold one; no wounded-state gate
+   *  (unlike Peach self-heal, this is a pure offense buff, useful regardless of hp). */
+  wantsToUseAnalepticBuff(player: GamePlayer): Promise<boolean>;
   /** `player` holds a Slash and must decide whether to play it to continue a Duel exchange. */
   wantsToPlaySlashInDuel(player: GamePlayer): Promise<boolean>;
   /** `player` (the source of damage to a Ganglie holder) has >=2 cards and can choose to discard
@@ -130,6 +134,10 @@ export function makeBotController(rng: () => number): Controller {
     async wantsToUsePeachSelfHeal() {
       return false; // matches the pre-existing bot behavior: the fixed pass never proactively
       // burns a Peach outside a real dying emergency (see room.ts's runPlayPhase)
+    },
+    async wantsToUseAnalepticBuff() {
+      return false; // matches wantsToUsePeachSelfHeal's reasoning: the fixed pass never
+      // proactively burns Peach/Analeptic outside a real dying emergency
     },
     async wantsToPlaySlashInDuel() {
       return true;

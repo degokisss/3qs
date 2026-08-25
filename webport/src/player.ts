@@ -26,6 +26,11 @@ export class GamePlayer {
   /** One-shot additive damage bonus armed by a skill (e.g. Luoyi), consumed by the next
    *  applyDamage this player deals, then reset to 0. */
   pendingBonusDamage = 0;
+  /** One-shot damage bonus armed by playing Analeptic (Tửu) during the Play phase, consumed by
+   *  only the very next SLASH this player plays this turn (see combat.ts's resolveSlash) -- not
+   *  generic like `pendingBonusDamage` above, since Analeptic's real card text specifically
+   *  boosts a Slash, not any other damage source (Duel/AOE/self-inflicted skill damage). */
+  pendingSlashBonusDamage = 0;
   /** Reset at the start of each of this player's turns; set by combat.ts's resolveSlash after a
    *  successful hit this Play phase -- read by skills like Keji that key off "did I Slash this turn". */
   playedSlashThisTurn = false;
