@@ -938,6 +938,30 @@ was a known, explicitly documented simplification since Milestone 1.5 (trick.ts'
   plus the direct client-side proof together already cover both ends of the wire.) `npx tsc
   --noEmit` clean; `npm run sim` 29/29 passing.
 
+## Milestone 14 — DONE (target-picker overlay made legal targets hard to see)
+
+User report (with screenshot): the dim modal overlay behind a target-picker prompt (Slash/Duel/
+etc.) made the whole table equally dark, so it was hard to tell which players were actually
+legal targets -- the `.candidate` styling only added a border, with a glow shown on `:hover`
+only, easy to miss under a 70%-black overlay.
+
+- `public/index.html` (CSS only, no protocol changes):
+  - `.player.candidate` now gets an ALWAYS-ON pulsing red glow (`@keyframes candidatePulse`),
+    not just on hover -- unmistakable even before the mouse moves.
+  - New `.player.noncandidate` (dimmed + grayscaled) applied to every player who is NOT a legal
+    target while a prompt is pending, EXCEPT the acting player themself (stays full brightness
+    for context) -- a real spotlight effect instead of "everyone equally dark."
+  - `#promptOverlay.picking` (used only by `showTargetPicker`, i.e. Slash/trick target prompts)
+    dims the backdrop less (0.4 vs the confirm-dialogs' 0.7) so the above highlighting reads
+    clearly through it; confirm/equip/dodge/peach-style prompts (no board relevance) keep the
+    original heavier dim.
+- **Verification**: live browser check -- rendered a real 8-seat table with a `chooseTrickTarget`
+  (Duel) prompt naming 3 of 8 as candidates. Screenshot confirms the 3 candidates glow with a
+  vivid red highlight, the other 4 fade into the background, and the acting player's own card
+  stays fully visible. Clicking a highlighted candidate sent exactly
+  `{ type: "response", requestId, targetId }` and closed the prompt. `npx tsc --noEmit` clean;
+  `npm run sim` 29/29 passing.
+
 ## Run
 
 ```
