@@ -14,6 +14,10 @@
 // stopped, state discarded) -- see `leaveRoom` below.
 
 import { WebSocketServer, WebSocket } from "ws";
+import { createServer } from "node:http";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Room } from "./room.js";
 import { Controller } from "./controller.js";
 import { SKILLS } from "./skill.js";
@@ -25,6 +29,47 @@ const MIN_PLAYERS = 5; // Room/gamerule.ts's role table only covers 5-10 players
 const MAX_PLAYERS = 10;
 const TURN_INTERVAL_MS = 500;
 const HUMAN_RESPONSE_TIMEOUT_MS = 15000;
+
+// Deployment note: serving the client (public/index.html) and the original QSanguosha image/
+// font assets it references from THIS same process/port (instead of a separate static host)
+// means a real deployment only ever needs to expose ONE port for both the page and the
+// WebSocket API -- see webport/README.md's "Deploy" section.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PUBLIC_DIR = path.resolve(__dirname, "../public");
+const REPO_ROOT = path.resolve(__dirname, "../.."); // src/ -> webport/ -> repo root (image/, font/)
+const MIME: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".svg": "image/svg+xml",
+  ".ttf": "font/ttf",
+  ".ttc": "font/collection",
+  ".ico": "image/x-icon",
+};
+
+/** Resolves an incoming HTTP GET to a file on disk, or null for anything not explicitly
+ *  whitelisted below (no directory listing, no serving arbitrary repo files). */
+async function serveStatic(url: string): Promise<{ body: Buffer; contentType: string } | null> {
+  const clean = decodeURIComponent(url.split("?")[0] ?? "/");
+  let filePath: string;
+  if (clean === "/" || clean === "/index.html") {
+    filePath = path.join(PUBLIC_DIR, "index.html");
+  } else if (clean.startsWith("/image/") || clean.startsWith("/font/")) {
+    filePath = path.join(REPO_ROOT, clean);
+    if (!filePath.startsWith(REPO_ROOT + path.sep)) return null; // no escaping above the repo root
+  } else {
+    return null;
+  }
+  try {
+    const body = await readFile(filePath);
+    return { body, contentType: MIME[path.extname(filePath).toLowerCase()] ?? "application/octet-stream" };
+  } catch {
+    return null;
+  }
+}
 
 function newPlayerIds(n: number): string[] {
   return Array.from({ length: n }, (_, i) => `P${i + 1}`);
@@ -435,7 +480,21 @@ function leaveRoom(ws: WebSocket): void {
   broadcastLobby();
 }
 
-const wss = new WebSocketServer({ port: PORT });
+const httpServer = createServer((req, res) => {
+  serveStatic(req.url ?? "/")
+    .then((file) => {
+      if (!file) {
+        res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("Not found");
+        return;
+      }
+      res.writeHead(200, { "Content-Type": file.contentType, "Cache-Control": "public, max-age=3600" }).end(file.body);
+    })
+    .catch(() => res.writeHead(500).end("Internal error"));
+});
+
+// WebSocket upgrades share the SAME http server/port as the static file serving above -- a
+// deployment (reverse proxy, PaaS) only ever has to terminate/forward ONE public port.
+const wss = new WebSocketServer({ server: httpServer });
 
 wss.on("connection", (ws) => {
   ws.send(JSON.stringify(roomListPayload())); // every connection starts in the lobby
@@ -553,4 +612,6 @@ wss.on("connection", (ws) => {
   });
 });
 
-console.log(`QSanguosha web port server listening on ws://localhost:${PORT}`);
+httpServer.listen(PORT, () => {
+  console.log(`QSanguosha web port: open http://localhost:${PORT}/ to play (WebSocket API on the same port)`);
+});

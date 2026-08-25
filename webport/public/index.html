@@ -1345,7 +1345,12 @@
     }
 
     function connect() {
-      ws = new WebSocket(`ws://${location.hostname || "localhost"}:8787`);
+      // Same-origin deploy (server.ts now serves this page too): reuse the page's own
+      // scheme/host, so wss:// is used automatically behind an HTTPS reverse proxy and no
+      // port needs hardcoding. Opened as a local file (file://, no host) instead of via the
+      // server: fall back to plain ws://localhost:8787, matching `npm run server`'s default.
+      const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+      ws = new WebSocket(`${scheme}//${location.host || "localhost:8787"}`);
       ws.onopen = () => {
         statusEl.textContent = "Đã kết nối";
         statusEl.className = "connected";

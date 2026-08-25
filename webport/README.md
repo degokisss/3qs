@@ -1088,11 +1088,83 @@ right after the dying player.
   that clicking "Đồng ý" sent back the exact expected `{ type: "response", requestId, value:
   true }` payload.
 
-## Run
+## Milestone 18 — DONE (single-port deploy: server now also serves the client)
+
+User asked how to deploy this for other people to actually play together. Previously the client
+(`public/index.html`) had to be opened as a local `file://` page, hardcoded to `ws://<hostname>:
+8787` -- fine for same-machine/LAN testing, but unworkable for a real public deployment (no way
+to serve the page itself, and `file://` pages can't be reached by anyone else; also no `wss://`
+support, which browsers require once the page is served over `https://`).
+
+- `src/server.ts` -- the `WebSocketServer` now attaches to a plain `node:http` server instead of
+  listening on its own bare TCP port; that http server also serves `public/index.html` at `/`
+  plus this repo's own `image/`/`font/` asset directories (which `index.html` already referenced
+  via `../../image`, `../../font` -- unchanged) at `/image/*` and `/font/*`. Static serving is a
+  small hand-rolled whitelist (no new dependency): only those 2 prefixes + `/`/`/index.html` are
+  ever read from disk, with an explicit path-traversal guard. Net effect: ONE process, ONE port
+  (`PORT` env, default 8787) serves everything -- a deployment only ever needs to expose/forward
+  that single port, instead of separately hosting static files and the WebSocket API.
+- `public/index.html` -- `connect()` now builds the WebSocket URL from the page's OWN
+  `location.protocol`/`location.host` (`wss://` automatically when the page itself is served over
+  `https://`, same host, no hardcoded port) instead of a hardcoded `ws://<hostname>:8787`. Falls
+  back to `ws://localhost:8787` only when there's no `location.host` at all (i.e. still opened
+  directly as a local `file://` page for quick dev iteration without even running the server's
+  static half).
+- **Verification**: `npx tsc --noEmit` clean; `npm run sim` 32/32 passing. Live check: restarted
+  the server and confirmed over real HTTP (not `file://`) that `GET /` serves the page (200,
+  `text/html`), `GET /image/card/peach.png` and `GET /font/UTMThuPhap.ttf` serve the real assets
+  (200, correct `Content-Type`), an unknown path 404s, and a `../../../etc/passwd`-style
+  traversal attempt also 404s (blocked, not served). Loaded `http://localhost:8787/` in a real
+  browser tab end-to-end and confirmed the status line reads "Đã kết nối" (connected) -- the
+  same-origin `wss`/`ws` auto-detection actually works, not just type-checks.
+
+## Deploy
+
+This is a single stateless Node process (`src/server.ts`) with everything in memory -- no
+database, no build step required at runtime (`tsx` runs the TypeScript directly; `npm run build`
++ `node dist/server.js` also works if you'd rather ship compiled JS). Game rooms are ephemeral
+(lost on restart), which is fine for casual play. The only real size consideration is the bundled
+asset directories this repo already ships: `image/` (~183MB) + `font/` (~6.3MB), which MUST be
+deployed alongside `webport/` (the server reads them via `../image`, `../font`, i.e. one level
+above `webport/`) -- don't `.gitignore`/prune them out of whatever you deploy.
+
+Two reasonable options, in order of effort:
+
+1. **A small VPS you already have/rent** (DigitalOcean, Hetzner, a home server, etc.) -- most
+   control, no cold starts, cheapest to run 24/7:
+   - `git clone` the repo, `cd webport && npm install && npm run build`.
+   - Run it persistently: `pm2 start dist/server.js --name qsgs` (or a `systemd` unit, or this
+     project's own `hub`-style process manager if you're driving it from an agent) with
+     `restart: always`.
+   - Put a reverse proxy in front for a real domain + automatic HTTPS -- Caddy is the least
+     fuss (`example.com { reverse_proxy localhost:8787 }` in a `Caddyfile`, it gets a Let's
+     Encrypt cert and proxies both the HTTP page AND the WebSocket upgrade automatically). nginx
+     works too but needs the WS `Upgrade`/`Connection` headers forwarded explicitly.
+   - Open port 443 (and 80 for the ACME challenge) in the VPS firewall; keep 8787 closed to the
+     outside world (only Caddy talks to it, over localhost).
+
+2. **A PaaS with a free/cheap tier** (Railway, Render, Fly.io) -- less setup, no server to patch,
+   but check the platform's free-tier disk/image size limits against the ~190MB of bundled
+   assets above:
+   - Point it at this repo, build command `cd webport && npm install && npm run build`, start
+     command `node webport/dist/server.js` (adjust paths to match the platform's working
+     directory).
+   - These platforms already terminate HTTPS and proxy WebSocket upgrades on the SAME public
+     port automatically -- no reverse-proxy config needed, `PORT` is set for you via env var
+     (the server already reads `process.env.PORT`).
+   - Free tiers on these platforms typically sleep an idle service and cold-start on the next
+     request -- fine for "play with friends when you're actually online", less fine for a
+     server meant to be always-on/joinable at any time.
+
+Either way, once it's reachable at `https://your-domain/`, anyone who opens that URL lands in the
+same shared room lobby and can create/join rooms together -- no separate client install, nothing
+to configure client-side.
+
+## Run (local dev)
 
 ```
 npm install
 npm run sim      # engine smoke tests
-npm run server   # WebSocket spectator server on :8787, then open public/index.html
+npm run server   # serves the client AND the WebSocket API on :8787 -- open http://localhost:8787/
 ```
 
