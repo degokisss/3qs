@@ -616,6 +616,7 @@ wss.on("connection", (ws) => {
         if (!gr.room.players.some((p) => p.id === playerId)) return;
         const holder = gr.claimedSeats.get(playerId);
         if (holder && holder !== ws && holder.readyState === WebSocket.OPEN) return; // already taken
+        releaseSeatsHeldBy(gr, ws); // switching seats -- release any OTHER seat this socket already held
         gr.claimedSeats.set(playerId, ws);
         gr.room.setController(playerId, makeHumanController(gr, playerId));
         broadcast(gr);
