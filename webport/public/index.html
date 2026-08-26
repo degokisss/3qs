@@ -149,6 +149,24 @@
   .heroHp .gem { width: 15px; height: 15px; }
   .heroSkillName { font-weight: 700; font-size: 14.5px; color: var(--gold); letter-spacing: 0.4px; }
   .heroSkillDesc { display: block; font-size: 13px; color: var(--text); line-height: 1.5; margin: 2px 0 8px; max-width: 680px; }
+  .heroSkillBtn {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 2px 6px;
+    margin: 0 -6px 4px;
+    font: inherit;
+    cursor: default;
+  }
+  /* Small lightning marker distinguishes an active (player-triggered) skill from a passive one
+     at a glance, regardless of whether it's currently clickable right now. */
+  .heroSkillBtn .heroSkillName::after { content: " \26A1"; font-size: 11px; }
+  .heroSkillBtn.usable { border-color: var(--gold-dim); cursor: pointer; background: rgba(201,162,74,0.07); }
+  .heroSkillBtn.usable:hover { border-color: var(--gold); background: rgba(201,162,74,0.16); }
+  .heroSkillBtn:disabled { opacity: 0.8; }
 
   /* --- your hand: real cards, click one during your Play phase to play it --- */
   #myHandWrap {
@@ -1119,7 +1137,20 @@
       }
       const gems = Array.from({ length: p.maxHp }, (_, i) => `<span class="gem ${i < p.hp ? "" : "lost"}"></span>`).join("");
       const skillsHtml = (p.skills || [])
-        .map((s) => `<div><span class="heroSkillName">◆ ${s.name}</span><span class="heroSkillDesc">${s.description}</span></div>`)
+        .map((s) => {
+          if (!s.isActive) return `<div><span class="heroSkillName">◆ ${s.name}</span><span class="heroSkillDesc">${s.description}</span></div>`;
+          // Play-phase active skill (selfAction/activeAction): a real button, clickable exactly
+          // when it currently appears in our own pending chooseFreeAction legalActions list --
+          // otherwise shown but inert (it's a real button either way, so its "this is usable on
+          // your turn" affordance never disappears, unlike the plain-text passive skills above).
+          const action = pendingFreeAction?.legalActions.find(
+            (a) => (a.kind === "selfAction" || a.kind === "activeAction") && a.skillName === s.skillName,
+          );
+          const onclick = action ? ` onclick="window.__playCard(${action.actionId})"` : "";
+          return `<button class="heroSkillBtn${action ? " usable" : ""}"${onclick}${action ? "" : " disabled"}>
+            <span class="heroSkillName">◆ ${s.name}</span><span class="heroSkillDesc">${s.description}</span>
+          </button>`;
+        })
         .join("");
       const kcolorVar = KINGDOM_VAR[p.kingdom];
       myHeroEl.className = "active";
@@ -1243,6 +1274,7 @@
       send({ type: "response", requestId: pendingFreeAction.requestId, actionId });
       pendingFreeAction = null;
       renderMyHand();
+      renderHero(mySeat ? lastState?.players.find((p) => p.id === mySeat) : null);
     }
     window.__playCard = answerFreeAction;
 
@@ -1525,6 +1557,9 @@
           // (e.g. this turn's Draw phase, or an already-played card) never go stale.
           pendingFreeAction = msg;
           renderMyHand();
+          renderHero(mySeat ? lastState?.players.find((p) => p.id === mySeat) : null); // hero-panel
+          // skill buttons must light up the instant this ask arrives, not wait for the next
+          // full state broadcast (which only fires once per completed turn)
           return;
         }
         if (msg.type === "chooseDiscards") {

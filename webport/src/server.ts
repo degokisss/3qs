@@ -428,7 +428,15 @@ function snapshot(gr: GameRoom) {
       offenseHorse: p.offenseHorse?.horseName ?? null,
       offenseHorseDelta: p.offenseHorse?.horseDelta ?? null,
       claimed: gr.claimedSeats.has(p.id),
-      skills: p.skills.map((s) => ({ name: s.displayName, description: s.description })),
+      skills: p.skills.map((s) => ({
+        name: s.displayName,
+        description: s.description,
+        skillName: s.name, // internal key -- matches FreeAction's `skillName` so the client can
+        // find the matching legalActions entry for a hero-panel skill button click
+        isActive: !!(s.selfAction || s.activeAction), // Play-phase active skill (offered via
+        // chooseFreeAction's legalActions) vs a purely passive/reactive one (auto-fires on its
+        // own hook, e.g. onDamaged/onIncomingSlash -- no player choice, no button)
+      })),
     })),
     log: gr.room.log.slice(-40),
   };
