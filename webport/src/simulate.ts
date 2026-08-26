@@ -10,7 +10,7 @@ import { GamePlayer } from "./player.js";
 import { EngineContext, effectiveDistance, loseHp, resolveSlash } from "./combat.js";
 import { SKILLS } from "./skill.js";
 import { slashCandidates } from "./controller.js";
-import { duelCandidates, resolveArcheryAttack, resolveSavageAssault, snatchCandidates } from "./trick.js";
+import { duelCandidates, resolveArcheryAttack, resolveDismantlement, resolveSavageAssault, resolveSnatch, snatchCandidates } from "./trick.js";
 import { Role } from "./types.js";
 const DECK_SIZE = 54 + 15 + 16; // basics(Slash-family 29+Jink 14+Peach 8+Analeptic 3) + implemented tricks(15) + equips(10 weapons+6 horses), see card.ts
 
@@ -970,6 +970,59 @@ async function testSavageAssaultAvoidImmunity(): Promise<void> {
 }
 
 /**
+ * Regression proof: Dismantlement/Snatch must offer BOTH hand AND equipped cards as targets, and
+ * must actually consult the actor's choice (`ctx.askPickPlayerCard`) instead of always grabbing
+ * a random hand card -- the pre-existing implementation only ever touched `target.hand`, so a
+ * real player could never choose to take/discard an opponent's weapon/horse. Also proves taking
+ * an equipped card correctly detaches it from the equip zone and fires Xiaoji's onEquipLost hook
+ * (leaving the equip zone for ANY reason, not just being replaced by a new equip).
+ */
+async function testDismantlementSnatchCanTargetEquipmentAndRespectChoice(): Promise<void> {
+  const deck = buildStandardDeck();
+  const weapon1 = deck.find((c) => c.kind === CardKind.Weapon)!;
+  const weapon2 = deck.find((c) => c.kind === CardKind.Weapon && c.id !== weapon1.id)!;
+  const filler1 = deck.find((c) => c.kind === CardKind.Slash)!;
+  const filler2 = deck.find((c) => c.kind === CardKind.Slash && c.id !== filler1.id)!;
+
+  // --- Dismantlement: actor deliberately chooses the equipped weapon over the held hand card ---
+  const actor1 = new GamePlayer("ACTOR1");
+  const target1 = new GamePlayer("TARGET1");
+  target1.weapon = weapon1;
+  target1.hand = [filler1];
+  target1.skills = [SKILLS.xiaoji];
+  const ctx1 = makeTestContext([actor1, target1], []);
+  ctx1.askPickPlayerCard = async (_player, _owner, candidates) => candidates.find((c) => c.id === weapon1.id)!;
+
+  await resolveDismantlement(ctx1, actor1, target1);
+
+  strict.equal(target1.weapon, null, "the chosen equipped weapon must actually leave the equip zone");
+  strict.ok(target1.hand.includes(filler1), "the untouched hand card must remain in hand");
+  strict.ok(ctx1.discardPile.includes(weapon1), "a dismantled equip card must land in the discard pile");
+  strict.ok(
+    ctx1.log.some((l) => l.includes("(xiaoji)")),
+    "taking an equipped card must fire xiaoji's onEquipLost, not just a replace-equip",
+  );
+
+  // --- Snatch: actor deliberately chooses the equipped weapon over the held hand card ---
+  const actor2 = new GamePlayer("ACTOR2");
+  const target2 = new GamePlayer("TARGET2");
+  target2.weapon = weapon2;
+  target2.hand = [filler2];
+  const ctx2 = makeTestContext([actor2, target2], []);
+  ctx2.askPickPlayerCard = async (_player, _owner, candidates) => candidates.find((c) => c.id === weapon2.id)!;
+
+  await resolveSnatch(ctx2, actor2, target2);
+
+  strict.equal(target2.weapon, null, "the chosen equipped weapon must leave the equip zone");
+  strict.ok(target2.hand.includes(filler2), "the untouched hand card must remain in target's hand");
+  strict.ok(actor2.hand.includes(weapon2), "a snatched equip card must land in the stealer's hand, not the discard pile");
+
+  console.log(
+    "PASS testDismantlementSnatchCanTargetEquipmentAndRespectChoice: equipment is a valid target, the actor's choice is consulted, xiaoji fires on a snatched/dismantled equip",
+  );
+}
+
+/**
  * Regression proof: Savage Assault/Archery Attack must offer each affected player a real choice
  * to discard their held Slash/Jink (vs. take 1 damage), not auto-spend it -- matching real
  * Sanguosha rules and the same "player's choice" shape as resolveSlash's Jink/resolveDuel's
@@ -1355,6 +1408,7 @@ testQianxunImmunity();
 testQicaiIgnoresSnatchDistance();
 testMashuReducesDistance();
 await testSavageAssaultAvoidImmunity();
+await testDismantlementSnatchCanTargetEquipmentAndRespectChoice();
 await testSavageAssaultAndArcheryAttackAreAChoice();
 await testTieqiBlocksDodge();
 await testViewAsJinkDodges();

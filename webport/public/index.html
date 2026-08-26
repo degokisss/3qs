@@ -1440,6 +1440,43 @@
       });
     }
 
+    /** Dismantlement/Snatch: click one of `owner`'s cards to take/discard -- mandatory, no
+     *  "Bỏ qua" (the card already resolved; real Sanguosha always takes something once played).
+     *  Equip cards show their real art/name (equipment is always public); hand cards render
+     *  face-down -- the server never sends their identity ahead of the pick, see server.ts's
+     *  choosePlayerCard wiring. */
+    function showPlayerCardPicker(msg) {
+      promptOverlayEl.className = "active";
+      const owner = lastState?.players.find((p) => p.id === msg.ownerId);
+      const ownerLabel = owner?.generalName || owner?.general || msg.ownerId;
+      const cardsHtml = msg.cards
+        .map((c) => {
+          if (c.hidden) {
+            return `<div class="pickCardOption" data-card-id="${c.id}">
+              <img src="${IMG}/system/card-back.png" alt="Bài úp">
+              <div class="pickCardLabel">Bài úp</div>
+            </div>`;
+          }
+          const name = c.weaponName || c.horseName;
+          return `<div class="pickCardOption" data-card-id="${c.id}">
+            <img src="${IMG}/equips/${name}.png" alt="${name}">
+            <div class="pickCardLabel">${name}</div>
+          </div>`;
+        })
+        .join("");
+      promptEl.innerHTML = `
+        <div class="promptTitle">Chọn 1 lá của ${ownerLabel}</div>
+        <div class="promptSub">${msg.timeoutMs / 1000}s để trả lời</div>
+        <div id="pickCardOptions">${cardsHtml}</div>`;
+      promptEl.querySelectorAll(".pickCardOption").forEach((el) => {
+        el.onclick = () => {
+          send({ type: "response", requestId: msg.requestId, cardId: Number(el.dataset.cardId) });
+          promptOverlayEl.className = "";
+          promptEl.innerHTML = "";
+        };
+      });
+    }
+
     function connect() {
       // Same-origin deploy (server.ts now serves this page too): reuse the page's own
       // scheme/host, so wss:// is used automatically behind an HTTPS reverse proxy and no
@@ -1501,6 +1538,11 @@
         if (msg.type === "choosePickCard") {
           if (msg.actorId !== mySeat) return; // a prompt for a seat this tab doesn't control
           showCardPicker(msg);
+          return;
+        }
+        if (msg.type === "choosePlayerCard") {
+          if (msg.actorId !== mySeat) return; // a prompt for a seat this tab doesn't control
+          showPlayerCardPicker(msg);
           return;
         }
         if (msg.type === "confirmDrawCard") {
