@@ -555,6 +555,8 @@
   #prompt img.cardArt { height: 72px; margin-bottom: 10px; border-radius: 6px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
   #prompt .promptTitle { font-family: var(--font-display); font-size: 22px; color: var(--parchment); margin-bottom: 4px; }
   #prompt .promptSub { font-size: 11px; color: var(--text-dim); margin-bottom: 14px; letter-spacing: 0.5px; }
+  #promptCountdown { font-weight: 700; color: var(--gold); font-variant-numeric: tabular-nums; }
+  #promptCountdown.urgent { color: var(--blood); }
   #promptPass {
     margin-top: 4px;
     background: transparent;
@@ -891,6 +893,8 @@
     let lastState = null; // most recent state snapshot, for looking up a player's general/etc.
     let amICreator = false; // true if this tab created the room it's currently watching
     let pendingDraw = null; // { requestId, count } while it's our Draw phase, waiting for us to click the pile
+    let activePromptRequestId = null; // requestId of whichever prompt's countdown is currently ticking
+    let promptCountdownInterval = null;
     // Privacy toggle for shared-screen local play: masks OUR OWN role (hero panel + own table
     // card) so someone sitting/looking nearby can't read it off the screen unless we choose to
     // reveal it. Persisted so the preference survives a reload.
@@ -907,9 +911,46 @@
       if (!pendingPrompt) return;
       send({ type: "response", requestId: pendingPrompt.requestId, targetId });
       pendingPrompt = null;
+      clearPromptCountdown();
       promptOverlayEl.className = "";
       promptEl.innerHTML = "";
       renderPlayers(); // clear the candidate highlighting/click handlers we wired below
+    }
+    /** Stops whichever prompt countdown is currently ticking (if any). Every path that closes
+     *  a prompt -- a real click, a fresh state broadcast superseding it, or the countdown's own
+     *  expiry -- must call this so a stale interval can never fire against a LATER prompt. */
+    function clearPromptCountdown() {
+      if (promptCountdownInterval) {
+        clearInterval(promptCountdownInterval);
+        promptCountdownInterval = null;
+      }
+      activePromptRequestId = null;
+    }
+    /** Starts a 1x/second countdown against the shared #promptCountdown span for whichever
+     *  prompt `requestId` belongs to. The server's own askClient already resolves (with its
+     *  documented fallback) after `timeoutMs` regardless of what the client does -- this purely
+     *  keeps the CLIENT's popup honest with that deadline: ticks the visible number down, and if
+     *  the human still hasn't answered when it hits 0, runs `onExpire` to close the popup (never
+     *  sends anything itself -- the server's own timeout already settled the ask by then). */
+    function startPromptCountdown(requestId, timeoutMs, onExpire) {
+      clearPromptCountdown();
+      activePromptRequestId = requestId;
+      const deadline = Date.now() + timeoutMs;
+      const tick = () => {
+        if (activePromptRequestId !== requestId) return; // superseded by a newer prompt already
+        const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+        const el = document.getElementById("promptCountdown");
+        if (el) {
+          el.textContent = String(remaining);
+          el.classList.toggle("urgent", remaining <= 5);
+        }
+        if (remaining <= 0) {
+          clearPromptCountdown();
+          onExpire();
+        }
+      };
+      tick();
+      promptCountdownInterval = setInterval(tick, 250);
     }
     window.__claim = claim;
     window.__answer = answerPrompt;
@@ -993,6 +1034,7 @@
       pendingDiscard = null;
       selectedDiscardIds = new Set();
       pendingDraw = null;
+      clearPromptCountdown();
       promptOverlayEl.className = "";
       promptEl.innerHTML = "";
       lobbyEl.style.display = "";
@@ -1424,22 +1466,32 @@
       promptEl.innerHTML = `
         <img class="cardArt" src="${imgSrc}" alt="">
         <div class="promptTitle">${title}</div>
-        <div class="promptSub">${sub} — ${msg.timeoutMs / 1000}s để trả lời</div>
+        <div class="promptSub">${sub} — còn <span id="promptCountdown">${Math.ceil(msg.timeoutMs / 1000)}</span>s để trả lời</div>
         <button id="promptPass">Bỏ qua</button>`;
       document.getElementById("promptPass").onclick = () => answerPrompt(null);
       renderPlayers(); // apply the .candidate highlighting + click handlers for msg.candidateIds now
+      // No answer within timeoutMs: the server's own askClient timeout already resolved this
+      // ask (declined, matching the "silent human passes" policy) -- just close the stale popup.
+      startPromptCountdown(msg.requestId, msg.timeoutMs, () => answerPrompt(null));
     }
 
-    /** Yes/No confirmation prompt shared by equip/trick/dodge/peach asks. */
+    /** Yes/No confirmation prompt shared by equip/trick/dodge/peach/savage-assault/archery
+     *  asks. Auto-closes once `msg.timeoutMs` elapses with no answer -- the server's own
+     *  askClient already resolved the ask by then (each ask documents its own timeout fallback
+     *  in server.ts's makeHumanController; protective asks like dodge/discard-to-avoid-damage
+     *  default to YES, so most of these silently protect the player rather than damage them --
+     *  this popup closing is what tells the player "this decision is over", the actual outcome
+     *  is always reflected in the battle log + their hp/hand right after). */
     function showConfirm(msg, imgSrc, title, sub) {
       promptOverlayEl.className = "active";
       promptEl.innerHTML = `
         <img class="cardArt" src="${imgSrc}" alt="">
         <div class="promptTitle">${title}</div>
-        <div class="promptSub">${sub} — ${msg.timeoutMs / 1000}s để trả lời</div>
+        <div class="promptSub">${sub} — còn <span id="promptCountdown">${Math.ceil(msg.timeoutMs / 1000)}</span>s để trả lời</div>
         <button id="promptYes" class="confirmYes">Đồng ý</button>
         <button id="promptPass">Không</button>`;
       const close = () => {
+        clearPromptCountdown();
         promptOverlayEl.className = "";
         promptEl.innerHTML = "";
       };
@@ -1451,10 +1503,12 @@
         send({ type: "response", requestId: msg.requestId, value: false });
         close();
       };
+      startPromptCountdown(msg.requestId, msg.timeoutMs, close);
     }
 
     /** Amazing Grace draft: click one of the still-face-up cards from the pool -- mandatory, no
-     *  "Bỏ qua" (real Sanguosha requires everyone in line to take exactly one). */
+     *  "Bỏ qua" (real Sanguosha requires everyone in line to take exactly one). Auto-closes on
+     *  timeout -- the server already auto-picked the first still-available card by then. */
     function showCardPicker(msg) {
       promptOverlayEl.className = "active";
       const cardsHtml = msg.cards
@@ -1467,22 +1521,28 @@
         .join("");
       promptEl.innerHTML = `
         <div class="promptTitle">${TRICK_LABEL.amazing_grace}</div>
-        <div class="promptSub">Lượt của bạn — chọn 1 trong ${msg.cards.length} lá đã lật — ${msg.timeoutMs / 1000}s để trả lời</div>
+        <div class="promptSub">Lượt của bạn — chọn 1 trong ${msg.cards.length} lá đã lật — còn <span id="promptCountdown">${Math.ceil(msg.timeoutMs / 1000)}</span>s để trả lời</div>
         <div id="pickCardOptions">${cardsHtml}</div>`;
+      const close = () => {
+        clearPromptCountdown();
+        promptOverlayEl.className = "";
+        promptEl.innerHTML = "";
+      };
       promptEl.querySelectorAll(".pickCardOption").forEach((el) => {
         el.onclick = () => {
           send({ type: "response", requestId: msg.requestId, cardId: Number(el.dataset.cardId) });
-          promptOverlayEl.className = "";
-          promptEl.innerHTML = "";
+          close();
         };
       });
+      startPromptCountdown(msg.requestId, msg.timeoutMs, close);
     }
 
     /** Dismantlement/Snatch: click one of `owner`'s cards to take/discard -- mandatory, no
      *  "Bỏ qua" (the card already resolved; real Sanguosha always takes something once played).
      *  Equip cards show their real art/name (equipment is always public); hand cards render
      *  face-down -- the server never sends their identity ahead of the pick, see server.ts's
-     *  choosePlayerCard wiring. */
+     *  choosePlayerCard wiring. Auto-closes on timeout -- the server already auto-picked the
+     *  first candidate by then. */
     function showPlayerCardPicker(msg) {
       promptOverlayEl.className = "active";
       const owner = lastState?.players.find((p) => p.id === msg.ownerId);
@@ -1504,15 +1564,20 @@
         .join("");
       promptEl.innerHTML = `
         <div class="promptTitle">Chọn 1 lá của ${ownerLabel}</div>
-        <div class="promptSub">${msg.timeoutMs / 1000}s để trả lời</div>
+        <div class="promptSub">Còn <span id="promptCountdown">${Math.ceil(msg.timeoutMs / 1000)}</span>s để trả lời</div>
         <div id="pickCardOptions">${cardsHtml}</div>`;
+      const close = () => {
+        clearPromptCountdown();
+        promptOverlayEl.className = "";
+        promptEl.innerHTML = "";
+      };
       promptEl.querySelectorAll(".pickCardOption").forEach((el) => {
         el.onclick = () => {
           send({ type: "response", requestId: msg.requestId, cardId: Number(el.dataset.cardId) });
-          promptOverlayEl.className = "";
-          promptEl.innerHTML = "";
+          close();
         };
       });
+      startPromptCountdown(msg.requestId, msg.timeoutMs, close);
     }
 
     function connect() {
@@ -1662,6 +1727,7 @@
         selectedDiscardIds = new Set();
         pendingDraw = null;
         renderDrawPile();
+        clearPromptCountdown();
         promptOverlayEl.className = "";
         promptEl.innerHTML = "";
         send({ type: "new" });
