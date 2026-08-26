@@ -1392,10 +1392,16 @@
         : "Đang xem — bấm \"Chiếm ghế\" để điều khiển quyết định Sát.";
       toggleRoleBtnEl.style.display = mySeat ? "" : "none";
       // Safety net: if the current player has already moved past us (or we're no longer alive)
-      // while pendingDraw is still set, our click/timeout answer must have gone astray -- drop
-      // the stale prompt instead of leaving an un-clickable draw pile showing forever.
+      // while pendingDraw/pendingDiscard is still set, our click/timeout answer must have gone
+      // astray -- drop the stale prompt instead of leaving an un-clickable draw pile or a
+      // "bỏ bài" bar stuck showing forever (the server already auto-resolved it via
+      // askClient's timeout fallback; this client just never heard about it).
       if (pendingDraw && state.currentPlayerId !== mySeat) {
         pendingDraw = null;
+      }
+      if (pendingDiscard && (over || !mySeatAlive || state.currentPlayerId !== mySeat)) {
+        pendingDiscard = null;
+        selectedDiscardIds = new Set();
       }
 
       renderPlayers();

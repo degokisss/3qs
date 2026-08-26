@@ -37,6 +37,41 @@ export function slashCandidates(alive: GamePlayer[], actor: GamePlayer): GamePla
   );
 }
 
+/** Static per-kind "how bad would it be to lose this" score used when nobody made a real
+ *  discard choice (a human discard-phase timeout, a misbehaving/timed-out controller, or the
+ *  bot's own no-preference default) -- higher score = kept longer, so the LOWEST-scoring cards
+ *  in hand are discarded first. Peach/Jink (life-and-death defense) rank highest; single-moment
+ *  AOE/self tricks rank lowest. This is deliberately a simple static ranking, not real
+ *  situational strategy (e.g. "is this Jink actually needed against a known Slash count") --
+ *  it only has to beat "discard an arbitrary first N cards" for the no-real-choice case. */
+const DISCARD_IMPORTANCE: Record<CardKind, number> = {
+  [CardKind.Peach]: 100,
+  [CardKind.Jink]: 90,
+  [CardKind.Analeptic]: 60,
+  [CardKind.Slash]: 50,
+  [CardKind.Weapon]: 45,
+  [CardKind.Horse]: 40,
+  [CardKind.Duel]: 35,
+  [CardKind.Snatch]: 35,
+  [CardKind.Dismantlement]: 35,
+  [CardKind.SavageAssault]: 30,
+  [CardKind.ArcheryAttack]: 30,
+  [CardKind.ExNihilo]: 30,
+  [CardKind.GodSalvation]: 25,
+  [CardKind.AmazingGrace]: 25,
+};
+
+/** Picks exactly `count` cards to discard from `hand` when nobody made a real choice: the
+ *  LEAST important cards (by DISCARD_IMPORTANCE) go first, ties broken by original hand order
+ *  for determinism. `count` is assumed <= hand.length (callers already guarantee this). */
+export function pickLeastImportantCards(hand: Card[], count: number): Card[] {
+  return hand
+    .map((c, i) => ({ c, i }))
+    .sort((a, b) => DISCARD_IMPORTANCE[a.c.kind] - DISCARD_IMPORTANCE[b.c.kind] || a.i - b.i)
+    .slice(0, count)
+    .map(({ c }) => c);
+}
+
 export interface Controller {
   /** Milestone 6: `candidates` is always non-empty (never returns null -- every player must end
    *  up with a general; Room falls back to `candidates[0]` if this somehow returns a falsy value). */
@@ -81,7 +116,7 @@ export interface Controller {
   choosePlayerCard(player: GamePlayer, owner: GamePlayer, candidates: Card[]): Promise<Card>;
   /** End-of-turn Discard phase: `player`'s hand exceeds their card limit by exactly `count`.
    *  Return exactly `count` distinct cards currently in `player.hand` to discard. Room falls
-   *  back to the first `count` held cards if this returns something invalid (wrong length, or
+   *  back to `pickLeastImportantCards` if this returns something invalid (wrong length, or
    *  cards not actually held) -- covers a misbehaving or timed-out controller. */
   chooseDiscards(player: GamePlayer, count: number): Promise<Card[]>;
   /** `player` may use `skillName`'s proactive self action (e.g. Kurou) right now; no target to pick. */
@@ -164,7 +199,9 @@ export function makeBotController(rng: () => number): Controller {
       return candidates.find((c) => c.kind === CardKind.Weapon || c.kind === CardKind.Horse) ?? candidates[0];
     },
     async chooseDiscards(player, count) {
-      return player.hand.slice(0, count); // matches the greedy policy's other no-preference defaults
+      // Discard the least valuable cards (see pickLeastImportantCards) instead of an arbitrary
+      // first-N -- matches the greedy policy's other "known/valuable resource" preferences.
+      return pickLeastImportantCards(player.hand, count);
     },
     async wantsToUseSelfAction() {
       return true;

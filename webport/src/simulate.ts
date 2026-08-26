@@ -9,7 +9,7 @@ import { Room } from "./room.js";
 import { GamePlayer } from "./player.js";
 import { EngineContext, effectiveDistance, loseHp, resolveSlash } from "./combat.js";
 import { SKILLS } from "./skill.js";
-import { slashCandidates } from "./controller.js";
+import { pickLeastImportantCards, slashCandidates } from "./controller.js";
 import { duelCandidates, resolveArcheryAttack, resolveDismantlement, resolveSavageAssault, resolveSnatch, snatchCandidates } from "./trick.js";
 import { Role } from "./types.js";
 const DECK_SIZE = 54 + 15 + 16; // basics(Slash-family 29+Jink 14+Peach 8+Analeptic 3) + implemented tricks(15) + equips(10 weapons+6 horses), see card.ts
@@ -662,6 +662,83 @@ async function testDiscardChoiceLetsHumanPickWhichCards(): Promise<void> {
   );
   console.log(
     "PASS testDiscardChoiceLetsHumanPickWhichCards: chooseDiscards's exact chosen cards were discarded (not an arbitrary default set)",
+  );
+}
+
+/**
+ * Regression proof: pickLeastImportantCards (the shared "nobody made a real discard choice"
+ * fallback) discards the lowest-scoring cards first, ties broken by original hand order --
+ * Peach/Jink (life-and-death defense) must never be picked over cheaper situational tricks.
+ * Pure/deterministic, no Room involved.
+ */
+function testPickLeastImportantCardsDiscardsLowestValueFirst(): void {
+  const deck = buildStandardDeck();
+  const peach = deck.find((c) => c.kind === CardKind.Peach)!;
+  const jink = deck.find((c) => c.kind === CardKind.Jink)!;
+  const slash = deck.find((c) => c.kind === CardKind.Slash)!;
+  const amazingGrace = deck.find((c) => c.kind === CardKind.AmazingGrace)!;
+  const hand = [peach, jink, slash, amazingGrace];
+
+  strict.deepEqual(
+    pickLeastImportantCards(hand, 1),
+    [amazingGrace],
+    "with 1 to discard, the lowest-scoring card (amazing grace) must be picked over peach/jink/slash",
+  );
+  strict.deepEqual(
+    pickLeastImportantCards(hand, 2),
+    [amazingGrace, slash],
+    "with 2 to discard, the 2 lowest-scoring cards must be picked, still sparing peach and jink",
+  );
+  console.log(
+    "PASS testPickLeastImportantCardsDiscardsLowestValueFirst: lowest-value cards discarded first, peach/jink spared until nothing else is left",
+  );
+}
+
+/**
+ * Regression proof: when a discard-phase controller response is invalid (the exact shape a real
+ * human's discard-phase timeout produces once server.ts's askClient's own fallback -- or any
+ * other malformed response -- fails Room.discardDownToLimit's "exactly `over` distinct held
+ * cards" check), the defensive fallback there must use pickLeastImportantCards, NOT the old
+ * arbitrary first-N. Proven without depending on the Draw phase's random 2 extra cards: Peach is
+ * placed at hand[0] and Jink at hand[1] -- the OLD first-N fallback would have discarded BOTH
+ * (over is always >=3 here), while the fixed fallback must spare them (both outrank every other
+ * possible card by DISCARD_IMPORTANCE, so they can never be lowest-value regardless of what the
+ * Draw phase adds).
+ */
+async function testDiscardFallbackPrefersLeastImportantCards(): Promise<void> {
+  const room = new Room(playerIds(8), seededRng(1));
+  await room.pickGenerals();
+  const lord = room.players.find((p) => p.role === Role.Lord)!;
+  lord.skills = []; // no keji (would skip the discard phase) or other interfering skill
+  const deck = buildStandardDeck();
+  const peach = deck.find((c) => c.kind === CardKind.Peach)!;
+  const jink = deck.find((c) => c.kind === CardKind.Jink)!;
+  const slash = deck.find((c) => c.kind === CardKind.Slash)!;
+  const amazingGrace = deck.find((c) => c.kind === CardKind.AmazingGrace)!;
+  const godSalvation = deck.find((c) => c.kind === CardKind.GodSalvation)!;
+  const exNihilo = deck.find((c) => c.kind === CardKind.ExNihilo)!;
+  lord.hand = [peach, jink, slash, amazingGrace, godSalvation, exNihilo];
+  lord.hp = 5; // maxCards === hp === 5; after the Draw phase's +2 this hand is 8, over = 3
+
+  room.setController(lord.id, {
+    wantsToEquip: async () => false,
+    wantsToUseSelfAction: async () => false,
+    wantsToPlayTrick: async () => false,
+    chooseTrickTarget: async () => null,
+    chooseSlashTarget: async () => null,
+    // Simulates the exact shape server.ts's askClient falls back to on a real human timeout/
+    // disconnect (or any other invalid response) -- an empty array fails discardDownToLimit's
+    // own membership/count check, forcing its defensive fallback to engage.
+    chooseDiscards: async () => [],
+  });
+
+  await room.playTurn(); // the lord acts first: Draw adds 2, nothing gets played away, Discard asks
+
+  strict.equal(lord.handcardNum, lord.maxCards, "hand must be exactly at the limit after the fallback discard");
+  strict.ok(lord.hand.includes(peach), "peach must survive -- an old first-N fallback would have discarded it (it's hand[0])");
+  strict.ok(lord.hand.includes(jink), "jink must survive -- an old first-N fallback would have discarded it (it's hand[1])");
+  console.log(
+    "PASS testDiscardFallbackPrefersLeastImportantCards: an invalid/timed-out discard response spared peach/jink instead of an old arbitrary first-N",
   );
 }
 
@@ -1399,6 +1476,8 @@ await testAllyRescuePeachSavesADyingPlayer();
 await testAnalepticSelfRescuesADyingPlayer();
 await testAmazingGraceIsATurnOrderDraft();
 await testDiscardChoiceLetsHumanPickWhichCards();
+testPickLeastImportantCardsDiscardsLowestValueFirst();
+await testDiscardFallbackPrefersLeastImportantCards();
 await testDrawPhaseAsksBeforeDrawing();
 await testEmergentCombatReachesWinCondition();
 await testEquipAndTricksAppearInPlay();

@@ -19,7 +19,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Room } from "./room.js";
-import { Controller } from "./controller.js";
+import { Controller, pickLeastImportantCards } from "./controller.js";
 import { SKILLS } from "./skill.js";
 import type { Card } from "./card.js";
 
@@ -311,7 +311,7 @@ function makeHumanController(gr: GameRoom, playerId: string): Partial<Controller
           const ids = Array.isArray(msg.cardIds) ? msg.cardIds : [];
           return player.hand.filter((c) => ids.includes(c.id));
         },
-        player.hand.slice(0, count), // fallback on timeout/disconnect: matches the bot's own default (first N held cards)
+        pickLeastImportantCards(player.hand, count), // fallback on timeout/disconnect: discard the least valuable cards, not an arbitrary first-N
       ),
     choosePickCard: (_player, candidates) =>
       askClient(

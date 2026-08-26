@@ -20,7 +20,7 @@ import {
   resolveSlash,
 } from "./combat.js";
 import { GENERALS, GeneralDef, SKILLS } from "./skill.js";
-import { Controller, FreeAction, makeBotController, slashCandidates } from "./controller.js";
+import { Controller, FreeAction, makeBotController, pickLeastImportantCards, slashCandidates } from "./controller.js";
 import {
   dismantlementCandidates,
   duelCandidates,
@@ -176,10 +176,10 @@ export class Room {
     if (over <= 0) return;
     const chosen = await this.controllers.get(player.id)!.chooseDiscards(player, over);
     // Validate: exactly `over` DISTINCT cards actually still in hand right now -- covers a
-    // misbehaving or timed-out controller by falling back to the original arbitrary-first-N
-    // behavior instead of ever discarding the wrong count.
+    // misbehaving or timed-out controller by falling back to pickLeastImportantCards instead of
+    // ever discarding the wrong count.
     const distinctHeld = [...new Set(chosen)].filter((c) => player.hand.includes(c));
-    const discarded = distinctHeld.length === over ? distinctHeld : player.hand.slice(0, over);
+    const discarded = distinctHeld.length === over ? distinctHeld : pickLeastImportantCards(player.hand, over);
     for (const c of discarded) player.hand.splice(player.hand.indexOf(c), 1);
     this.discardPile.push(...discarded);
     this.log.push(`${player.id} bỏ ${discarded.length} lá bài (giới hạn bài ${player.maxCards})`);
