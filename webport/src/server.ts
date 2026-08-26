@@ -585,9 +585,15 @@ wss.on("connection", (ws) => {
         gr.started = true;
         broadcast(gr); // enters the pick-generals phase immediately (started but nobody picked yet)
         broadcastLobby();
+        const room = gr.room; // capture the exact Room instance this startGame call is driving:
+        // if the creator resets the room ("new") while pickGenerals() is still pending (e.g.
+        // waiting up to 30s on a claimed human seat's general pick), this stale background call
+        // must NOT schedule the turn loop against whatever DIFFERENT (fresh, ungenerated) Room
+        // gr.room now points to -- that was the exact crash: playTurn() throwing because
+        // pickGenerals() never ran on the room the loop actually started ticking against.
         void (async () => {
-          await gr.room.pickGenerals(() => broadcast(gr)); // broadcasts before/after every pick
-          scheduleLoop(gr); // only start the real turn loop once every player has a general
+          await room.pickGenerals(() => broadcast(gr)); // broadcasts before/after every pick
+          if (gr.room === room) scheduleLoop(gr); // only start the loop if still the current room
         })();
         break;
       }
