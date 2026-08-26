@@ -321,6 +321,27 @@ function makeHumanController(gr: GameRoom, playerId: string): Partial<Controller
         (msg) => candidates.find((c) => c.id === msg.cardId) ?? candidates[0],
         candidates[0], // fallback on timeout/disconnect: matches the bot's own default (first revealed card)
       ),
+    choosePlayerCard: (player, owner, candidates) =>
+      askClient(
+        gr,
+        playerId,
+        {
+          type: "choosePlayerCard",
+          actorId: playerId,
+          ownerId: owner.id,
+          // Equipment is always public (full identity sent); a hand card's identity must NEVER
+          // reach this socket ahead of the pick -- only its `id` (so the click can name which
+          // slot was chosen) and `hidden: true` go over the wire, matching real Sanguosha's
+          // "you don't know what you're taking from someone's hand" rule.
+          cards: candidates.map((c) =>
+            owner.hand.includes(c)
+              ? { id: c.id, hidden: true }
+              : { id: c.id, hidden: false, kind: c.kind, weaponName: c.weaponName ?? null, horseName: c.horseName ?? null },
+          ),
+        },
+        (msg) => candidates.find((c) => c.id === msg.cardId) ?? candidates[0],
+        candidates[0], // fallback on timeout/disconnect: matches choosePickCard's own default
+      ),
     wantsToDrawNow: (_player, count) =>
       askClient(
         gr,

@@ -7,10 +7,6 @@ import { Card, CardKind } from "./card.js";
 import { GamePlayer } from "./player.js";
 import { EngineContext, applyDamage, effectiveDistance, findJinkLikeCard, findSlashLikeCard, heal, isImmuneToSlashAndDuel, isImmuneToSnatch } from "./combat.js";
 
-function randomOf<T>(items: T[], rng: () => number): T | undefined {
-  return items[Math.floor(rng() * items.length)];
-}
-
 /** Alive players `actor` could legally target with Dismantlement: not self, has cards in play. */
 export function dismantlementCandidates(actor: GamePlayer, alive: GamePlayer[]): GamePlayer[] {
   return alive.filter((p) => p !== actor && p.handcardNum > 0);
@@ -41,19 +37,52 @@ export function resolveExNihilo(ctx: EngineContext, target: GamePlayer): void {
   ctx.log.push(`${target.id} bốc 2 lá (Vô Trung Sinh Hữu)`);
 }
 
-export function resolveDismantlement(ctx: EngineContext, target: GamePlayer, rng: () => number): void {
-  const stolen = randomOf(target.hand, rng);
-  if (!stolen) return;
-  target.hand.splice(target.hand.indexOf(stolen), 1);
-  ctx.discardPile.push(stolen);
+/** Every card currently in `owner`'s equip zone (weapon/defense horse/offense horse), in a
+ *  stable display order -- shared by Dismantlement/Snatch's candidate list below. */
+function equippedCards(owner: GamePlayer): Card[] {
+  return [owner.weapon, owner.defenseHorse, owner.offenseHorse].filter((c): c is Card => c !== null);
+}
+
+/** Detaches `card` from wherever it currently sits on `owner` (hand or one of the 3 equip
+ *  slots) -- does NOT decide where it goes next (discard pile vs. the stealer's hand), that's
+ *  the caller's job. Fires Xiaoji's onEquipLost for ANY departure from the equip zone (discarded
+ *  or snatched away), not just being replaced by a new equip. */
+async function detachCardFrom(ctx: EngineContext, owner: GamePlayer, card: Card): Promise<void> {
+  const handIdx = owner.hand.indexOf(card);
+  if (handIdx !== -1) {
+    owner.hand.splice(handIdx, 1);
+    return;
+  }
+  if (owner.weapon === card) owner.weapon = null;
+  else if (owner.defenseHorse === card) owner.defenseHorse = null;
+  else if (owner.offenseHorse === card) owner.offenseHorse = null;
+  else return; // defensive no-op: not actually one of owner's cards
+  for (const skill of owner.skills) await skill.onEquipLost?.(ctx, owner);
+}
+
+/** Dismantlement/Snatch: `actor` chooses exactly one of `owner`'s cards (hand or equipped) via
+ *  `ctx.askPickPlayerCard` -- validates the response is actually one of `candidates`, falling
+ *  back to the first one (same defensive pattern as resolveAmazingGrace). */
+async function pickOpponentCard(ctx: EngineContext, actor: GamePlayer, owner: GamePlayer, candidates: Card[]): Promise<Card> {
+  const chosen = await ctx.askPickPlayerCard(actor, owner, candidates);
+  return candidates.find((c) => c.id === chosen.id) ?? candidates[0];
+}
+
+export async function resolveDismantlement(ctx: EngineContext, actor: GamePlayer, target: GamePlayer): Promise<void> {
+  const candidates = [...target.hand, ...equippedCards(target)];
+  if (candidates.length === 0) return;
+  const chosen = await pickOpponentCard(ctx, actor, target, candidates);
+  await detachCardFrom(ctx, target, chosen);
+  ctx.discardPile.push(chosen);
   ctx.log.push(`${target.id} bỏ 1 lá bài (Quá Hạ Sách Kiều)`);
 }
 
-export function resolveSnatch(ctx: EngineContext, source: GamePlayer, target: GamePlayer, rng: () => number): void {
-  const stolen = randomOf(target.hand, rng);
-  if (!stolen) return;
-  target.hand.splice(target.hand.indexOf(stolen), 1);
-  source.hand.push(stolen);
+export async function resolveSnatch(ctx: EngineContext, source: GamePlayer, target: GamePlayer): Promise<void> {
+  const candidates = [...target.hand, ...equippedCards(target)];
+  if (candidates.length === 0) return;
+  const chosen = await pickOpponentCard(ctx, source, target, candidates);
+  await detachCardFrom(ctx, target, chosen);
+  source.hand.push(chosen);
   ctx.log.push(`${source.id} cướp 1 lá bài từ ${target.id}`);
 }
 

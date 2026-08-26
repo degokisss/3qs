@@ -282,6 +282,7 @@ export class Room {
       askSavageAssaultSlash: (player) => this.controllers.get(player.id)!.wantsToDiscardForSavageAssault(player),
       askArcheryAttackJink: (player) => this.controllers.get(player.id)!.wantsToDiscardForArcheryAttack(player),
       askPickCard: (player, candidates) => this.controllers.get(player.id)!.choosePickCard(player, candidates),
+      askPickPlayerCard: (player, owner, candidates) => this.controllers.get(player.id)!.choosePlayerCard(player, owner, candidates),
     };
   }
 
@@ -513,14 +514,14 @@ export class Room {
       player,
       CardKind.Dismantlement,
       (alive) => dismantlementCandidates(player, alive),
-      (_card, target, alive) => resolveDismantlement(this.makeContext(alive), target, this.rng),
+      (_card, target, alive) => resolveDismantlement(this.makeContext(alive), player, target),
       (p) => findDismantlementLikeCard(p),
     );
     await this.tryPlayTargeted(
       player,
       CardKind.Snatch,
       (alive) => snatchCandidates(player, alive),
-      (_card, target, alive) => resolveSnatch(this.makeContext(alive), player, target, this.rng),
+      (_card, target, alive) => resolveSnatch(this.makeContext(alive), player, target),
     );
     await this.tryPlayTargeted(
       player,
@@ -690,7 +691,7 @@ export class Room {
           player,
           CardKind.Dismantlement,
           (alive) => dismantlementCandidates(player, alive),
-          (_card, target, alive) => resolveDismantlement(this.makeContext(alive), target, this.rng),
+          (_card, target, alive) => resolveDismantlement(this.makeContext(alive), player, target),
           () => card,
         );
         return false;
@@ -699,7 +700,7 @@ export class Room {
           player,
           CardKind.Snatch,
           (alive) => snatchCandidates(player, alive),
-          (_card, target, alive) => resolveSnatch(this.makeContext(alive), player, target, this.rng),
+          (_card, target, alive) => resolveSnatch(this.makeContext(alive), player, target),
           () => card,
         );
         return false;

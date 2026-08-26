@@ -1041,6 +1041,7 @@ function makeTestContext(alivePlayers: GamePlayer[], log: string[], drawTop: () 
     askSavageAssaultSlash: async () => true,
     askArcheryAttackJink: async () => true,
     askPickCard: async (_player, candidates) => candidates[0],
+    askPickPlayerCard: async (_player, _owner, candidates) => candidates[0],
   };
 }
 

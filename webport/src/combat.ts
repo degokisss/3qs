@@ -212,6 +212,13 @@ export interface EngineContext {
    *  `candidates` pool. Must return one of `candidates` -- an invalid/missing return falls back
    *  to `candidates[0]` (see trick.ts's resolveAmazingGrace). */
   askPickCard: (player: GamePlayer, candidates: Card[]) => Promise<Card>;
+  /** Dismantlement/Snatch (and similarly-shaped "take/discard one of a target's cards" effects):
+   *  `player` chooses exactly one of `owner`'s cards from `candidates` -- both hand and equipped
+   *  cards are eligible. Must return one of `candidates` -- an invalid/missing return falls back
+   *  to `candidates[0]` (see trick.ts's resolveDismantlement/resolveSnatch). See
+   *  Controller.choosePlayerCard for the visibility rule enforced at the WS boundary: equip is
+   *  always public, hand cards are chosen positionally/blind, matching real Sanguosha. */
+  askPickPlayerCard: (player: GamePlayer, owner: GamePlayer, candidates: Card[]) => Promise<Card>;
   /** Ally rescue: does `rescuer` want to play a held Peach/Analeptic (or viewAs, e.g. Jijiu) to
    *  save `dyingPlayer`? Only called when `rescuer` actually holds one -- asked of every OTHER
    *  alive player, in turn order starting right after the dying player, only once the dying

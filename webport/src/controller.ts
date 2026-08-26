@@ -76,6 +76,9 @@ export interface Controller {
   /** Amazing Grace: `player`'s turn to take exactly one card from the still-face-up
    *  `candidates` pool (never empty when asked). */
   choosePickCard(player: GamePlayer, candidates: Card[]): Promise<Card>;
+  /** Dismantlement/Snatch: `player` chooses exactly one of `owner`'s cards (hand or equipped)
+   *  to take/discard, instead of a random pick -- `candidates` is always non-empty when asked. */
+  choosePlayerCard(player: GamePlayer, owner: GamePlayer, candidates: Card[]): Promise<Card>;
   /** End-of-turn Discard phase: `player`'s hand exceeds their card limit by exactly `count`.
    *  Return exactly `count` distinct cards currently in `player.hand` to discard. Room falls
    *  back to the first `count` held cards if this returns something invalid (wrong length, or
@@ -153,6 +156,12 @@ export function makeBotController(rng: () => number): Controller {
     },
     async choosePickCard(_player, candidates) {
       return candidates[0]; // matches the greedy policy's other no-preference defaults
+    },
+    async choosePlayerCard(_player, _owner, candidates) {
+      // Prefer a known equip card over a blind random hand card -- a visible, usually-valuable
+      // resource is worth denying/taking over an unseen one, matching this policy's other
+      // "known/valuable resource" preferences (e.g. wantsToDiscardForGanglie).
+      return candidates.find((c) => c.kind === CardKind.Weapon || c.kind === CardKind.Horse) ?? candidates[0];
     },
     async chooseDiscards(player, count) {
       return player.hand.slice(0, count); // matches the greedy policy's other no-preference defaults
