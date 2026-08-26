@@ -406,7 +406,12 @@ function snapshot(gr: GameRoom) {
     pickingGenerals: gr.started && gr.room.players.some((p) => !p.general),
     pickTurnPlayerId: gr.room.pickTurnPlayerId,
     turnNumber: gr.room.turnNumber,
-    currentPlayerId: gr.room.players[gr.room.currentIndex]?.id ?? null,
+    // Room's constructor sets currentIndex to the lord's seat the INSTANT it's created (well
+    // before anyone picks generals or the creator starts the match) -- exposing it while the
+    // room still sits in the lobby/waiting-room would leak who the lord is via the client's
+    // "current player" gold highlight. Only reveal it once the match has actually started,
+    // matching roleShown's own "public knowledge once the match begins" rule right below.
+    currentPlayerId: gr.started ? gr.room.players[gr.room.currentIndex]?.id ?? null : null,
     gameOver: gr.room.gameOver,
     players: gr.room.players.map((p) => ({
       id: p.id,
