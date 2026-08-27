@@ -979,12 +979,23 @@
     // here for the same "not always the identical sound" feel. No clean heal SFX asset exists in
     // the original audio set, so healing only gets the visual effect below, not a sound.
     const INJURE_SFX = ["system/injure1.ogg", "system/injure2.ogg", "system/injure3.ogg"];
-    function playSfx(relPath) {
+    // Preloaded once up front instead of `new Audio(...)` on every hit: creating a fresh element
+    // per hit forced a network fetch + decode before playback could start, landing noticeably
+    // AFTER the (synchronous) visual flash -- reported as "audio feels laggy/out of sync".
+    // Preloading here means that fetch/decode happens during idle time, long before the first
+    // real hit; `cloneNode(true)` on trigger reuses the already-fetched resource (near-instant
+    // start) and lets overlapping hits play concurrently instead of cutting each other off.
+    const injureAudioPool = INJURE_SFX.map((relPath) => {
+      const a = new Audio(`${AUDIO}/${relPath}`);
+      a.preload = "auto";
+      a.volume = 0.55;
+      return a;
+    });
+    function playInjureSfx() {
       if (!soundEnabled) return;
       try {
-        const a = new Audio(`${AUDIO}/${relPath}`);
-        a.volume = 0.55;
-        a.play().catch(() => {}); // blocked until the first user gesture on some browsers -- ignore
+        const base = injureAudioPool[Math.floor(Math.random() * injureAudioPool.length)];
+        base.cloneNode(true).play().catch(() => {}); // blocked until the first user gesture on some browsers -- ignore
       } catch {
         // Audio() can throw in some embedded/headless contexts -- never let a sound glitch break rendering
       }
@@ -1236,7 +1247,7 @@
      *  per-user toggles (see the header buttons). */
     function triggerHpEffect(playerId, delta) {
       const damage = delta < 0;
-      if (damage) playSfx(INJURE_SFX[Math.floor(Math.random() * INJURE_SFX.length)]);
+      if (damage) playInjureSfx();
       if (!fxEnabled) return;
       const amountLabel = `${damage ? "" : "+"}${delta}`;
       const targets = [];
