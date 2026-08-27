@@ -1726,8 +1726,75 @@ async function testKylinBowDoesNotTriggerOnDuelDamage(): Promise<void> {
   strict.equal(target.defenseHorse?.id, defenseHorse.id, "the horse must survive duel damage from a kylin-bow-wielding attacker");
   console.log("PASS testKylinBowDoesNotTriggerOnDuelDamage: duel damage never asked/destroyed, kylin bow is slash-only");
 }
+
+/**
+ * Standard rule: Crossbow removes the "1 Slash per turn" limit entirely -- previously
+ * completely unimplemented (equipping it behaved identically to no weapon at all: same range
+ * 1, same 1-slash cap, i.e. strictly worse than every other weapon for zero benefit). Driven
+ * through a real Room turn (bot's fixed pass), since the limit lives in room.ts's Play-phase
+ * loop, not combat.ts.
+ */
+async function testCrossbowRemovesTheSlashLimit(): Promise<void> {
+  const room = new Room(playerIds(8), seededRng(1));
+  await room.pickGenerals();
+  const lord = room.players.find((p) => p.role === Role.Lord)!;
+  lord.skills = []; // no slashLimit-raising general skill to confound the crossbow-specific proof
+  const deck = buildStandardDeck();
+  const crossbow = deck.find((c) => c.weaponName === "Crossbow")!;
+  const slashes = deck.filter((c) => c.kind === CardKind.Slash).slice(0, 4);
+  lord.hand = [...slashes];
+  lord.weapon = crossbow;
+  // Nobody dodges/blocks -- ensures every attempted slash actually resolves instead of quietly
+  // failing for an unrelated reason.
+  for (const p of room.players) if (p !== lord) p.hand = [];
+
+  await room.playTurn(); // the lord acts first
+
+  const lordSlashCount = room.log.filter((l) => l.startsWith(`${lord.id} xuất Sát vào`)).length;
+  strict.ok(lordSlashCount > 1, `crossbow must let the lord play more than 1 slash in a turn (got ${lordSlashCount})`);
+  strict.ok(!lord.hand.some((c) => c.kind === CardKind.Slash), "every held slash must have been played, none left over uncapped");
+  console.log(`PASS testCrossbowRemovesTheSlashLimit: lord played ${lordSlashCount} slashes in one turn with crossbow equipped`);
+}
+
+/**
+ * Regression proof: Crossbow's unlimited-slash removal must also apply to the freeform
+ * (human-controlled) Play phase, not just the bot's fixed pass -- the limit is computed
+ * separately in each path (see room.ts's computeSlashLimit), so both need their own proof.
+ */
+async function testCrossbowRemovesTheSlashLimitInFreeformPlay(): Promise<void> {
+  const room = new Room(playerIds(8), seededRng(1));
+  await room.pickGenerals();
+  const lord = room.players.find((p) => p.role === Role.Lord)!;
+  lord.skills = [];
+  const deck = buildStandardDeck();
+  const crossbow = deck.find((c) => c.weaponName === "Crossbow")!;
+  const slashes = deck.filter((c) => c.kind === CardKind.Slash).slice(0, 4);
+  lord.hand = [...slashes];
+  lord.weapon = crossbow;
+  for (const p of room.players) if (p !== lord) p.hand = [];
+
+  let slashPlays = 0;
+  room.setController(lord.id, {
+    chooseFreeAction: async (_player, legalActions) => {
+      const mySlash = legalActions.find((a) => a.kind === "playCard" && a.cardKind === CardKind.Slash);
+      if (mySlash) {
+        slashPlays++;
+        return mySlash;
+      }
+      return null;
+    },
+  });
+
+  await room.playTurn(); // the lord acts first
+
+  strict.ok(slashPlays > 1, `crossbow must let the freeform human path play more than 1 slash in a turn (got ${slashPlays})`);
+  strict.ok(!lord.hand.some((c) => c.kind === CardKind.Slash), "every held slash must have been played");
+  console.log(`PASS testCrossbowRemovesTheSlashLimitInFreeformPlay: freeform human path played ${slashPlays} slashes in one turn with crossbow equipped`);
+}
 await testKylinBowDestroysOneHorseOnHit();
 await testKylinBowLetsAttackerChooseWhichHorse();
 await testKylinBowRequiresTheWeaponAndConsent();
 await testKylinBowDoesNotTriggerOnDuelDamage();
+await testCrossbowRemovesTheSlashLimit();
+await testCrossbowRemovesTheSlashLimitInFreeformPlay();
 console.log("\nAll Milestone 0-3.9 smoke tests passed.");

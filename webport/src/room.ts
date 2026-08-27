@@ -462,6 +462,19 @@ export class Room {
     return true;
   }
 
+  /** Real Sanguosha slash limit: 1 per turn by default, raised by e.g. Paoxiao (skill.ts), or
+   *  removed entirely by Crossbow (no cap at all -- `Infinity` is safe here since every caller's
+   *  loop already stops on its own once no Slash-like card or legal target remains; it never
+   *  spins forever). */
+  private computeSlashLimit(player: GamePlayer): number {
+    if (player.weapon?.weaponName === "Crossbow") return Infinity;
+    let slashesAllowed = 1;
+    for (const skill of player.skills) {
+      if (skill.slashLimit) slashesAllowed = Math.max(slashesAllowed, skill.slashLimit(player));
+    }
+    return slashesAllowed;
+  }
+
   private async runPlayPhase(player: GamePlayer): Promise<void> {
     const controller = this.controllers.get(player.id)!;
     if (controller.chooseFreeAction) {
@@ -586,11 +599,9 @@ export class Room {
       (_card, alive) => resolveAmazingGrace(this.makeContext(alive), player),
     );
 
-    // Slash limit: 1 by default, raised by e.g. Paoxiao (skill.ts).
-    let slashesAllowed = 1;
-    for (const skill of player.skills) {
-      if (skill.slashLimit) slashesAllowed = Math.max(slashesAllowed, skill.slashLimit(player));
-    }
+    // Slash limit: 1 by default, raised by e.g. Paoxiao (skill.ts), or removed entirely by
+    // Crossbow -- see computeSlashLimit.
+    let slashesAllowed = this.computeSlashLimit(player);
     while (slashesAllowed > 0 && player.alive && !this.gameOver) {
       if (!(await this.tryPlaySlash(player))) break;
       slashesAllowed--;
@@ -658,10 +669,7 @@ export class Room {
     player: GamePlayer,
     controller: Controller & { chooseFreeAction: NonNullable<Controller["chooseFreeAction"]> },
   ): Promise<void> {
-    let slashesAllowed = 1;
-    for (const skill of player.skills) {
-      if (skill.slashLimit) slashesAllowed = Math.max(slashesAllowed, skill.slashLimit(player));
-    }
+    let slashesAllowed = this.computeSlashLimit(player);
     let slashesUsed = 0;
     const usedSkillsThisTurn = new Set<string>();
 
