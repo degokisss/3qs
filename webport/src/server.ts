@@ -280,6 +280,15 @@ function makeHumanController(gr: GameRoom, playerId: string): Partial<Controller
       askClient(gr, playerId, { type: "confirmSavageAssaultSlash", actorId: playerId }, (msg) => msg.value !== false, true),
     wantsToDiscardForArcheryAttack: () =>
       askClient(gr, playerId, { type: "confirmArcheryAttackJink", actorId: playerId }, (msg) => msg.value !== false, true),
+    wantsToUseKylinBow: () =>
+      askClient(
+        gr,
+        playerId,
+        { type: "confirmKylinBow", actorId: playerId },
+        (msg) => msg.value === true,
+        false, // fallback on timeout/disconnect: offensive/optional-resource action (destroying
+        // someone else's horse), same "silent human passes" policy as wantsToPlayTrick above
+      ),
     wantsToUseSelfAction: (player, skillName) => {
       const skill = player.skills.find((s) => s.name === skillName);
       return askClient(

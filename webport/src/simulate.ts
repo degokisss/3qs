@@ -10,7 +10,7 @@ import { GamePlayer } from "./player.js";
 import { EngineContext, effectiveDistance, loseHp, resolveSlash } from "./combat.js";
 import { SKILLS } from "./skill.js";
 import { pickLeastImportantCards, slashCandidates } from "./controller.js";
-import { duelCandidates, resolveArcheryAttack, resolveDismantlement, resolveSavageAssault, resolveSnatch, snatchCandidates } from "./trick.js";
+import { duelCandidates, resolveArcheryAttack, resolveDismantlement, resolveDuel, resolveSavageAssault, resolveSnatch, snatchCandidates } from "./trick.js";
 import { Role } from "./types.js";
 const DECK_SIZE = 54 + 15 + 16; // basics(Slash-family 29+Jink 14+Peach 8+Analeptic 3) + implemented tricks(15) + equips(10 weapons+6 horses), see card.ts
 
@@ -1172,6 +1172,7 @@ function makeTestContext(alivePlayers: GamePlayer[], log: string[], drawTop: () 
     askArcheryAttackJink: async () => true,
     askPickCard: async (_player, candidates) => candidates[0],
     askPickPlayerCard: async (_player, _owner, candidates) => candidates[0],
+    askUseKylinBow: async () => true,
   };
 }
 
@@ -1603,4 +1604,130 @@ await testChooseTrickTargetPicksExactPlayer();
 await testDuelSlashAndGanglieDiscardRespected();
 await testKillingARebelRewardsTheKillerWithThreeCards();
 await testLordKillingALoyalistLosesHandAndEquipment();
+
+/**
+ * Standard rule: Kylin Bow (weapon, range 5) -- when a Slash you wielded it with deals damage to
+ * a target with at least 1 horse card equipped, you may destroy one of their horse cards.
+ * Driven directly through resolveSlash (pure, deterministic, matching this file's other
+ * combat.ts-level proofs).
+ */
+async function testKylinBowDestroysOneHorseOnHit(): Promise<void> {
+  const deck = buildStandardDeck();
+  const attacker = new GamePlayer("A");
+  attacker.weapon = deck.find((c) => c.weaponName === "KylinBow")!;
+  const target = new GamePlayer("B");
+  const defenseHorse = deck.find((c) => c.kind === CardKind.Horse && c.horseDelta === 1)!;
+  target.defenseHorse = defenseHorse;
+  const slashCard = deck.find((c) => c.kind === CardKind.Slash)!;
+  target.hand = []; // no jink -- damage guaranteed
+
+  const log: string[] = [];
+  const ctx = makeTestContext([attacker, target], log);
+  await resolveSlash(ctx, attacker, target, slashCard);
+
+  strict.equal(target.hp, target.maxHp - 1, "test setup: the slash must actually have dealt damage");
+  strict.equal(target.defenseHorse, null, "kylin bow must destroy the target's horse after the hit");
+  strict.ok(ctx.discardPile.some((c) => c.id === defenseHorse.id), "the destroyed horse must land in the discard pile");
+  strict.ok(log.some((l) => l.includes("dùng Kỳ Lân Cung hủy")), "the destruction must be logged");
+  console.log("PASS testKylinBowDestroysOneHorseOnHit: defense horse destroyed and discarded after a kylin bow slash landed");
+}
+
+/**
+ * Regression proof: when the target has BOTH an offense and a defense horse, the attacker's
+ * controller (not an arbitrary default) picks WHICH one to destroy via askPickPlayerCard --
+ * confirms the choice is actually consulted, and that the OTHER horse survives untouched.
+ */
+async function testKylinBowLetsAttackerChooseWhichHorse(): Promise<void> {
+  const deck = buildStandardDeck();
+  const attacker = new GamePlayer("A");
+  attacker.weapon = deck.find((c) => c.weaponName === "KylinBow")!;
+  const target = new GamePlayer("B");
+  const defenseHorse = deck.find((c) => c.kind === CardKind.Horse && c.horseDelta === 1)!;
+  const offenseHorse = deck.find((c) => c.kind === CardKind.Horse && c.horseDelta === -1)!;
+  target.defenseHorse = defenseHorse;
+  target.offenseHorse = offenseHorse;
+  const slashCard = deck.find((c) => c.kind === CardKind.Slash)!;
+  target.hand = [];
+
+  const ctx = makeTestContext([attacker, target], []);
+  ctx.askPickPlayerCard = async (_player, _owner, candidates) => candidates.find((c) => c.id === offenseHorse.id)!;
+  await resolveSlash(ctx, attacker, target, slashCard);
+
+  strict.equal(target.offenseHorse, null, "the controller-chosen offense horse must be destroyed");
+  strict.equal(target.defenseHorse?.id, defenseHorse.id, "the OTHER (not chosen) horse must survive untouched");
+  console.log("PASS testKylinBowLetsAttackerChooseWhichHorse: controller's exact choice among 2 horses was respected");
+}
+
+/**
+ * Regression proof: Kylin Bow's destroy-a-horse effect must NOT fire without the weapon
+ * equipped, and must NOT fire when the attacker declines the (optional) offer -- it's a "may",
+ * never automatic.
+ */
+async function testKylinBowRequiresTheWeaponAndConsent(): Promise<void> {
+  const deck = buildStandardDeck();
+  const slashCard1 = deck.find((c) => c.kind === CardKind.Slash)!;
+  const defenseHorse1 = deck.find((c) => c.kind === CardKind.Horse && c.horseDelta === 1)!;
+
+  // No Kylin Bow equipped at all -- must never even ask.
+  const noWeaponAttacker = new GamePlayer("A1");
+  const noWeaponTarget = new GamePlayer("B1");
+  noWeaponTarget.defenseHorse = defenseHorse1;
+  noWeaponTarget.hand = [];
+  let asked1 = false;
+  const ctx1 = makeTestContext([noWeaponAttacker, noWeaponTarget], []);
+  ctx1.askUseKylinBow = async () => {
+    asked1 = true;
+    return true;
+  };
+  await resolveSlash(ctx1, noWeaponAttacker, noWeaponTarget, slashCard1);
+  strict.equal(asked1, false, "without kylin bow equipped, the destroy-horse offer must never even be asked");
+  strict.equal(noWeaponTarget.defenseHorse?.id, defenseHorse1.id, "the horse must survive without kylin bow equipped");
+
+  // Kylin Bow equipped, but the attacker declines the offer.
+  const deck2 = buildStandardDeck();
+  const declineAttacker = new GamePlayer("A2");
+  declineAttacker.weapon = deck2.find((c) => c.weaponName === "KylinBow")!;
+  const declineTarget = new GamePlayer("B2");
+  const defenseHorse2 = deck2.find((c) => c.kind === CardKind.Horse && c.horseDelta === 1)!;
+  declineTarget.defenseHorse = defenseHorse2;
+  declineTarget.hand = [];
+  const slashCard2 = deck2.find((c) => c.kind === CardKind.Slash)!;
+  const ctx2 = makeTestContext([declineAttacker, declineTarget], []);
+  ctx2.askUseKylinBow = async () => false;
+  await resolveSlash(ctx2, declineAttacker, declineTarget, slashCard2);
+  strict.equal(declineTarget.defenseHorse?.id, defenseHorse2.id, "declining the offer must leave the horse untouched");
+
+  console.log("PASS testKylinBowRequiresTheWeaponAndConsent: no weapon -> never asked; declined -> horse survives");
+}
+
+/**
+ * Regression proof: Kylin Bow is Slash-specific -- Duel damage (a different card entirely, even
+ * though it involves an alternating slash EXCHANGE internally) must NOT trigger it.
+ */
+async function testKylinBowDoesNotTriggerOnDuelDamage(): Promise<void> {
+  const deck = buildStandardDeck();
+  const attacker = new GamePlayer("A");
+  attacker.weapon = deck.find((c) => c.weaponName === "KylinBow")!;
+  const target = new GamePlayer("B");
+  const defenseHorse = deck.find((c) => c.kind === CardKind.Horse && c.horseDelta === 1)!;
+  target.defenseHorse = defenseHorse;
+  target.hand = []; // no slash to fight back with -- takes the duel damage guaranteed
+
+  let asked = false;
+  const ctx = makeTestContext([attacker, target], []);
+  ctx.askUseKylinBow = async () => {
+    asked = true;
+    return true;
+  };
+  await resolveDuel(ctx, attacker, target);
+
+  strict.equal(target.hp, target.maxHp - 1, "test setup: the duel must actually have dealt damage");
+  strict.equal(asked, false, "duel damage must never trigger kylin bow's destroy-horse offer");
+  strict.equal(target.defenseHorse?.id, defenseHorse.id, "the horse must survive duel damage from a kylin-bow-wielding attacker");
+  console.log("PASS testKylinBowDoesNotTriggerOnDuelDamage: duel damage never asked/destroyed, kylin bow is slash-only");
+}
+await testKylinBowDestroysOneHorseOnHit();
+await testKylinBowLetsAttackerChooseWhichHorse();
+await testKylinBowRequiresTheWeaponAndConsent();
+await testKylinBowDoesNotTriggerOnDuelDamage();
 console.log("\nAll Milestone 0-3.9 smoke tests passed.");

@@ -224,6 +224,10 @@ export interface EngineContext {
    *  Controller.choosePlayerCard for the visibility rule enforced at the WS boundary: equip is
    *  always public, hand cards are chosen positionally/blind, matching real Sanguosha. */
   askPickPlayerCard: (player: GamePlayer, owner: GamePlayer, candidates: Card[]) => Promise<Card>;
+  /** Kylin Bow (weapon): after a Slash you wielded it with deals damage to a target with at
+   *  least 1 horse equipped, you may destroy one of their horse cards. Only called when the
+   *  wielder actually has one to destroy. */
+  askUseKylinBow: (player: GamePlayer) => Promise<boolean>;
   /** Ally rescue: does `rescuer` want to play a held Peach/Analeptic (or viewAs, e.g. Jijiu) to
    *  save `dyingPlayer`? Only called when `rescuer` actually holds one -- asked of every OTHER
    *  alive player, in turn order starting right after the dying player, only once the dying
@@ -307,7 +311,26 @@ export async function resolveSlash(
     ctx.log.push(`${effectiveTarget.id} không đủ ${requiredJinks} lá Thiểm nên chịu đòn`);
   }
 
-  await applyDamage(ctx, effectiveTarget, 1 + analepticBonus, attacker);
+  const damageDealt = await applyDamage(ctx, effectiveTarget, 1 + analepticBonus, attacker);
+
+  // Kylin Bow (weapon): resolved here (Slash-specific), not as a generic onDamageDealt hook,
+  // since Duel/AOE damage must NOT trigger it -- the card's official wording is specifically
+  // "a Slash you used dealt damage", not "you dealt damage". Runs after applyDamage returns
+  // (i.e. after any dying/Peach-rescue already resolved) rather than mid-resolution -- a minor
+  // simplification (see this file's other "several optional invokes are simplified" notes);
+  // the target's horses are unaffected by their own death either way, so the observable
+  // difference is negligible.
+  if (damageDealt && attacker.weapon?.weaponName === "KylinBow") {
+    const horses = [effectiveTarget.offenseHorse, effectiveTarget.defenseHorse].filter((c): c is Card => c !== null);
+    if (horses.length > 0 && (await ctx.askUseKylinBow(attacker))) {
+      const destroyed = horses.length === 1 ? horses[0] : await ctx.askPickPlayerCard(attacker, effectiveTarget, horses);
+      if (effectiveTarget.offenseHorse?.id === destroyed.id) effectiveTarget.offenseHorse = null;
+      if (effectiveTarget.defenseHorse?.id === destroyed.id) effectiveTarget.defenseHorse = null;
+      ctx.discardPile.push(destroyed);
+      ctx.log.push(`${attacker.id} dùng Kỳ Lân Cung hủy ${destroyed.horseName} của ${effectiveTarget.id}`);
+      for (const skill of effectiveTarget.skills) await skill.onEquipLost?.(ctx, effectiveTarget);
+    }
+  }
 }
 
 /**
@@ -316,7 +339,7 @@ export async function resolveSlash(
  * `target`'s `reduceDamage` skills (e.g. Kongrong's Mingshi) run after that, and can floor the
  * final amount at or below 0 to cancel the hit entirely (no `onDamage`/`onDamageDealt`/dying).
  */
-export async function applyDamage(ctx: EngineContext, target: GamePlayer, amount: number, source: GamePlayer): Promise<void> {
+export async function applyDamage(ctx: EngineContext, target: GamePlayer, amount: number, source: GamePlayer): Promise<boolean> {
   let finalAmount = amount + source.pendingBonusDamage;
   source.pendingBonusDamage = 0;
   for (const skill of target.skills) {
@@ -324,7 +347,7 @@ export async function applyDamage(ctx: EngineContext, target: GamePlayer, amount
   }
   if (finalAmount <= 0) {
     ctx.log.push(`${target.id} không chịu sát thương (đã giảm về 0)`);
-    return;
+    return false;
   }
 
   target.hp -= finalAmount;
@@ -332,6 +355,7 @@ export async function applyDamage(ctx: EngineContext, target: GamePlayer, amount
   await ctx.onDamage?.(target, source);
   await ctx.onDamageDealt?.(source, target, finalAmount);
   if (target.hp <= 0) await resolveDying(ctx, target, source.role, source);
+  return true;
 }
 
 /** Player::loseHp: reduces hp directly (no `onDamage`/`onDamageDealt` skill triggers -- this

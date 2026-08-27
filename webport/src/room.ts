@@ -308,6 +308,7 @@ export class Room {
       askDuelSlash: (player) => this.controllers.get(player.id)!.wantsToPlaySlashInDuel(player),
       askGanglieDiscard: (player) => this.controllers.get(player.id)!.wantsToDiscardForGanglie(player),
       askUseSelfAction: (player, skillName) => this.controllers.get(player.id)!.wantsToUseSelfAction(player, skillName),
+      askUseKylinBow: (player) => this.controllers.get(player.id)!.wantsToUseKylinBow(player),
       askChooseAnyPlayer: (player, candidates) => this.controllers.get(player.id)!.chooseAnyPlayerTarget(player, candidates),
       askSavageAssaultSlash: (player) => this.controllers.get(player.id)!.wantsToDiscardForSavageAssault(player),
       askArcheryAttackJink: (player) => this.controllers.get(player.id)!.wantsToDiscardForArcheryAttack(player),

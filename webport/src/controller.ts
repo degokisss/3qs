@@ -121,6 +121,10 @@ export interface Controller {
   chooseDiscards(player: GamePlayer, count: number): Promise<Card[]>;
   /** `player` may use `skillName`'s proactive self action (e.g. Kurou) right now; no target to pick. */
   wantsToUseSelfAction(player: GamePlayer, skillName: string): Promise<boolean>;
+  /** Kylin Bow (weapon): `player` (the attacker) just dealt Slash damage to a target with at
+   *  least 1 horse card equipped -- destroy one of them? Only called when there's actually one
+   *  to destroy. */
+  wantsToUseKylinBow(player: GamePlayer): Promise<boolean>;
   /** Generic single-target picker with no built-in filter -- `candidates` is pre-filtered by
    *  the caller. Return null to decline. */
   chooseAnyPlayerTarget(player: GamePlayer, candidates: GamePlayer[]): Promise<GamePlayer | null>;
@@ -205,6 +209,9 @@ export function makeBotController(rng: () => number): Controller {
     },
     async wantsToUseSelfAction() {
       return true;
+    },
+    async wantsToUseKylinBow() {
+      return true; // matches the greedy policy's other free-advantage defaults (e.g. wantsToUseSelfAction)
     },
     async chooseAnyPlayerTarget(_player, candidates) {
       return pickRandom(candidates);

@@ -1863,6 +1863,7 @@
           "confirmGanglieDiscard",
           "confirmSavageAssaultSlash",
           "confirmArcheryAttackJink",
+          "confirmKylinBow",
           "confirmSelfAction",
         ].includes(msg.type);
         if (isPromptType) {
@@ -1899,6 +1900,8 @@
             showConfirm(msg, `${IMG}/card/savage_assault.png`, "Bị Nam Man Nhập Xâm!", "Đánh ra Sát để tránh 1 sát thương?");
           else if (msg.type === "confirmArcheryAttackJink")
             showConfirm(msg, `${IMG}/card/archery_attack.png`, "Bị Vạn Tiễn Tề Phát!", "Dùng Thiểm để tránh 1 sát thương?");
+          else if (msg.type === "confirmKylinBow")
+            showConfirm(msg, `${IMG}/equips/KylinBow.png`, "Kỳ Lân Cung!", "Sát đã trúng — hủy 1 ngựa của mục tiêu?");
           else if (msg.type === "confirmSelfAction") {
             const general = lastState?.players.find((p) => p.id === msg.actorId)?.general;
             showConfirm(
