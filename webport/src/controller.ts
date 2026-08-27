@@ -18,7 +18,7 @@
 import { Card, CardKind } from "./card.js";
 import { GamePlayer } from "./player.js";
 import { GeneralDef } from "./skill.js";
-import { effectiveDistance, isImmuneToSlashAndDuel } from "./combat.js";
+import { effectiveAttackRange, effectiveDistance, isImmuneToSlashAndDuel } from "./combat.js";
 
 /** One legal thing a player could do right now during a freeform Play phase, computed fresh by
  *  `Room.computeLegalActions` before each `chooseFreeAction` ask. `playCard`'s `cardKind` is
@@ -28,12 +28,15 @@ export type FreeAction =
   | { kind: "equip"; cardId: number }
   | { kind: "playCard"; cardId: number; cardKind: CardKind }
   | { kind: "selfAction"; skillName: string }
-  | { kind: "activeAction"; skillName: string };
+  | { kind: "activeAction"; skillName: string }
+  | { kind: "spearSlash" };
 
-/** Alive players `actor` could legally Slash: not self, within `actor.attackRange`, not immune (Kongcheng). */
+/** Alive players `actor` could legally Slash: not self, within `actor`'s effective attack range
+ *  (weapon range, or 1 unequipped, plus SixSwords' ally bonus -- see combat.ts's
+ *  effectiveAttackRange), not immune (Kongcheng). */
 export function slashCandidates(alive: GamePlayer[], actor: GamePlayer): GamePlayer[] {
   return alive.filter(
-    (p) => p !== actor && effectiveDistance(alive, actor, p) <= actor.attackRange && !isImmuneToSlashAndDuel(p),
+    (p) => p !== actor && effectiveDistance(alive, actor, p) <= effectiveAttackRange(alive, actor) && !isImmuneToSlashAndDuel(p),
   );
 }
 
@@ -125,6 +128,24 @@ export interface Controller {
    *  least 1 horse card equipped -- destroy one of them? Only called when there's actually one
    *  to destroy. */
   wantsToUseKylinBow(player: GamePlayer): Promise<boolean>;
+  /** IceSword (weapon): `player` (the attacker) is about to deal Slash damage to a target who
+   *  actually holds >=1 card -- cancel the damage and pick up to 2 of their cards to discard
+   *  instead? */
+  wantsToUseIceSword(player: GamePlayer): Promise<boolean>;
+  /** Axe (weapon): `player` (the attacker)'s Slash just got dodged and they hold >=2 cards --
+   *  discard 2 to force it to hit anyway? */
+  wantsToUseAxe(player: GamePlayer): Promise<boolean>;
+  /** DoubleSword (weapon): `player` (the attacker) just dealt Slash damage to an opposite-gender
+   *  target -- invoke it? */
+  wantsToUseDoubleSword(player: GamePlayer): Promise<boolean>;
+  /** DoubleSword follow-up: does `player` (the TARGET, who holds >=1 card) want to discard 1 of
+   *  their own instead of letting the wielder draw 1? */
+  wantsToDiscardForDoubleSword(player: GamePlayer): Promise<boolean>;
+  /** Spear (weapon): `player` may use exactly 2 of their own hand cards as if they were a
+   *  Slash. Return exactly 2 distinct cards currently in `player.hand` to use them; anything
+   *  else (empty array, wrong count, cards not actually held) is treated as declining --
+   *  UNLIKE `chooseDiscards`, this is never forced, so there's no fallback substitution. */
+  chooseSpearCards(player: GamePlayer): Promise<Card[]>;
   /** Generic single-target picker with no built-in filter -- `candidates` is pre-filtered by
    *  the caller. Return null to decline. */
   chooseAnyPlayerTarget(player: GamePlayer, candidates: GamePlayer[]): Promise<GamePlayer | null>;
@@ -207,11 +228,29 @@ export function makeBotController(rng: () => number): Controller {
       // first-N -- matches the greedy policy's other "known/valuable resource" preferences.
       return pickLeastImportantCards(player.hand, count);
     },
+    async chooseSpearCards(player) {
+      // Sacrifice the 2 least valuable cards (see pickLeastImportantCards) -- matches the
+      // greedy policy's other "known/valuable resource" preferences.
+      return pickLeastImportantCards(player.hand, 2);
+    },
     async wantsToUseSelfAction() {
       return true;
     },
     async wantsToUseKylinBow() {
       return true; // matches the greedy policy's other free-advantage defaults (e.g. wantsToUseSelfAction)
+    },
+    async wantsToUseIceSword() {
+      return true; // matches the greedy policy's other free-advantage defaults
+    },
+    async wantsToUseAxe() {
+      return true;
+    },
+    async wantsToUseDoubleSword() {
+      return true;
+    },
+    async wantsToDiscardForDoubleSword() {
+      return true; // matches wantsToDiscardForGanglie's "prefer to spend own cards over letting
+      // the opponent gain a resource" reasoning
     },
     async chooseAnyPlayerTarget(_player, candidates) {
       return pickRandom(candidates);

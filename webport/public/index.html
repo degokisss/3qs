@@ -958,6 +958,8 @@
     let flippedGeneralIndices = new Set(); // which of our 3 candidate cards we've manually flipped face-up
     let pendingDiscard = null; // { requestId, count, hand } while ending our turn with excess hand cards
     let selectedDiscardIds = new Set(); // cardIds toggled for the pending discard
+    let pendingSpearPick = null; // { requestId, hand } while choosing 2 cards for Spear (Trượng Bát Xà Mâu)
+    let selectedSpearIds = new Set(); // cardIds toggled for the pending spear pick
     let myRoomId = null; // roomId this tab is currently watching, if any (null = in the lobby)
     let pendingPrompt = null; // { requestId, candidateIds } while awaiting our own answer
     let lastState = null; // most recent state snapshot, for looking up a player's general/etc.
@@ -1156,6 +1158,8 @@
       flippedGeneralIndices = new Set();
       pendingDiscard = null;
       selectedDiscardIds = new Set();
+      pendingSpearPick = null;
+      selectedSpearIds = new Set();
       pendingDraw = null;
       clearPromptCountdown();
       promptOverlayEl.className = "";
@@ -1422,6 +1426,33 @@
      *  clickable; any selfAction/activeAction skills (not tied to a specific card) show as
      *  buttons in the bar below, alongside "Kết thúc lượt". */
     function renderMyHand() {
+      if (pendingSpearPick) {
+        myHandWrapEl.className = "active";
+        myHandCardsEl.innerHTML = pendingSpearPick.hand
+          .map((c) => {
+            const selected = selectedSpearIds.has(c.id);
+            const isEquip = c.kind === "weapon" || c.kind === "horse";
+            const cls = `handCard discardable${isEquip ? " equipCard" : ""}${selected ? " selectedForDiscard" : ""}`;
+            const suitOverlay = !isEquip
+              ? `<img class="handCardSuit" src="${IMG}/system/cardsuit/${c.suit}.png" alt=""><span class="handCardPoint">${pointLabel(c.point)}</span>`
+              : "";
+            return `<div class="${cls}" onclick="window.__toggleSpearCard(${c.id})" title="${cardLabel(c)}">
+              <img class="handCardImg" src="${cardImageSrc(c)}" alt="${cardLabel(c)}">
+              ${suitOverlay}
+              <div class="handCardName">${cardLabel(c)}</div>
+            </div>`;
+          })
+          .join("");
+        const remaining = 2 - selectedSpearIds.size;
+        freeActionBarEl.style.display = "flex";
+        freeActionBarEl.innerHTML = `
+          <span class="freeActionHint">Trượng Bát Xà Mâu — chọn 2 lá bài để dùng như 1 Sát${remaining > 0 ? ` (còn ${remaining})` : ""}</span>
+          <button id="declineSpearBtn">Không dùng</button>
+          <button id="confirmSpearBtn"${selectedSpearIds.size !== 2 ? " disabled" : ""}>Xác nhận</button>`;
+        document.getElementById("confirmSpearBtn").onclick = () => answerSpearCards(false);
+        document.getElementById("declineSpearBtn").onclick = () => answerSpearCards(true);
+        return;
+      }
       if (pendingDiscard) {
         myHandWrapEl.className = "active";
         myHandCardsEl.innerHTML = pendingDiscard.hand
@@ -1485,7 +1516,12 @@
 
       if (pendingFreeAction) {
         const skillButtons = skillActions
-          .map((a) => `<button class="skillActionBtn" onclick="window.__playCard(${a.actionId})">${a.skillDisplayName}</button>`)
+          .map(
+            (a) =>
+              `<button class="skillActionBtn" onclick="window.__playCard(${a.actionId})">${
+                a.kind === "spearSlash" ? "🗡 Trượng Bát Xà Mâu" : a.skillDisplayName
+              }</button>`,
+          )
           .join("");
         freeActionBarEl.style.display = "flex";
         freeActionBarEl.innerHTML = `
@@ -1524,6 +1560,25 @@
       send({ type: "response", requestId: pendingDiscard.requestId, cardIds: [...selectedDiscardIds] });
       pendingDiscard = null;
       selectedDiscardIds = new Set();
+      renderMyHand();
+    }
+    /** Spear (weapon): click 2 cards to toggle them for use as a Slash, then confirm -- or
+     *  decline entirely (unlike the mandatory discard-to-limit picker above, this one is
+     *  always optional). */
+    window.__toggleSpearCard = (cardId) => {
+      if (!pendingSpearPick) return;
+      if (selectedSpearIds.has(cardId)) {
+        selectedSpearIds.delete(cardId);
+      } else if (selectedSpearIds.size < 2) {
+        selectedSpearIds.add(cardId);
+      }
+      renderMyHand();
+    };
+    function answerSpearCards(decline) {
+      if (!pendingSpearPick) return;
+      send({ type: "response", requestId: pendingSpearPick.requestId, cardIds: decline ? [] : [...selectedSpearIds] });
+      pendingSpearPick = null;
+      selectedSpearIds = new Set();
       renderMyHand();
     }
 
@@ -1635,6 +1690,10 @@
       if (pendingDiscard && (over || !mySeatAlive || state.currentPlayerId !== mySeat)) {
         pendingDiscard = null;
         selectedDiscardIds = new Set();
+      }
+      if (pendingSpearPick && (over || !mySeatAlive || state.currentPlayerId !== mySeat)) {
+        pendingSpearPick = null;
+        selectedSpearIds = new Set();
       }
 
       renderPlayers();
@@ -1835,6 +1894,14 @@
           renderMyHand();
           return;
         }
+        if (msg.type === "chooseSpearCards") {
+          if (msg.actorId !== mySeat) return; // a prompt for a seat this tab doesn't control
+          pendingSpearPick = msg;
+          selectedSpearIds = new Set();
+          if (lastState) lastState.myHand = msg.hand;
+          renderMyHand();
+          return;
+        }
         if (msg.type === "choosePickCard") {
           if (msg.actorId !== mySeat) return; // a prompt for a seat this tab doesn't control
           showCardPicker(msg);
@@ -1864,6 +1931,10 @@
           "confirmSavageAssaultSlash",
           "confirmArcheryAttackJink",
           "confirmKylinBow",
+          "confirmIceSword",
+          "confirmAxe",
+          "confirmDoubleSword",
+          "confirmDiscardDoubleSword",
           "confirmSelfAction",
         ].includes(msg.type);
         if (isPromptType) {
@@ -1902,6 +1973,14 @@
             showConfirm(msg, `${IMG}/card/archery_attack.png`, "Bị Vạn Tiễn Tề Phát!", "Dùng Thiểm để tránh 1 sát thương?");
           else if (msg.type === "confirmKylinBow")
             showConfirm(msg, `${IMG}/equips/KylinBow.png`, "Kỳ Lân Cung!", "Sát đã trúng — hủy 1 ngựa của mục tiêu?");
+          else if (msg.type === "confirmIceSword")
+            showConfirm(msg, `${IMG}/equips/IceSword.png`, "Hàn Băng Kiếm!", "Hủy sát thương, bắt mục tiêu bỏ tối đa 2 lá bài thay vào?");
+          else if (msg.type === "confirmAxe")
+            showConfirm(msg, `${IMG}/equips/Axe.png`, "Sát bị né!", "Bỏ 2 lá bài để buộc Sát trúng đòn (quán thạch phủ)?");
+          else if (msg.type === "confirmDoubleSword")
+            showConfirm(msg, `${IMG}/equips/DoubleSword.png`, "Song Cổ Kiếm!", "Bắt mục tiêu bỏ 1 lá bài, hoặc bạn rút 1 lá nếu họ không bỏ?");
+          else if (msg.type === "confirmDiscardDoubleSword")
+            showConfirm(msg, `${IMG}/equips/DoubleSword.png`, "Song Cổ Kiếm!", "Bỏ 1 lá bài ngẫu nhiên thay vì để đối phương rút 1 lá?");
           else if (msg.type === "confirmSelfAction") {
             const general = lastState?.players.find((p) => p.id === msg.actorId)?.general;
             showConfirm(
@@ -1922,6 +2001,8 @@
         flippedGeneralIndices = new Set();
         pendingDiscard = null;
         selectedDiscardIds = new Set();
+        pendingSpearPick = null;
+        selectedSpearIds = new Set();
         pendingDraw = null;
         renderDrawPile();
         clearPromptCountdown();

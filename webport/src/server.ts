@@ -289,6 +289,39 @@ function makeHumanController(gr: GameRoom, playerId: string): Partial<Controller
         false, // fallback on timeout/disconnect: offensive/optional-resource action (destroying
         // someone else's horse), same "silent human passes" policy as wantsToPlayTrick above
       ),
+    wantsToUseIceSword: () =>
+      askClient(
+        gr,
+        playerId,
+        { type: "confirmIceSword", actorId: playerId },
+        (msg) => msg.value === true,
+        false, // fallback: offensive/optional-resource action, same policy as wantsToUseKylinBow
+      ),
+    wantsToUseAxe: () =>
+      askClient(
+        gr,
+        playerId,
+        { type: "confirmAxe", actorId: playerId },
+        (msg) => msg.value === true,
+        false, // fallback: offensive/optional-resource action, same policy as wantsToUseKylinBow
+      ),
+    wantsToUseDoubleSword: () =>
+      askClient(
+        gr,
+        playerId,
+        { type: "confirmDoubleSword", actorId: playerId },
+        (msg) => msg.value === true,
+        false, // fallback: offensive/optional-resource action, same policy as wantsToUseKylinBow
+      ),
+    wantsToDiscardForDoubleSword: () =>
+      askClient(
+        gr,
+        playerId,
+        { type: "confirmDiscardDoubleSword", actorId: playerId },
+        (msg) => msg.value !== false,
+        true, // fallback: protective-ish (denies the wielder a card), same policy as
+        // wantsToDiscardForGanglie/SavageAssault/ArcheryAttack
+      ),
     wantsToUseSelfAction: (player, skillName) => {
       const skill = player.skills.find((s) => s.name === skillName);
       return askClient(
@@ -337,6 +370,19 @@ function makeHumanController(gr: GameRoom, playerId: string): Partial<Controller
           return player.hand.filter((c) => ids.includes(c.id));
         },
         pickLeastImportantCards(player.hand, count), // fallback on timeout/disconnect: discard the least valuable cards, not an arbitrary first-N
+      ),
+    chooseSpearCards: (player) =>
+      askClient(
+        gr,
+        playerId,
+        { type: "chooseSpearCards", actorId: playerId, hand: player.hand },
+        (msg) => {
+          const ids = Array.isArray(msg.cardIds) ? msg.cardIds : [];
+          return player.hand.filter((c) => ids.includes(c.id));
+        },
+        [], // fallback on timeout/disconnect: an empty (invalid) response reads as "declined" --
+        // never forced, matching wantsToPlayTrick's "silent human passes" policy, unlike
+        // chooseDiscards which substitutes a real pick because that ask IS mandatory
       ),
     choosePickCard: (_player, candidates) =>
       askClient(

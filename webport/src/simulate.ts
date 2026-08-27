@@ -7,7 +7,7 @@ import strict from "node:assert/strict";
 import { Card, CardKind, Suit, buildStandardDeck } from "./card.js";
 import { Room } from "./room.js";
 import { GamePlayer } from "./player.js";
-import { EngineContext, effectiveDistance, loseHp, resolveSlash } from "./combat.js";
+import { EngineContext, effectiveAttackRange, effectiveDistance, findSlashLikeCard, loseHp, resolveSlash } from "./combat.js";
 import { SKILLS } from "./skill.js";
 import { pickLeastImportantCards, slashCandidates } from "./controller.js";
 import { duelCandidates, resolveArcheryAttack, resolveDismantlement, resolveDuel, resolveSavageAssault, resolveSnatch, snatchCandidates } from "./trick.js";
@@ -1173,6 +1173,10 @@ function makeTestContext(alivePlayers: GamePlayer[], log: string[], drawTop: () 
     askPickCard: async (_player, candidates) => candidates[0],
     askPickPlayerCard: async (_player, _owner, candidates) => candidates[0],
     askUseKylinBow: async () => true,
+    askUseIceSword: async () => true,
+    askUseAxe: async () => true,
+    askUseDoubleSword: async () => true,
+    askDiscardForDoubleSword: async () => true,
   };
 }
 
@@ -1791,10 +1795,337 @@ async function testCrossbowRemovesTheSlashLimitInFreeformPlay(): Promise<void> {
   strict.ok(!lord.hand.some((c) => c.kind === CardKind.Slash), "every held slash must have been played");
   console.log(`PASS testCrossbowRemovesTheSlashLimitInFreeformPlay: freeform human path played ${slashPlays} slashes in one turn with crossbow equipped`);
 }
+
+/**
+ * Standard rule: Fan (Chu Tước Phiến) lets any ONE held non-Slash card be played/discarded as
+ * if it were a Slash -- same single-card viewAs shape as Wusheng/Longdan (see
+ * combat.ts's findSlashLikeCard), just weapon-gated instead of skill-gated.
+ */
+async function testFanLetsAnyCardBePlayedAsSlash(): Promise<void> {
+  const deck = buildStandardDeck();
+  const attacker = new GamePlayer("A");
+  attacker.weapon = deck.find((c) => c.weaponName === "Fan")!;
+  const nonSlash = deck.find((c) => c.kind === CardKind.Jink)!;
+  attacker.hand = [nonSlash];
+  const target = new GamePlayer("B");
+  target.hand = []; // no jink -- damage guaranteed
+
+  strict.equal(findSlashLikeCard(attacker)?.id, nonSlash.id, "fan must let a held non-slash card be found as slash-like");
+
+  const ctx = makeTestContext([attacker, target], []);
+  attacker.hand.splice(attacker.hand.indexOf(nonSlash), 1); // matches tryPlaySlash's own splice-before-resolve
+  await resolveSlash(ctx, attacker, target, nonSlash);
+
+  strict.equal(target.hp, target.maxHp - 1, "the fan-viewed slash must actually deal damage");
+  strict.ok(!attacker.hand.includes(nonSlash), "the sacrificed card must have left the hand");
+  console.log("PASS testFanLetsAnyCardBePlayedAsSlash: a held jink was found+played as a slash and dealt damage");
+}
+
+/**
+ * Standard rule: Triblade (Tam Tiêm Đao) -- after your Slash deals damage, you may pick another
+ * player at distance 1 from the ORIGINAL target (not yourself) to also take 1 splash damage.
+ * Only the distance-1 candidate must ever be offered, never a farther one.
+ */
+async function testTribladeSplashesDamageToANearbyPlayer(): Promise<void> {
+  const deck = buildStandardDeck();
+  const attacker = new GamePlayer("A");
+  attacker.weapon = deck.find((c) => c.weaponName === "Triblade")!;
+  const target = new GamePlayer("B");
+  const bystander = new GamePlayer("C"); // distance 1 from target in this 4-seat arrangement
+  const farAway = new GamePlayer("D"); // distance 2 from target
+  target.hand = [];
+  bystander.hand = [];
+  const slashCard = deck.find((c) => c.kind === CardKind.Slash)!;
+
+  const alive = [attacker, target, bystander, farAway];
+  let offeredIds: string[] | null = null;
+  const ctx = makeTestContext(alive, []);
+  ctx.askChooseAnyPlayer = async (_player, candidates) => {
+    offeredIds = candidates.map((c) => c.id);
+    return candidates.find((c) => c.id === bystander.id) ?? null;
+  };
+  await resolveSlash(ctx, attacker, target, slashCard);
+
+  strict.equal(target.hp, target.maxHp - 1, "test setup: the original slash must have dealt damage");
+  strict.deepEqual(offeredIds, ["C"], "only the distance-1 bystander must be offered, not the farther player");
+  strict.equal(bystander.hp, bystander.maxHp - 1, "the chosen bystander must also take 1 splash damage");
+  strict.equal(farAway.hp, farAway.maxHp, "a player farther than distance 1 from the target must be untouched");
+  console.log("PASS testTribladeSplashesDamageToANearbyPlayer: splash offered only the distance-1 bystander, both took damage");
+}
+
+/**
+ * Standard rule: SixSwords (Lục Kiếm) grants +1 attack range, but ONLY while another ALLY
+ * (same Role-mode side, see gamerule.ts's isAlly) also wields a SixSwords -- an enemy copy must
+ * not grant the bonus.
+ */
+function testSixSwordsGrantsRangeBonusWhenAllyAlsoWieldsIt(): void {
+  const a = new GamePlayer("A");
+  a.role = Role.Lord;
+  const b = new GamePlayer("B");
+  b.role = Role.Loyalist; // ally of A
+  const c = new GamePlayer("C");
+  c.role = Role.Rebel; // not ally of A
+  const alive = [a, b, c];
+
+  strict.equal(effectiveAttackRange(alive, a), 1, "no weapon equipped -- base range only");
+
+  a.weapon = buildStandardDeck().find((w) => w.weaponName === "SixSwords")!;
+  strict.equal(effectiveAttackRange(alive, a), 2, "SixSwords alone (nobody else wielding it) -- just its own range 2, no bonus");
+
+  c.weapon = buildStandardDeck().find((w) => w.weaponName === "SixSwords")!;
+  strict.equal(effectiveAttackRange(alive, a), 2, "an ENEMY also wielding SixSwords must not grant the bonus (ally-only)");
+
+  b.weapon = buildStandardDeck().find((w) => w.weaponName === "SixSwords")!;
+  strict.equal(effectiveAttackRange(alive, a), 3, "an ALLY also wielding SixSwords must grant +1 range");
+
+  console.log(
+    "PASS testSixSwordsGrantsRangeBonusWhenAllyAlsoWieldsIt: base -> own weapon -> enemy copy (no bonus) -> ally copy (+1) all correct",
+  );
+}
+
+/**
+ * Standard rule: IceSword (Hàn Băng Kiếm) may cancel this slash's damage entirely, letting the
+ * attacker instead pick up to 2 of the target's own cards (hand or equip) to discard.
+ */
+async function testIceSwordCancelsDamageAndDiscardsUpToTwoTargetCards(): Promise<void> {
+  const deck = buildStandardDeck();
+  const attacker = new GamePlayer("A");
+  attacker.weapon = deck.find((c) => c.weaponName === "IceSword")!;
+  const target = new GamePlayer("B");
+  const slashCard = deck.find((c) => c.kind === CardKind.Slash)!;
+  const filler1 = deck.find((c) => c.kind === CardKind.Analeptic)!; // NOT a jink -- must not be able to dodge, or IceSword's return-early would never fire
+  const filler2 = deck.find((c) => c.kind === CardKind.Peach)!;
+  target.hand = [filler1, filler2];
+
+  const ctx = makeTestContext([attacker, target], []);
+  const pickedIds: number[] = [];
+  ctx.askPickPlayerCard = async (_player, _owner, candidates) => {
+    const chosen = candidates[0];
+    pickedIds.push(chosen.id);
+    return chosen;
+  };
+  await resolveSlash(ctx, attacker, target, slashCard);
+
+  strict.equal(target.hp, target.maxHp, "ice sword must cancel the damage entirely -- no hp lost");
+  strict.equal(target.hand.length, 0, "both of the target's cards must have been discarded");
+  strict.deepEqual(pickedIds, [filler1.id, filler2.id], "exactly the attacker's 2 chosen cards must have been discarded, in order");
+  strict.ok(ctx.discardPile.includes(filler1) && ctx.discardPile.includes(filler2), "both discarded cards must land in the discard pile");
+  console.log("PASS testIceSwordCancelsDamageAndDiscardsUpToTwoTargetCards: damage cancelled, both target cards discarded by attacker's choice");
+}
+
+/**
+ * Standard rule: Axe (Quán Thạch Phủ) -- after your Slash gets dodged, you may discard 2 of
+ * your OWN cards to force it to hit anyway. Only reachable with >=2 cards held.
+ */
+async function testAxeDiscardsTwoToForceADodgedSlashThrough(): Promise<void> {
+  const deck = buildStandardDeck();
+  const attacker = new GamePlayer("A");
+  attacker.weapon = deck.find((c) => c.weaponName === "Axe")!;
+  const filler1 = deck.find((c) => c.kind === CardKind.Peach)!;
+  const filler2 = deck.find((c) => c.kind === CardKind.Analeptic)!;
+  attacker.hand = [filler1, filler2];
+  const target = new GamePlayer("B");
+  const jink = deck.find((c) => c.kind === CardKind.Jink)!;
+  target.hand = [jink];
+  const slashCard = deck.find((c) => c.kind === CardKind.Slash)!;
+
+  const ctx = makeTestContext([attacker, target], []);
+  await resolveSlash(ctx, attacker, target, slashCard);
+
+  strict.ok(!target.hand.includes(jink), "test setup: the target must have actually spent the jink to dodge");
+  strict.equal(target.hp, target.maxHp - 1, "axe must force the dodged slash to still deal damage");
+  strict.equal(attacker.hand.length, 0, "both of the attacker's own cards must have been discarded to pay for axe");
+  console.log("PASS testAxeDiscardsTwoToForceADodgedSlashThrough: dodge overridden, attacker's 2 cards discarded, damage landed");
+}
+
+/**
+ * Regression proof: Axe must NOT fire without the weapon, or without >=2 cards to pay with --
+ * the dodge must succeed normally in both cases.
+ */
+async function testAxeRequiresTheWeaponAndEnoughCards(): Promise<void> {
+  const deck = buildStandardDeck();
+  const jink1 = deck.find((c) => c.kind === CardKind.Jink)!;
+  const slash1 = deck.find((c) => c.kind === CardKind.Slash)!;
+  const noWeaponAttacker = new GamePlayer("A1");
+  const noWeaponTarget = new GamePlayer("B1");
+  noWeaponTarget.hand = [jink1];
+  await resolveSlash(makeTestContext([noWeaponAttacker, noWeaponTarget], []), noWeaponAttacker, noWeaponTarget, slash1);
+  strict.equal(noWeaponTarget.hp, noWeaponTarget.maxHp, "without axe equipped, a successful dodge must stand");
+
+  const deck2 = buildStandardDeck();
+  const jink2 = deck2.find((c) => c.kind === CardKind.Jink)!;
+  const slash2 = deck2.find((c) => c.kind === CardKind.Slash)!;
+  const shortAttacker = new GamePlayer("A2");
+  shortAttacker.weapon = deck2.find((c) => c.weaponName === "Axe")!;
+  shortAttacker.hand = [deck2.find((c) => c.kind === CardKind.Peach)!]; // only 1 card -- not enough
+  const shortTarget = new GamePlayer("B2");
+  shortTarget.hand = [jink2];
+  await resolveSlash(makeTestContext([shortAttacker, shortTarget], []), shortAttacker, shortTarget, slash2);
+  strict.equal(shortTarget.hp, shortTarget.maxHp, "with fewer than 2 cards, axe must not fire -- dodge succeeds normally");
+
+  console.log("PASS testAxeRequiresTheWeaponAndEnoughCards: no weapon -> dodge stands; <2 cards -> dodge stands");
+}
+
+/**
+ * Standard rule: DoubleSword (Song Cổ Kiếm) -- after a slash you wielded it with deals damage to
+ * an OPPOSITE-gender target, you may invoke it: the target discards 1 of their own (accepted),
+ * or (declined) you draw 1 instead.
+ */
+async function testDoubleSwordLetsTargetDiscardOrTheAttackerDraw(): Promise<void> {
+  const deck = buildStandardDeck();
+  const attacker = new GamePlayer("A");
+  attacker.weapon = deck.find((c) => c.weaponName === "DoubleSword")!;
+  attacker.gender = "male";
+  const target = new GamePlayer("B");
+  target.gender = "female";
+  const slashCard = deck.find((c) => c.kind === CardKind.Slash)!;
+  const targetFiller = deck.find((c) => c.kind === CardKind.Peach)!;
+  target.hand = [targetFiller]; // no jink -- damage guaranteed
+
+  const ctxAccept = makeTestContext([attacker, target], []);
+  await resolveSlash(ctxAccept, attacker, target, slashCard);
+  strict.equal(target.hp, target.maxHp - 1, "test setup: the slash must land");
+  strict.equal(target.hand.length, 0, "target accepted -- must have discarded their 1 card");
+
+  const deck2 = buildStandardDeck();
+  const attacker2 = new GamePlayer("A2");
+  attacker2.weapon = deck2.find((c) => c.weaponName === "DoubleSword")!;
+  attacker2.gender = "male";
+  const target2 = new GamePlayer("B2");
+  target2.gender = "female";
+  target2.hand = [deck2.find((c) => c.kind === CardKind.Peach)!];
+  const slashCard2 = deck2.find((c) => c.kind === CardKind.Slash)!;
+  let drawnCount = 0;
+  const ctxDecline = makeTestContext([attacker2, target2], []);
+  ctxDecline.askDiscardForDoubleSword = async () => false;
+  ctxDecline.draw = (_player, n) => {
+    drawnCount += n;
+  };
+  await resolveSlash(ctxDecline, attacker2, target2, slashCard2);
+  strict.equal(target2.hand.length, 1, "target declined -- must have kept their card");
+  strict.equal(drawnCount, 1, "the wielder must draw exactly 1 card when the target declines");
+
+  console.log("PASS testDoubleSwordLetsTargetDiscardOrTheAttackerDraw: accept -> target discards; decline -> wielder draws 1");
+}
+
+/**
+ * Regression proof: DoubleSword must NOT trigger against a SAME-gender target.
+ */
+async function testDoubleSwordDoesNotTriggerOnSameGenderHit(): Promise<void> {
+  const deck = buildStandardDeck();
+  const attacker = new GamePlayer("A");
+  attacker.weapon = deck.find((c) => c.weaponName === "DoubleSword")!;
+  attacker.gender = "male";
+  const target = new GamePlayer("B");
+  target.gender = "male";
+  target.hand = [deck.find((c) => c.kind === CardKind.Peach)!];
+  const slashCard = deck.find((c) => c.kind === CardKind.Slash)!;
+
+  let asked = false;
+  const ctx = makeTestContext([attacker, target], []);
+  ctx.askUseDoubleSword = async () => {
+    asked = true;
+    return true;
+  };
+  await resolveSlash(ctx, attacker, target, slashCard);
+
+  strict.equal(asked, false, "same-gender hit must never even ask to invoke double sword");
+  strict.equal(target.hand.length, 1, "the target's card must survive untouched");
+  console.log("PASS testDoubleSwordDoesNotTriggerOnSameGenderHit: same-gender slash never asked/triggered double sword");
+}
+
+/**
+ * Standard rule: Spear (Trượng Bát Xà Mâu) lets a player use 2 of their own hand cards as if
+ * they were a Slash. Driven through a real Room turn (bot's fixed pass), matching Crossbow's
+ * proof style -- the limit/viewAs machinery lives in room.ts, not combat.ts.
+ */
+async function testSpearUsesTwoHandCardsAsASlash(): Promise<void> {
+  const room = new Room(playerIds(8), seededRng(1));
+  await room.pickGenerals();
+  const lord = room.players.find((p) => p.role === Role.Lord)!;
+  lord.skills = [];
+  const deck = buildStandardDeck();
+  const spear = deck.find((c) => c.weaponName === "Spear")!;
+  const filler1 = deck.find((c) => c.kind === CardKind.Jink)!;
+  const filler2 = deck.find((c) => c.kind === CardKind.Peach)!;
+  lord.hand = [filler1, filler2]; // no real/viewAs slash at all
+  lord.weapon = spear;
+  for (const p of room.players) if (p !== lord) p.hand = [];
+
+  let sawChooseSpearCards = false;
+  room.setController(lord.id, {
+    chooseSpearCards: async () => {
+      sawChooseSpearCards = true;
+      return [filler1, filler2];
+    },
+  });
+
+  await room.playTurn(); // the lord acts first
+
+  strict.ok(sawChooseSpearCards, "test setup: chooseSpearCards must actually have been asked (no real slash to fall back to)");
+  strict.ok(!lord.hand.some((c) => c.id === filler1.id || c.id === filler2.id), "both sacrificed cards must have left the lord's hand");
+  strict.ok(
+    room.log.includes(`${lord.id} dùng Trượng Bát Xà Mâu: 2 lá bài như 1 Sát`),
+    "the spear-slash must be logged",
+  );
+  console.log("PASS testSpearUsesTwoHandCardsAsASlash: 2 sacrificed cards formed a slash via the bot's fixed-pass fallback");
+}
+
+/**
+ * Regression proof: the freeform (human) Play phase offers Spear as its OWN independent action
+ * -- not just a fallback for when no real Slash is held -- so a human can choose it even while
+ * also holding a real Slash.
+ */
+async function testSpearOfferedAsFreeformActionEvenWithARealSlashHeld(): Promise<void> {
+  const room = new Room(playerIds(8), seededRng(1));
+  await room.pickGenerals();
+  const lord = room.players.find((p) => p.role === Role.Lord)!;
+  lord.skills = [];
+  const deck = buildStandardDeck();
+  const spear = deck.find((c) => c.weaponName === "Spear")!;
+  const realSlash = deck.find((c) => c.kind === CardKind.Slash)!;
+  const filler1 = deck.find((c) => c.kind === CardKind.Jink)!;
+  const filler2 = deck.find((c) => c.kind === CardKind.Peach)!;
+  lord.hand = [realSlash, filler1, filler2]; // holds a REAL slash too
+  lord.weapon = spear;
+  for (const p of room.players) if (p !== lord) p.hand = [];
+
+  let spearOffered = false;
+  let spearChosen = false;
+  room.setController(lord.id, {
+    chooseFreeAction: async (_player, legalActions) => {
+      const spearAction = legalActions.find((a) => a.kind === "spearSlash");
+      if (spearAction) spearOffered = true;
+      if (spearAction && !spearChosen) {
+        spearChosen = true;
+        return spearAction;
+      }
+      return null;
+    },
+    chooseSpearCards: async () => [filler1, filler2],
+  });
+
+  await room.playTurn();
+
+  strict.ok(spearOffered, "spearSlash must appear in legalActions even while a real slash is also held");
+  strict.ok(!lord.hand.some((c) => c.id === filler1.id || c.id === filler2.id), "the 2 sacrificed cards must have left the hand");
+  strict.ok(lord.hand.some((c) => c.id === realSlash.id), "the real slash must remain untouched since spear was chosen instead");
+  console.log("PASS testSpearOfferedAsFreeformActionEvenWithARealSlashHeld: spear offered+chosen independently of the held real slash");
+}
 await testKylinBowDestroysOneHorseOnHit();
 await testKylinBowLetsAttackerChooseWhichHorse();
 await testKylinBowRequiresTheWeaponAndConsent();
 await testKylinBowDoesNotTriggerOnDuelDamage();
 await testCrossbowRemovesTheSlashLimit();
 await testCrossbowRemovesTheSlashLimitInFreeformPlay();
+await testFanLetsAnyCardBePlayedAsSlash();
+await testTribladeSplashesDamageToANearbyPlayer();
+testSixSwordsGrantsRangeBonusWhenAllyAlsoWieldsIt();
+await testIceSwordCancelsDamageAndDiscardsUpToTwoTargetCards();
+await testAxeDiscardsTwoToForceADodgedSlashThrough();
+await testAxeRequiresTheWeaponAndEnoughCards();
+await testDoubleSwordLetsTargetDiscardOrTheAttackerDraw();
+await testDoubleSwordDoesNotTriggerOnSameGenderHit();
+await testSpearUsesTwoHandCardsAsASlash();
+await testSpearOfferedAsFreeformActionEvenWithARealSlashHeld();
 console.log("\nAll Milestone 0-3.9 smoke tests passed.");

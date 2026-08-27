@@ -5,7 +5,7 @@
 
 import { Card, CardKind } from "./card.js";
 import { GamePlayer } from "./player.js";
-import { EngineContext, applyDamage, effectiveDistance, findJinkLikeCard, findSlashLikeCard, heal, isImmuneToSlashAndDuel, isImmuneToSnatch } from "./combat.js";
+import { EngineContext, applyDamage, detachCardFrom, effectiveDistance, findJinkLikeCard, findSlashLikeCard, heal, isImmuneToSlashAndDuel, isImmuneToSnatch } from "./combat.js";
 
 /** Alive players `actor` could legally target with Dismantlement: not self, has cards in play. */
 export function dismantlementCandidates(actor: GamePlayer, alive: GamePlayer[]): GamePlayer[] {
@@ -41,23 +41,6 @@ export function resolveExNihilo(ctx: EngineContext, target: GamePlayer): void {
  *  stable display order -- shared by Dismantlement/Snatch's candidate list below. */
 function equippedCards(owner: GamePlayer): Card[] {
   return [owner.weapon, owner.defenseHorse, owner.offenseHorse].filter((c): c is Card => c !== null);
-}
-
-/** Detaches `card` from wherever it currently sits on `owner` (hand or one of the 3 equip
- *  slots) -- does NOT decide where it goes next (discard pile vs. the stealer's hand), that's
- *  the caller's job. Fires Xiaoji's onEquipLost for ANY departure from the equip zone (discarded
- *  or snatched away), not just being replaced by a new equip. */
-async function detachCardFrom(ctx: EngineContext, owner: GamePlayer, card: Card): Promise<void> {
-  const handIdx = owner.hand.indexOf(card);
-  if (handIdx !== -1) {
-    owner.hand.splice(handIdx, 1);
-    return;
-  }
-  if (owner.weapon === card) owner.weapon = null;
-  else if (owner.defenseHorse === card) owner.defenseHorse = null;
-  else if (owner.offenseHorse === card) owner.offenseHorse = null;
-  else return; // defensive no-op: not actually one of owner's cards
-  for (const skill of owner.skills) await skill.onEquipLost?.(ctx, owner);
 }
 
 /** Dismantlement/Snatch: `actor` chooses exactly one of `owner`'s cards (hand or equipped) via

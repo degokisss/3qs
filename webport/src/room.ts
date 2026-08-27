@@ -125,6 +125,7 @@ export class Room {
       player.general = chosen.name;
       player.generalName = chosen.displayName;
       player.kingdom = chosen.kingdom;
+      player.gender = chosen.gender ?? "male";
       player.skills = chosen.skillNames.map((s) => SKILLS[s]);
       player.maxHp = chosen.maxHp;
       player.hp = chosen.maxHp;
@@ -309,6 +310,10 @@ export class Room {
       askGanglieDiscard: (player) => this.controllers.get(player.id)!.wantsToDiscardForGanglie(player),
       askUseSelfAction: (player, skillName) => this.controllers.get(player.id)!.wantsToUseSelfAction(player, skillName),
       askUseKylinBow: (player) => this.controllers.get(player.id)!.wantsToUseKylinBow(player),
+      askUseIceSword: (player) => this.controllers.get(player.id)!.wantsToUseIceSword(player),
+      askUseAxe: (player) => this.controllers.get(player.id)!.wantsToUseAxe(player),
+      askUseDoubleSword: (player) => this.controllers.get(player.id)!.wantsToUseDoubleSword(player),
+      askDiscardForDoubleSword: (player) => this.controllers.get(player.id)!.wantsToDiscardForDoubleSword(player),
       askChooseAnyPlayer: (player, candidates) => this.controllers.get(player.id)!.chooseAnyPlayerTarget(player, candidates),
       askSavageAssaultSlash: (player) => this.controllers.get(player.id)!.wantsToDiscardForSavageAssault(player),
       askArcheryAttackJink: (player) => this.controllers.get(player.id)!.wantsToDiscardForArcheryAttack(player),
@@ -448,7 +453,10 @@ export class Room {
   private async tryPlaySlash(player: GamePlayer, explicitCard?: Card): Promise<boolean> {
     if (this.gameOver || !player.alive) return false;
     const slashCard = explicitCard ?? findSlashLikeCard(player);
-    if (!slashCard) return false;
+    // Spear (weapon): no real/viewAs Slash card in hand -- fall back to sacrificing 2 hand
+    // cards as one, if equipped. Never reached when `explicitCard` is set (a human proactively
+    // chose a specific held card via the freeform path, not this fallback).
+    if (!slashCard) return explicitCard ? false : this.trySpearSlash(player);
     const alive = this.players.filter((p) => p.alive);
     const candidates = slashCandidates(alive, player);
     if (candidates.length === 0) return false;
@@ -456,6 +464,34 @@ export class Room {
     if (!target) return false;
     if (slashCard.kind !== CardKind.Slash) this.log.push(`${player.id} biến 1 lá bài thành Sát (kỹ năng biến hóa)`);
     player.hand.splice(player.hand.indexOf(slashCard), 1);
+    await this.checkHandEmptied(player);
+    await resolveSlash(this.makeContext(alive), player, target, slashCard);
+    this.onLiveUpdate?.();
+    return true;
+  }
+
+  /** Spear (weapon): uses exactly 2 of `player`'s own hand cards as if they were a Slash --
+   *  the controller picks which 2 (`chooseSpearCards`); an invalid/declined response (not
+   *  exactly 2 distinct held cards) does nothing, matching the card's real "may" wording (no
+   *  forced-discard fallback like `chooseDiscards`). One of the 2 becomes the `slashCard` passed
+   *  to `resolveSlash` (which pushes it to the discard pile itself); the other is discarded here
+   *  -- between the two, both real physical cards end up accounted for, preserving card
+   *  conservation. */
+  private async trySpearSlash(player: GamePlayer): Promise<boolean> {
+    if (this.gameOver || !player.alive || player.weapon?.weaponName !== "Spear" || player.hand.length < 2) return false;
+    const alive = this.players.filter((p) => p.alive);
+    const candidates = slashCandidates(alive, player);
+    if (candidates.length === 0) return false;
+    const chosen = await this.controllers.get(player.id)!.chooseSpearCards(player);
+    const distinctHeld = [...new Set(chosen)].filter((c) => player.hand.includes(c));
+    if (distinctHeld.length !== 2) return false; // declined, or an invalid response -- never forced
+    const target = await this.controllers.get(player.id)!.chooseSlashTarget(player, candidates);
+    if (!target) return false;
+    const [paid, slashCard] = distinctHeld;
+    player.hand.splice(player.hand.indexOf(paid), 1);
+    player.hand.splice(player.hand.indexOf(slashCard), 1);
+    this.discardPile.push(paid);
+    this.log.push(`${player.id} dùng Trượng Bát Xà Mâu: 2 lá bài như 1 Sát`);
     await this.checkHandEmptied(player);
     await resolveSlash(this.makeContext(alive), player, target, slashCard);
     this.onLiveUpdate?.();
@@ -644,6 +680,11 @@ export class Room {
     addPlayCard(player.hand.filter((c) => c.kind === CardKind.SavageAssault), CardKind.SavageAssault);
     addPlayCard(player.hand.filter((c) => c.kind === CardKind.ArcheryAttack), CardKind.ArcheryAttack);
     addPlayCard(player.hand.filter((c) => c.kind === CardKind.GodSalvation), CardKind.GodSalvation);
+    // Spear (weapon): offered independently of whether a real/viewAs Slash is also held --
+    // real Sanguosha lets you choose either, not just fall back to this when out of Slashes.
+    if (slashesRemaining > 0 && player.weapon?.weaponName === "Spear" && player.hand.length >= 2 && slashCandidates(alive, player).length > 0) {
+      actions.push({ kind: "spearSlash" });
+    }
     addPlayCard(player.hand.filter((c) => c.kind === CardKind.AmazingGrace), CardKind.AmazingGrace);
     if (player.isWounded()) {
       addPlayCard(player.hand.filter((c) => c.kind === CardKind.Peach), CardKind.Peach);
@@ -678,7 +719,7 @@ export class Room {
       const chosen = await controller.chooseFreeAction(player, legalActions);
       if (!chosen) return; // player ended their Play phase
       if (chosen.kind === "selfAction" || chosen.kind === "activeAction") usedSkillsThisTurn.add(chosen.skillName);
-      if (chosen.kind === "playCard" && chosen.cardKind === CardKind.Slash) {
+      if ((chosen.kind === "playCard" && chosen.cardKind === CardKind.Slash) || chosen.kind === "spearSlash") {
         if (await this.resolveFreeAction(player, chosen)) slashesUsed++;
       } else {
         await this.resolveFreeAction(player, chosen);
@@ -717,6 +758,9 @@ export class Room {
       await skill.activeAction.run(this.makeContext(alive), player, target, this.rng);
       this.onLiveUpdate?.();
       return false;
+    }
+    if (action.kind === "spearSlash") {
+      return this.trySpearSlash(player);
     }
 
     // action.kind === "playCard"

@@ -64,7 +64,7 @@ import { Card, CardKind, Suit } from "./card.js";
 import { GamePlayer } from "./player.js";
 import { Phase } from "./types.js";
 import { alliesOf, isAlly } from "./gamerule.js";
-import { EngineContext, applyDamage, effectiveDistance, heal, loseHp } from "./combat.js";
+import { EngineContext, applyDamage, effectiveAttackRange, effectiveDistance, heal, loseHp } from "./combat.js";
 
 export interface Skill {
   name: string;
@@ -284,8 +284,8 @@ async function jizhiOnTrickPlayed(ctx: EngineContext, player: GamePlayer): Promi
   ctx.log.push(`${player.id} bốc 1 lá (jizhi)`);
 }
 
-function liegongOnSlashTargeted(_ctx: EngineContext, attacker: GamePlayer, target: GamePlayer): boolean {
-  return target.handcardNum >= attacker.hp || target.handcardNum <= attacker.attackRange;
+function liegongOnSlashTargeted(ctx: EngineContext, attacker: GamePlayer, target: GamePlayer): boolean {
+  return target.handcardNum >= attacker.hp || target.handcardNum <= effectiveAttackRange(ctx.alivePlayers, attacker);
 }
 
 async function xiangleOnIncomingSlash(
@@ -377,7 +377,7 @@ async function yijiOnDamaged(ctx: EngineContext, player: GamePlayer): Promise<vo
 
 const qiangxiAction = {
   candidatesFor(alive: GamePlayer[], player: GamePlayer): GamePlayer[] {
-    return alive.filter((p) => p !== player && effectiveDistance(alive, player, p) <= player.attackRange);
+    return alive.filter((p) => p !== player && effectiveDistance(alive, player, p) <= effectiveAttackRange(alive, player));
   },
   async run(ctx: EngineContext, player: GamePlayer, target: GamePlayer): Promise<void> {
     await loseHp(ctx, player, 1);
@@ -431,7 +431,7 @@ async function liuliOnIncomingSlash(
 ): Promise<{ redirectTo?: GamePlayer } | void> {
   if (defender.handcardNum === 0) return;
   const candidates = ctx.alivePlayers.filter(
-    (p) => p !== defender && p !== attacker && effectiveDistance(ctx.alivePlayers, defender, p) <= defender.attackRange,
+    (p) => p !== defender && p !== attacker && effectiveDistance(ctx.alivePlayers, defender, p) <= effectiveAttackRange(ctx.alivePlayers, defender),
   );
   if (candidates.length === 0 || !(await ctx.askUseSelfAction(defender, "liuli"))) return;
   const to = await ctx.askChooseAnyPlayer(defender, candidates);
@@ -905,6 +905,10 @@ export interface GeneralDef {
   kingdom: string;
   maxHp: number;
   skillNames: string[];
+  /** Historical gender -- needed by DoubleSword's ability (opposite-gender Slash target).
+   *  Omitted for the 36 male generals (defaults to male wherever consulted); only the 8
+   *  historically female ones set this explicitly. */
+  gender?: "female";
 }
 
 // 44 of the ~60 Standard generals in this repo's `dev`-branch source are ported so far -- see
@@ -914,7 +918,7 @@ export const GENERALS: GeneralDef[] = [
   { name: "guanyu", displayName: "Quan Vũ", kingdom: "shu", maxHp: 5, skillNames: ["wusheng"] },
   { name: "xiahoudun", displayName: "Hạ Hầu Đôn", kingdom: "wei", maxHp: 4, skillNames: ["ganglie"] },
   { name: "zhaoyun", displayName: "Triệu Vân", kingdom: "shu", maxHp: 4, skillNames: ["longdan"] },
-  { name: "zhenji", displayName: "Chân Cơ", kingdom: "wei", maxHp: 3, skillNames: ["qingguo"] },
+  { name: "zhenji", displayName: "Chân Cơ", kingdom: "wei", maxHp: 3, skillNames: ["qingguo"], gender: "female" },
   { name: "zhugeliang", displayName: "Gia Cát Lượng", kingdom: "shu", maxHp: 3, skillNames: ["kongcheng"] }, // Guanxing deferred, needs card-reorder UI
   { name: "machao", displayName: "Mã Siêu", kingdom: "shu", maxHp: 4, skillNames: ["tieqi"] }, // Mashu ported below under pangde/mateng's shared skill
   { name: "simayi", displayName: "Tư Mã Ý", kingdom: "wei", maxHp: 3, skillNames: ["fankui"] }, // Guicai deferred, needs judge-area/retrial system
@@ -924,12 +928,12 @@ export const GENERALS: GeneralDef[] = [
   { name: "caocao", displayName: "Tào Tháo", kingdom: "wei", maxHp: 4, skillNames: ["jianxiong"] },
   { name: "zhouyu", displayName: "Chu Du", kingdom: "wu", maxHp: 3, skillNames: ["yingzi"] }, // Fanjian deferred, needs a suit-guessing UI ask
   { name: "ganning", displayName: "Cam Ninh", kingdom: "wu", maxHp: 4, skillNames: ["qixi"] },
-  { name: "huangyueying", displayName: "Hoàng Nguyệt Anh", kingdom: "shu", maxHp: 3, skillNames: ["jizhi", "qicai"] },
+  { name: "huangyueying", displayName: "Hoàng Nguyệt Anh", kingdom: "shu", maxHp: 3, skillNames: ["jizhi", "qicai"], gender: "female" },
   { name: "huangzhong", displayName: "Hoàng Trung", kingdom: "shu", maxHp: 4, skillNames: ["liegong"] }, // LiegongRange is Hegemony-lord-only
   { name: "liushan", displayName: "Lưu Thiện", kingdom: "shu", maxHp: 3, skillNames: ["xiangle"] }, // Fangquan deferred, needs phase-skip/extra-turn
   { name: "menghuo", displayName: "Mạnh Hoạch", kingdom: "shu", maxHp: 4, skillNames: ["savageAssaultAvoid", "huoshou"] },
-  { name: "zhurong", displayName: "Chúc Dung", kingdom: "shu", maxHp: 4, skillNames: ["savageAssaultAvoid", "juxiang"] }, // Lieren deferred, needs pindian
-  { name: "ganfuren", displayName: "Cam Phu Nhân", kingdom: "shu", maxHp: 3, skillNames: ["shushen", "shenzhi"] },
+  { name: "zhurong", displayName: "Chúc Dung", kingdom: "shu", maxHp: 4, skillNames: ["savageAssaultAvoid", "juxiang"], gender: "female" }, // Lieren deferred, needs pindian
+  { name: "ganfuren", displayName: "Cam Phu Nhân", kingdom: "shu", maxHp: 3, skillNames: ["shushen", "shenzhi"], gender: "female" },
   { name: "zhangliao", displayName: "Trương Liêu", kingdom: "wei", maxHp: 4, skillNames: ["tuxi"] },
   { name: "xuchu", displayName: "Hứa Chử", kingdom: "wei", maxHp: 4, skillNames: ["luoyi"] },
   { name: "guojia", displayName: "Quách Gia", kingdom: "wei", maxHp: 3, skillNames: ["yiji"] }, // Tiandu deferred, needs judge-area
@@ -938,19 +942,19 @@ export const GENERALS: GeneralDef[] = [
   { name: "caopi", displayName: "Tào Phi", kingdom: "wei", maxHp: 3, skillNames: ["xingshang"] }, // Fangzhu deferred, needs face-up/down state
   { name: "yuejin", displayName: "Nhạc Tiến", kingdom: "wei", maxHp: 4, skillNames: ["xiaoguo"] },
   { name: "lvmeng", displayName: "Lữ Mông", kingdom: "wu", maxHp: 4, skillNames: ["keji"] },
-  { name: "daqiao", displayName: "Đại Kiều", kingdom: "wu", maxHp: 3, skillNames: ["liuli"] }, // Guose deferred, needs Indulgence/judge-area
-  { name: "sunshangxiang", displayName: "Tôn Thượng Hương", kingdom: "wu", maxHp: 3, skillNames: ["xiaoji"] }, // Jieyin deferred, needs 2-card viewAs
+  { name: "daqiao", displayName: "Đại Kiều", kingdom: "wu", maxHp: 3, skillNames: ["liuli"], gender: "female" }, // Guose deferred, needs Indulgence/judge-area
+  { name: "sunshangxiang", displayName: "Tôn Thượng Hương", kingdom: "wu", maxHp: 3, skillNames: ["xiaoji"], gender: "female" }, // Jieyin deferred, needs 2-card viewAs
   { name: "sunjian", displayName: "Tôn Kiên", kingdom: "wu", maxHp: 4, skillNames: ["yinghun"] },
   { name: "lusu", displayName: "Lỗ Túc", kingdom: "wu", maxHp: 3, skillNames: ["haoshi"] }, // Dimeng deferred, needs variable-count viewAs
   { name: "erzhang", displayName: "Trương Chiêu & Trương Hoành", kingdom: "wu", maxHp: 3, skillNames: ["guzheng"] }, // Zhijian deferred, needs equip-onto-another-player
   { name: "huatuo", displayName: "Hoa Đà", kingdom: "qun", maxHp: 3, skillNames: ["jijiu", "qingnang"] },
   { name: "lvbu", displayName: "Lữ Bố", kingdom: "qun", maxHp: 5, skillNames: ["wushuang"] },
-  { name: "diaochan", displayName: "Điêu Thuyền", kingdom: "qun", maxHp: 3, skillNames: ["biyue"] }, // Lijian deferred, needs gender attribute
+  { name: "diaochan", displayName: "Điêu Thuyền", kingdom: "qun", maxHp: 3, skillNames: ["biyue"], gender: "female" }, // Lijian deferred, needs pindian (gender now modeled, see DoubleSword)
   { name: "yanliangwenchou", displayName: "Nhan Lương & Văn Xú", kingdom: "qun", maxHp: 4, skillNames: ["shuangxiong"] },
   { name: "jiaxu", displayName: "Giả Hủ", kingdom: "qun", maxHp: 3, skillNames: ["weimu"] }, // Wansha/Luanwu deferred, need ally-rescue-suppression/marks
   { name: "pangde", displayName: "Bàng Đức", kingdom: "qun", maxHp: 4, skillNames: ["mashu", "mengjin"] },
   { name: "zhangjiao", displayName: "Trương Giác", kingdom: "qun", maxHp: 3, skillNames: ["leiji"] }, // Guidao deferred, needs judge-area
-  { name: "caiwenji", displayName: "Thái Văn Cơ", kingdom: "qun", maxHp: 3, skillNames: ["beige"] }, // Duanchang deferred, needs dual-general head/deputy
+  { name: "caiwenji", displayName: "Thái Văn Cơ", kingdom: "qun", maxHp: 3, skillNames: ["beige"], gender: "female" }, // Duanchang deferred, needs dual-general head/deputy
   { name: "mateng", displayName: "Mã Đằng", kingdom: "qun", maxHp: 4, skillNames: ["mashu"] }, // Xiongyi deferred, needs marks/limit-counters
   { name: "kongrong", displayName: "Khổng Dung", kingdom: "qun", maxHp: 3, skillNames: ["mingshi"] }, // Lirang deferred, needs a card-pile subsystem
   { name: "tianfeng", displayName: "Điền Phong", kingdom: "qun", maxHp: 3, skillNames: ["sijian", "suishi"] },

@@ -17,6 +17,7 @@
 import { Card, CardKind } from "./card.js";
 import { GamePlayer } from "./player.js";
 import { Role } from "./types.js";
+import { isAlly } from "./gamerule.js";
 
 /**
  * Player::distanceTo: shortest seat-circle hop count among currently ALIVE players, adjusted by
@@ -33,6 +34,37 @@ export function effectiveDistance(alive: GamePlayer[], from: GamePlayer, to: Gam
   const horseDelta = (to.defenseHorse?.horseDelta ?? 0) - (from.offenseHorse ? 1 : 0);
   const skillDelta = from.skills.reduce((sum, skill) => sum + (skill.attackDistanceDelta?.(from) ?? 0), 0);
   return Math.max(1, seatDistance + horseDelta - skillDelta);
+}
+
+/** `player`'s real attack range (weapon range, or 1 unequipped), plus SixSwords' ally-synergy
+ *  bonus: +1 if another ALIVE ally also wields SixSwords (this repo's "ally" = same Role-mode
+ *  side, see gamerule.ts's isAlly -- the closest equivalent to Hegemony's same-kingdom teams
+ *  this weapon's real ability keys off). */
+export function effectiveAttackRange(alive: GamePlayer[], player: GamePlayer): number {
+  const sixSwordsBonus =
+    player.weapon?.weaponName === "SixSwords" && alive.some((p) => p.weapon?.weaponName === "SixSwords" && isAlly(player, p))
+      ? 1
+      : 0;
+  return player.attackRange + sixSwordsBonus;
+}
+
+/** Detaches `card` from wherever it currently sits on `owner` (hand or one of the 3 equip
+ *  slots) -- does NOT decide where it goes next (discard pile vs. the stealer's hand), that's
+ *  the caller's job. Fires Xiaoji's onEquipLost for ANY departure from the equip zone (discarded
+ *  or snatched away), not just being replaced by a new equip. Shared by trick.ts's Dismantlement/
+ *  Snatch and this file's IceSword (both "detach one of an owner's cards, caller decides where
+ *  it lands"). */
+export async function detachCardFrom(ctx: EngineContext, owner: GamePlayer, card: Card): Promise<void> {
+  const handIdx = owner.hand.indexOf(card);
+  if (handIdx !== -1) {
+    owner.hand.splice(handIdx, 1);
+    return;
+  }
+  if (owner.weapon === card) owner.weapon = null;
+  else if (owner.defenseHorse === card) owner.defenseHorse = null;
+  else if (owner.offenseHorse === card) owner.offenseHorse = null;
+  else return; // defensive no-op: not actually one of owner's cards
+  for (const skill of owner.skills) await skill.onEquipLost?.(ctx, owner);
 }
 
 function takeCard(hand: Card[], kind: CardKind): Card | null {
@@ -87,6 +119,14 @@ export function findSlashLikeCard(player: GamePlayer): Card | null {
     const viewed = player.hand.find((c) => skill.canViewAsSlash!(c, player));
     if (viewed) return viewed;
   }
+  // Fan (weapon): any ONE held non-Slash card may be played/discarded as if it were a Slash --
+  // same single-card viewAs shape as Wusheng/Longdan above, just weapon-gated instead of
+  // skill-gated, so it plugs into every existing consumer of this function (Duel exchanges,
+  // Savage Assault's discard-a-slash choice, etc.) for free.
+  if (player.weapon?.weaponName === "Fan") {
+    const nonSlash = player.hand.find((c) => c.kind !== CardKind.Slash);
+    if (nonSlash) return nonSlash;
+  }
   return null;
 }
 
@@ -99,6 +139,11 @@ export function allSlashLikeCards(player: GamePlayer): Card[] {
     if (!skill.canViewAsSlash) continue;
     for (const c of player.hand) {
       if (c.kind !== CardKind.Slash && skill.canViewAsSlash(c, player) && !cards.includes(c)) cards.push(c);
+    }
+  }
+  if (player.weapon?.weaponName === "Fan") {
+    for (const c of player.hand) {
+      if (c.kind !== CardKind.Slash && !cards.includes(c)) cards.push(c);
     }
   }
   return cards;
@@ -228,6 +273,19 @@ export interface EngineContext {
    *  least 1 horse equipped, you may destroy one of their horse cards. Only called when the
    *  wielder actually has one to destroy. */
   askUseKylinBow: (player: GamePlayer) => Promise<boolean>;
+  /** IceSword (weapon): after a Slash you wielded it with WOULD deal damage, you may cancel
+   *  that damage entirely and instead pick (as the attacker) up to 2 of the target's cards
+   *  (hand or equipped) to discard. Only called when the target actually has >=1 card. */
+  askUseIceSword: (player: GamePlayer) => Promise<boolean>;
+  /** Axe (weapon): after your Slash gets dodged, you may discard 2 of your OWN cards to force
+   *  it to hit anyway. Only called when you actually hold >=2 cards. */
+  askUseAxe: (player: GamePlayer) => Promise<boolean>;
+  /** DoubleSword (weapon): after a Slash you wielded it with deals damage to a target of the
+   *  OPPOSITE gender, you (the wielder) may invoke it. */
+  askUseDoubleSword: (player: GamePlayer) => Promise<boolean>;
+  /** DoubleSword follow-up: does the TARGET want to discard 1 of their own (random) cards
+   *  instead of letting the wielder draw 1? Only called when they actually hold >=1 card. */
+  askDiscardForDoubleSword: (player: GamePlayer) => Promise<boolean>;
   /** Ally rescue: does `rescuer` want to play a held Peach/Analeptic (or viewAs, e.g. Jijiu) to
    *  save `dyingPlayer`? Only called when `rescuer` actually holds one -- asked of every OTHER
    *  alive player, in turn order starting right after the dying player, only once the dying
@@ -295,7 +353,12 @@ export async function resolveSlash(
       effectiveTarget.hand.splice(effectiveTarget.hand.indexOf(next), 1);
       spent.push(next);
     }
-    if (allFound) {
+    if (!allFound) {
+      // Couldn't complete the required set (e.g. only 1 of Wushuang's 2 jinks): nothing was
+      // actually played, so return the tentatively-removed card(s) to hand instead of discarding.
+      effectiveTarget.hand.push(...spent);
+      ctx.log.push(`${effectiveTarget.id} không đủ ${requiredJinks} lá Thiểm nên chịu đòn`);
+    } else {
       ctx.discardPile.push(...spent);
       for (const c of spent) {
         if (c.kind !== CardKind.Jink) ctx.log.push(`${effectiveTarget.id} biến 1 lá bài thành Thiểm (kỹ năng biến hóa)`);
@@ -303,12 +366,38 @@ export async function resolveSlash(
       ctx.log.push(`${effectiveTarget.id} né bằng Thiểm${spent.length > 1 ? ` (x${spent.length})` : ""}`);
       for (const skill of attacker.skills) await skill.onSlashDodged?.(ctx, attacker, effectiveTarget);
       for (const skill of effectiveTarget.skills) await skill.onSlashDodged?.(ctx, attacker, effectiveTarget);
-      return;
+      // Axe (weapon): may discard 2 of your OWN cards to force this dodged slash through anyway.
+      if (attacker.weapon?.weaponName === "Axe" && attacker.hand.length >= 2 && (await ctx.askUseAxe(attacker))) {
+        for (let i = 0; i < 2; i++) {
+          const idx = Math.floor(ctx.rng() * attacker.hand.length);
+          ctx.discardPile.push(attacker.hand.splice(idx, 1)[0]);
+        }
+        ctx.log.push(`${attacker.id} bỏ 2 lá bài, buộc Sát trúng đòn (axe)`);
+      } else {
+        return;
+      }
     }
-    // Couldn't complete the required set (e.g. only 1 of Wushuang's 2 jinks): nothing was
-    // actually played, so return the tentatively-removed card(s) to hand instead of discarding.
-    effectiveTarget.hand.push(...spent);
-    ctx.log.push(`${effectiveTarget.id} không đủ ${requiredJinks} lá Thiểm nên chịu đòn`);
+  }
+
+  // IceSword (weapon): may cancel this slash's damage entirely and, in its place, let the
+  // attacker pick up to 2 of the target's cards (hand or equip) to discard -- resolved BEFORE
+  // applyDamage since it replaces the hit outright, not a reaction to it.
+  if (
+    attacker.weapon?.weaponName === "IceSword" &&
+    (effectiveTarget.hand.length > 0 || effectiveTarget.weapon || effectiveTarget.defenseHorse || effectiveTarget.offenseHorse) &&
+    (await ctx.askUseIceSword(attacker))
+  ) {
+    ctx.log.push(`${attacker.id} dùng Hàn Băng Kiếm: hủy sát thương, bắt ${effectiveTarget.id} bỏ bài thay vào`);
+    for (let i = 0; i < 2; i++) {
+      const candidates = [effectiveTarget.weapon, effectiveTarget.defenseHorse, effectiveTarget.offenseHorse, ...effectiveTarget.hand].filter(
+        (c): c is Card => c !== null,
+      );
+      if (candidates.length === 0) break;
+      const chosen = await ctx.askPickPlayerCard(attacker, effectiveTarget, candidates);
+      await detachCardFrom(ctx, effectiveTarget, chosen);
+      ctx.discardPile.push(chosen);
+    }
+    return;
   }
 
   const damageDealt = await applyDamage(ctx, effectiveTarget, 1 + analepticBonus, attacker);
@@ -329,6 +418,40 @@ export async function resolveSlash(
       ctx.discardPile.push(destroyed);
       ctx.log.push(`${attacker.id} dùng Kỳ Lân Cung hủy ${destroyed.horseName} của ${effectiveTarget.id}`);
       for (const skill of effectiveTarget.skills) await skill.onEquipLost?.(ctx, effectiveTarget);
+    }
+  }
+
+  // DoubleSword (weapon): after a slash you wielded it with deals damage to a target of the
+  // OPPOSITE gender, you may invoke it -- the target then chooses to discard 1 of their own
+  // (random, since this repo has no per-card picker for "any 1 of your own hand" outside the
+  // end-of-turn discard-to-limit flow) or, if they can't/won't, you draw 1 instead.
+  if (damageDealt && attacker.weapon?.weaponName === "DoubleSword" && attacker.gender !== effectiveTarget.gender) {
+    if (await ctx.askUseDoubleSword(attacker)) {
+      if (effectiveTarget.hand.length > 0 && (await ctx.askDiscardForDoubleSword(effectiveTarget))) {
+        const idx = Math.floor(ctx.rng() * effectiveTarget.hand.length);
+        ctx.discardPile.push(effectiveTarget.hand.splice(idx, 1)[0]);
+        ctx.log.push(`${effectiveTarget.id} bỏ 1 lá bài (song cổ kiếm)`);
+      } else {
+        ctx.draw(attacker, 1);
+        ctx.log.push(`${attacker.id} rút 1 lá (song cổ kiếm)`);
+      }
+    }
+  }
+
+  // Triblade (weapon): after this slash deals damage, you may pick another player at distance 1
+  // from the ORIGINAL target (not yourself) to also take the same 1 damage -- flat 1, not
+  // analeptic-boosted, matching the upstream engine's fresh DamageStruct(damage: 1) for the
+  // splash hit.
+  if (damageDealt && attacker.weapon?.weaponName === "Triblade") {
+    const splashCandidates = ctx.alivePlayers.filter(
+      (p) => p !== attacker && p !== effectiveTarget && effectiveDistance(ctx.alivePlayers, effectiveTarget, p) === 1,
+    );
+    if (splashCandidates.length > 0) {
+      const splashTarget = await ctx.askChooseAnyPlayer(attacker, splashCandidates);
+      if (splashTarget) {
+        ctx.log.push(`${attacker.id} dùng Tam Tiêm Đao lan sát thương sang ${splashTarget.id}`);
+        await applyDamage(ctx, splashTarget, 1, attacker);
+      }
     }
   }
 }

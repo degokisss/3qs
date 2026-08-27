@@ -22,6 +22,8 @@ export class GamePlayer {
   general = ""; // set by Room from skill.ts's GENERALS; empty until assigned (pinyin id, e.g. "caocao" -- drives asset filenames)
   generalName = ""; // Vietnamese display name (e.g. "Tào Tháo"), set alongside `general` from GeneralDef.displayName
   kingdom = ""; // "wei"/"shu"/"wu"/"qun", set alongside general
+  gender: "male" | "female" = "male"; // set alongside general from GeneralDef.gender (defaults
+  // male -- see skill.ts's GeneralDef doc comment); needed by DoubleSword's opposite-gender check
   skills: Skill[] = [];
   /** One-shot additive damage bonus armed by a skill (e.g. Luoyi), consumed by the next
    *  applyDamage this player deals, then reset to 0. */
