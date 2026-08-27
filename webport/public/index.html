@@ -306,22 +306,22 @@
   .generalCard .flipBtn:hover, .generalCard .pickBtn:hover { background: var(--gold); color: var(--ink); }
   .generalCard .pickBtn { border-color: var(--gold); font-weight: 700; }
 
-  /* --- the table: 8 seats ringed around a center emblem, like sitting around the game table --- */
+  /* --- the table: 10 seats ringed around a center emblem, like sitting around the game table --- */
   #table {
     max-width: 1280px;
     margin: 0 auto 22px;
     display: grid;
-    grid-template-columns: 212px 1fr 1fr 1fr 212px;
+    grid-template-columns: 212px 1fr 1fr 1fr 1fr 212px;
     grid-template-rows: auto auto auto;
     grid-template-areas:
-      ".    top1  top2  top3  ."
-      "left  .    center .   right"
-      ".    bot1  bot2  bot3  .";
+      ".    top1  top2    top3    top4  ."
+      "left  .    center  center  .   right"
+      ".    bot1  bot2    bot3    bot4  .";
     gap: 14px;
     align-items: stretch;
   }
-  .slot-top1 { grid-area: top1; } .slot-top2 { grid-area: top2; } .slot-top3 { grid-area: top3; }
-  .slot-bot1 { grid-area: bot1; } .slot-bot2 { grid-area: bot2; } .slot-bot3 { grid-area: bot3; }
+  .slot-top1 { grid-area: top1; } .slot-top2 { grid-area: top2; } .slot-top3 { grid-area: top3; } .slot-top4 { grid-area: top4; }
+  .slot-bot1 { grid-area: bot1; } .slot-bot2 { grid-area: bot2; } .slot-bot3 { grid-area: bot3; } .slot-bot4 { grid-area: bot4; }
   .slot-left { grid-area: left; } .slot-right { grid-area: right; }
 
   #centerEmblem {
@@ -511,6 +511,38 @@
   }
   .claimBtn:hover:not(:disabled) { border-color: var(--gold); color: var(--gold); }
   .claimBtn:disabled { opacity: 0.5; cursor: default; }
+  .seatControls { display: flex; flex-direction: column; gap: 5px; margin-top: 7px; }
+  .seatControls .claimBtn { margin-top: 0; }
+  .botToggleBtn {
+    font-family: var(--font-label);
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    padding: 3px 9px;
+    background: transparent;
+    border: 1px solid #3a3f4d;
+    border-radius: 3px;
+    color: var(--text-dim);
+    cursor: pointer;
+    width: 100%;
+  }
+  .botToggleBtn:hover { border-color: var(--gold); color: var(--gold); }
+  .botToggleBtn.active { border-color: var(--gold-dim); color: var(--gold); background: rgba(201,162,74,0.08); }
+  .botBadge {
+    display: inline-block;
+    margin-top: 7px;
+    font-family: var(--font-label);
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    padding: 3px 9px;
+    border: 1px solid var(--gold-dim);
+    border-radius: 3px;
+    color: var(--gold);
+    text-align: center;
+    width: 100%;
+    box-sizing: border-box;
+  }
 
   /* --- decision prompt: an imperial scroll unrolling over the dimmed table --- */
   #promptOverlay {
@@ -658,16 +690,6 @@
     border-bottom: 1px solid var(--gold-dim);
     flex-wrap: wrap;
   }
-  #createRoomRow label { font-size: 12px; color: var(--text-dim); letter-spacing: 0.5px; }
-  #playerCountSelect {
-    background: var(--ink);
-    color: var(--text);
-    border: 1px solid #3a3f4d;
-    border-radius: 3px;
-    padding: 5px 8px;
-    font-family: var(--font-label);
-    font-size: 12px;
-  }
   #createRoomBtn {
     background: var(--gold);
     color: var(--ink);
@@ -743,7 +765,7 @@
   @media (max-width: 860px) {
     #table {
       grid-template-columns: 1fr 1fr;
-      grid-template-areas: "top1 top2" "top3 left" "right center" "bot1 bot2" "bot3 bot3";
+      grid-template-areas: "top1 top2" "top3 top4" "left right" "center center" "bot1 bot2" "bot3 bot4";
     }
   }
 </style>
@@ -767,15 +789,6 @@
     <div id="lobbyPanel">
       <div id="lobbyHeading">Danh sách phòng</div>
       <div id="createRoomRow">
-        <label for="playerCountSelect">Số người chơi</label>
-        <select id="playerCountSelect">
-          <option value="5">5</option>
-          <option value="6">6</option>
-          <option value="7">7</option>
-          <option value="8" selected>8</option>
-          <option value="9">9</option>
-          <option value="10">10</option>
-        </select>
         <button id="createRoomBtn">Tạo phòng mới</button>
       </div>
       <div id="roomListEl"></div>
@@ -813,7 +826,9 @@
       <div class="slot-top1" data-slot="top1"></div>
       <div class="slot-top2" data-slot="top2"></div>
       <div class="slot-top3" data-slot="top3"></div>
+      <div class="slot-top4" data-slot="top4"></div>
       <div class="slot-right" data-slot="right"></div>
+      <div class="slot-bot4" data-slot="bot4"></div>
       <div class="slot-bot3" data-slot="bot3"></div>
       <div class="slot-bot2" data-slot="bot2"></div>
       <div class="slot-bot1" data-slot="bot1"></div>
@@ -846,7 +861,7 @@
       amazing_grace: "Ngũ Cốc Phong Đăng",
     };
     const CARD_LABEL = { ...TRICK_LABEL, slash: "Sát", jink: "Thiểm", peach: "Đào", analeptic: "Tửu" };
-    const SLOT_ORDER = ["top1", "top2", "top3", "right", "bot3", "bot2", "bot1", "left"]; // clockwise seating
+    const SLOT_ORDER = ["top1", "top2", "top3", "top4", "right", "bot4", "bot3", "bot2", "bot1", "left"]; // clockwise seating
     const IMG = "../../image";
 
     const statusEl = document.getElementById("status");
@@ -868,7 +883,6 @@
     const leaveRoomBtn = document.getElementById("leaveRoom");
     const newGameBtn = document.getElementById("newGame");
     const roomListEl = document.getElementById("roomListEl");
-    const playerCountSelectEl = document.getElementById("playerCountSelect");
     const slotEls = Object.fromEntries(SLOT_ORDER.map((s) => [s, document.querySelector(`[data-slot="${s}"]`)]));
     const tableEl = document.getElementById("table");
     const pickGeneralPanelEl = document.getElementById("pickGeneralPanel");
@@ -953,6 +967,8 @@
       promptCountdownInterval = setInterval(tick, 250);
     }
     window.__claim = claim;
+    /** Creator-only, pre-start: toggles a bot on/off for an unclaimed slot. */
+    window.__toggleBot = (playerId) => send({ type: "toggleBot", playerId });
     window.__answer = answerPrompt;
     window.answerPromptNoop = () => {};
     function updateToggleRoleBtn() {
@@ -1069,7 +1085,7 @@
         <div class="roomRow">
           <div>
             <span class="roomCode">${r.id}</span>
-            <span class="roomMeta">${r.playerCount} người · ${r.seatsClaimed} đã chiếm ghế · ${r.watchers} đang xem · ${
+            <span class="roomMeta">${r.seatsClaimed} người · ${r.botCount} bot · ${r.watchers} đang xem · ${
               r.gameOver ? "đã kết thúc" : `lượt ${r.turnNumber}`
             }</span>
           </div>
@@ -1080,8 +1096,8 @@
     }
     window.__joinRoom = (roomId) => send({ type: "joinRoom", roomId });
 
-    /** Re-renders just the 8 seat slots from `lastState` + current `pendingPrompt`/`mySeat` --
-     *  called both after a fresh state broadcast and whenever `pendingPrompt` itself changes
+    /** Re-renders the (up to 10) seat slots from `lastState` + current `pendingPrompt`/`mySeat`
+     *  -- called both after a fresh state broadcast and whenever `pendingPrompt` itself changes
      *  (a chooseSlashTarget/chooseTrickTarget ask does NOT come with its own state broadcast,
      *  so without this the candidate highlighting + click handlers below would never appear). */
     function renderPlayers() {
@@ -1090,6 +1106,13 @@
         const slot = SLOT_ORDER[i];
         if (slotEls[slot]) slotEls[slot].innerHTML = renderPlayer(p, lastState);
       });
+      // The waiting room always shows 10 slots, but starting the match rebuilds the room with
+      // only the active (claimed/bot-toggled) subset -- clear any slots beyond that shorter
+      // roster so they don't keep showing a stale waiting-room ghost card from before start.
+      for (let i = lastState.players.length; i < SLOT_ORDER.length; i++) {
+        const slot = SLOT_ORDER[i];
+        if (slotEls[slot]) slotEls[slot].innerHTML = "";
+      }
     }
 
     /** Weapon/horse icons WITH their effect always visible (not hover-only): weapon shows its
@@ -1141,14 +1164,27 @@
       // full-brightness for context) so the highlighted candidates above are unmistakable.
       else if (pendingPrompt && p.id !== pendingPrompt.actorId) classes.push("noncandidate");
 
-      const claimBtn =
-        p.id === mySeat
-          ? `<button class="claimBtn" onclick="answerPromptNoop()" disabled>Ghế của bạn</button>`
-          : p.alive && !p.claimed && !state.started
-          ? `<button class="claimBtn" onclick="window.__claim('${p.id}')">Chiếm ghế</button>`
-          : p.claimed
-          ? `<button class="claimBtn" disabled>Đã có người</button>`
+      // Pre-start seat controls: claim it yourself, or (creator only) toggle a bot onto it.
+      // Once started, this slot either has a claim (human) or was bot-toggled to make it into
+      // the actual roster at all -- nothing left to configure, just show what it is.
+      let seatControls;
+      if (p.id === mySeat) {
+        seatControls = `<button class="claimBtn" onclick="answerPromptNoop()" disabled>Ghế của bạn</button>`;
+      } else if (p.claimed) {
+        seatControls = `<button class="claimBtn" disabled>Đã có người</button>`;
+      } else if (!state.started) {
+        const claimPart = `<button class="claimBtn" onclick="window.__claim('${p.id}')">Chiếm ghế</button>`;
+        const botPart = amICreator
+          ? `<button class="botToggleBtn${p.botEnabled ? " active" : ""}" onclick="window.__toggleBot('${p.id}')">${
+              p.botEnabled ? "🤖 Bỏ bot" : "🤖 Thêm bot"
+            }</button>`
+          : p.botEnabled
+          ? `<span class="botBadge">🤖 Bot</span>`
           : "";
+        seatControls = `<div class="seatControls">${claimPart}${botPart}</div>`;
+      } else {
+        seatControls = p.botEnabled ? `<span class="botBadge">🤖 Bot</span>` : "";
+      }
 
       const onclick = isCandidate ? ` onclick="window.__answer('${p.id}')"` : "";
       const kcolorVar = KINGDOM_VAR[p.kingdom];
@@ -1166,7 +1202,7 @@
         ${skillsHtml}
         <div class="equipRow">${equipIcons(p) || '<span class="equipEmpty">Không trang bị</span>'}</div>
         <div class="hand">Bài: <b>${p.handcardNum}</b></div>
-        ${claimBtn}
+        ${seatControls}
       </div>`;
     }
 
@@ -1415,9 +1451,11 @@
         centerActingEl.textContent = "";
         renderPickGeneral();
       } else if (!started) {
+        const activeCount = state.players.filter((p) => p.claimed || p.botEnabled).length;
+        const readyNote = ` (${activeCount}/10 -- cần tối thiểu 5)`;
         turnBannerEl.textContent = amICreator
-          ? "Phòng đang chờ — bấm \"Bắt đầu trận đấu\" khi đã sẵn sàng"
-          : "Đang chờ chủ phòng bắt đầu trận đấu…";
+          ? `Phòng đang chờ — chọn ghế hoặc thêm bot, rồi bấm "Bắt đầu trận đấu"${readyNote}`
+          : `Đang chờ chủ phòng bắt đầu trận đấu…${readyNote}`;
         centerTurnEl.textContent = "Chưa bắt đầu";
         centerActingEl.textContent = "";
       } else {
@@ -1736,8 +1774,7 @@
         send({ type: "leaveRoom" });
       };
       createRoomBtn.onclick = () => {
-        const playerCount = Number(playerCountSelectEl.value);
-        send({ type: "createRoom", playerCount });
+        send({ type: "createRoom" });
       };
       startGameBtn.onclick = () => {
         send({ type: "startGame" });

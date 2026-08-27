@@ -24,7 +24,6 @@ import { SKILLS } from "./skill.js";
 import type { Card } from "./card.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
-const DEFAULT_PLAYER_COUNT = 8;
 const MIN_PLAYERS = 5; // Room/gamerule.ts's role table only covers 5-10 players (identity mode).
 const MAX_PLAYERS = 10;
 const TURN_INTERVAL_MS = 500;
@@ -77,19 +76,23 @@ function newPlayerIds(n: number): string[] {
 
 interface GameRoom {
   readonly id: string;
-  readonly playerCount: number;
   room: Room;
   readonly clients: Set<WebSocket>;
-  // playerId -> the ws that claimed it (absent = bot-controlled).
+  // playerId -> the ws that claimed it (absent = bot-controlled or empty, see botEnabledSlots).
   readonly claimedSeats: Map<string, WebSocket>;
+  // Which unclaimed slots the creator has toggled to "bot" -- everything else stays empty and
+  // is excluded entirely once the room actually starts (see "startGame"). Mutually exclusive
+  // with claimedSeats: claiming a slot always clears its bot flag ("claim"), and a slot can't
+  // be bot-toggled while claimed ("toggleBot").
+  readonly botEnabledSlots: Set<string>;
   readonly pendingRequests: Map<string, (msg: Record<string, unknown>) => void>;
   nextRequestId: number;
   loopTimer: NodeJS.Timeout | null;
   /** True once the creator has explicitly started the game -- before that, `loopTimer` is never
    *  scheduled, so no bot (or claimed-seat) turns run at all; the room just sits as a seat-picker. */
   started: boolean;
-  /** The socket that created this room -- the only one allowed to send `startGame`. Promoted to
-   *  another remaining watcher if the creator leaves before starting (see `leaveRoom`). */
+  /** The socket that created this room -- the only one allowed to send `startGame`/`toggleBot`.
+   *  Promoted to another remaining watcher if the creator leaves before starting (see `leaveRoom`). */
   creatorWs: WebSocket;
 }
 
@@ -121,13 +124,18 @@ function scheduleLoop(gr: GameRoom): void {
   }, TURN_INTERVAL_MS);
 }
 
-function createRoom(playerCount: number, creatorWs: WebSocket): GameRoom {
+/** Always creates a room with the full 10 display slots (P1-P10) -- the creator decides, before
+ *  starting, which ones actually play: claim a seat themselves, let others claim seats, and
+ *  toggle bots onto whichever remaining slots they want filled (see "toggleBot"/"startGame").
+ *  Anything left neither claimed nor bot-toggled is simply excluded from the real Room
+ *  `startGame` builds, not silently defaulted to a bot like before. */
+function createRoom(creatorWs: WebSocket): GameRoom {
   const gr: GameRoom = {
     id: generateRoomId(),
-    playerCount,
-    room: new Room(newPlayerIds(playerCount)),
+    room: new Room(newPlayerIds(MAX_PLAYERS)),
     clients: new Set(),
     claimedSeats: new Map(),
+    botEnabledSlots: new Set(),
     pendingRequests: new Map(),
     nextRequestId: 1,
     loopTimer: null,
@@ -151,8 +159,8 @@ function destroyRoom(gr: GameRoom): void {
 function roomSummary(gr: GameRoom) {
   return {
     id: gr.id,
-    playerCount: gr.playerCount,
     seatsClaimed: gr.claimedSeats.size,
+    botCount: gr.botEnabledSlots.size,
     watchers: gr.clients.size,
     turnNumber: gr.room.turnNumber,
     gameOver: !!gr.room.gameOver,
@@ -433,6 +441,7 @@ function snapshot(gr: GameRoom) {
       offenseHorse: p.offenseHorse?.horseName ?? null,
       offenseHorseDelta: p.offenseHorse?.horseDelta ?? null,
       claimed: gr.claimedSeats.has(p.id),
+      botEnabled: gr.botEnabledSlots.has(p.id),
       skills: p.skills.map((s) => ({
         name: s.displayName,
         description: s.description,
@@ -554,13 +563,8 @@ wss.on("connection", (ws) => {
         ws.send(JSON.stringify(roomListPayload()));
         break;
       case "createRoom": {
-        const playerCount = Number(msg.playerCount) || DEFAULT_PLAYER_COUNT;
-        if (!Number.isInteger(playerCount) || playerCount < MIN_PLAYERS || playerCount > MAX_PLAYERS) {
-          ws.send(JSON.stringify({ type: "error", message: `Số người chơi phải từ ${MIN_PLAYERS} đến ${MAX_PLAYERS}.` }));
-          return;
-        }
         leaveRoom(ws); // in case this socket was already watching another room
-        const gr = createRoom(playerCount, ws);
+        const gr = createRoom(ws);
         joinRoom(ws, gr);
         broadcastLobby();
         break;
@@ -587,6 +591,26 @@ wss.on("connection", (ws) => {
           ws.send(JSON.stringify({ type: "error", message: "Chỉ người tạo phòng mới có thể bắt đầu." }));
           return;
         }
+        // Only slots the creator actually configured (claimed by someone, or toggled to bot)
+        // play -- anything left neither claimed nor bot-toggled is simply excluded, not
+        // defaulted to a bot. Validate BEFORE constructing: Room's own constructor throws
+        // outside 5-10 players, and an uncaught throw here (inside a raw message handler, no
+        // request boundary) would crash the whole process.
+        const activeIds = gr.room.players.map((p) => p.id).filter((id) => gr.claimedSeats.has(id) || gr.botEnabledSlots.has(id));
+        if (activeIds.length < MIN_PLAYERS) {
+          ws.send(
+            JSON.stringify({
+              type: "error",
+              message: `Cần tối thiểu ${MIN_PLAYERS} người chơi (kể cả bot) để bắt đầu -- hiện có ${activeIds.length}.`,
+            }),
+          );
+          return;
+        }
+        gr.room = new Room(activeIds); // rebuild with exactly the final roster -- role/win tables are sized per player count
+        gr.room.setLiveUpdateCallback(() => broadcast(gr));
+        for (const playerId of gr.claimedSeats.keys()) {
+          gr.room.setController(playerId, makeHumanController(gr, playerId)); // bot-toggled seats already default to makeBotController
+        }
         gr.started = true;
         broadcast(gr); // enters the pick-generals phase immediately (started but nobody picked yet)
         broadcastLobby();
@@ -602,6 +626,22 @@ wss.on("connection", (ws) => {
         })();
         break;
       }
+      case "toggleBot": {
+        const gr = wsRoom.get(ws);
+        if (!gr || gr.started) return;
+        if (gr.creatorWs !== ws) {
+          ws.send(JSON.stringify({ type: "error", message: "Chỉ người tạo phòng mới có thể bật/tắt bot." }));
+          return;
+        }
+        const playerId = String(msg.playerId);
+        if (!gr.room.players.some((p) => p.id === playerId)) return;
+        if (gr.claimedSeats.has(playerId)) return; // a claimed seat can't also be bot-toggled
+        if (gr.botEnabledSlots.has(playerId)) gr.botEnabledSlots.delete(playerId);
+        else gr.botEnabledSlots.add(playerId);
+        broadcast(gr);
+        broadcastLobby();
+        break;
+      }
       case "new": {
         const gr = wsRoom.get(ws);
         if (!gr) return;
@@ -609,7 +649,8 @@ wss.on("connection", (ws) => {
         clearTimeout(gr.loopTimer ?? undefined);
         gr.loopTimer = null;
         gr.started = false; // back to the waiting room; the creator must start it again
-        gr.room = new Room(newPlayerIds(gr.playerCount));
+        gr.room = new Room(newPlayerIds(MAX_PLAYERS)); // back to the full 10 display slots --
+        // botEnabledSlots/claimedSeats deliberately persist across a reset for a quick rematch
         gr.room.setLiveUpdateCallback(() => broadcast(gr)); // fresh Room instance -- re-register
         reapplyClaims(gr);
         broadcast(gr);
@@ -628,6 +669,7 @@ wss.on("connection", (ws) => {
         const holder = gr.claimedSeats.get(playerId);
         if (holder && holder !== ws && holder.readyState === WebSocket.OPEN) return; // already taken
         releaseSeatsHeldBy(gr, ws); // switching seats -- release any OTHER seat this socket already held
+        gr.botEnabledSlots.delete(playerId); // claiming a seat overrides any bot toggle on it
         gr.claimedSeats.set(playerId, ws);
         gr.room.setController(playerId, makeHumanController(gr, playerId));
         broadcast(gr);
