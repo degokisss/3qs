@@ -203,9 +203,39 @@ export class Room {
     if (target.hp <= 0) await this.killPlayer(target, sourceRole);
   }
 
-  private async killPlayer(player: GamePlayer, killerRole: Role | null): Promise<void> {
+  private async killPlayer(player: GamePlayer, killerRole: Role | null, killer?: GamePlayer): Promise<void> {
     player.alive = false;
     player.roleShown = true; // Player death always reveals role (BuryVictim)
+
+    // Standard rule: killing a Rebel rewards the killer with 3 cards, regardless of the
+    // killer's own role. Only fires when we know the specific killer (the real combat pipeline
+    // always does; Room.damagePlayer's test-only scripted-damage bypass only has a role to
+    // credit, not a specific player, so this reward doesn't apply there).
+    if (killer?.alive && player.role === Role.Rebel) {
+      this.drawCards(killer, 3);
+      this.log.push(`${killer.id} giết phản tặc ${player.id}, rút 3 lá`);
+    }
+
+    // Standard rule: if the Lord kills a Loyalist (friendly fire), the Lord discards their
+    // entire hand and all equipped cards as punishment.
+    if (killer?.alive && killer.role === Role.Lord && player.role === Role.Loyalist) {
+      const punishedLord: GamePlayer = killer;
+      const equipsLost = [punishedLord.weapon, punishedLord.defenseHorse, punishedLord.offenseHorse].filter((c): c is Card => c !== null);
+      if (punishedLord.hand.length > 0 || equipsLost.length > 0) {
+        this.discardPile.push(...punishedLord.hand, ...equipsLost);
+        punishedLord.hand = [];
+        punishedLord.weapon = null;
+        punishedLord.defenseHorse = null;
+        punishedLord.offenseHorse = null;
+        this.log.push(`${punishedLord.id} (chủ công) giết nhầm trung thần ${player.id}, mất hết bài trên tay và trang bị`);
+        // Xiaoji (Sunshangxiang): draws 2 for each equip of hers that leaves the zone --
+        // fires once per card lost, matching equip()'s per-card trigger elsewhere.
+        const equipCtx = this.makeContext(this.players.filter((p) => p.alive));
+        for (let i = 0; i < equipsLost.length; i++) {
+          for (const skill of punishedLord.skills) await skill.onEquipLost?.(equipCtx, punishedLord);
+        }
+      }
+    }
 
     // Xingshang (Caopi): claims the dead player's hand instead of it going to the discard pile.
     // Automatic (no ask) -- see skill.ts header for why several optional invokes are simplified.
@@ -268,7 +298,7 @@ export class Room {
       rng: this.rng,
       draw: (player, n) => this.drawCards(player, n),
       drawTop: () => this.drawOne(),
-      onDying: (dyingPlayer, killerRole) => this.killPlayer(dyingPlayer, killerRole),
+      onDying: (dyingPlayer, killerRole, killer) => this.killPlayer(dyingPlayer, killerRole, killer),
       onDyingStarted: (dyingPlayer) => this.triggerOnAllyDying(dyingPlayer),
       onDamage: (target, source) => this.triggerOnDamaged(target, source),
       onDamageDealt: (source, target, amount) => this.triggerOnDamageDealt(source, target, amount),

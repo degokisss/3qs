@@ -1460,6 +1460,109 @@ async function testDuelSlashAndGanglieDiscardRespected(): Promise<void> {
   console.log("PASS testDuelSlashAndGanglieDiscardRespected: P1 declined both throughout; other seats did both normally");
 }
 
+/**
+ * Standard rule: killing a Rebel rewards the killer with 3 cards, regardless of the killer's own
+ * role. Drives a real Slash through the Play phase (not `Room.damagePlayer`'s role-only test
+ * bypass) so the actual killer player is threaded through onDying -- proves the reward is keyed
+ * off a specific credited kill, not just "someone died".
+ */
+async function testKillingARebelRewardsTheKillerWithThreeCards(): Promise<void> {
+  const room = new Room(playerIds(8), seededRng(1));
+  await room.pickGenerals();
+  const lord = room.players.find((p) => p.role === Role.Lord)!;
+  const rebel = room.players.find((p) => p.role === Role.Rebel)!;
+  lord.skills = []; // no general hooks to complicate the deterministic hand-count math below
+  lord.maxHp = 10; // generous hand limit -- keeps the post-turn Discard phase from trimming the
+  lord.hp = 10; // reward hand back down before we can assert its exact post-kill size
+  rebel.skills = []; // no onIncomingSlash nullify/redirect to interfere with the guaranteed kill
+  const deck = buildStandardDeck();
+  const slash = deck.find((c) => c.kind === CardKind.Slash)!;
+  const kylinBow = deck.find((c) => c.weaponName === "KylinBow")!; // range 5 -- covers any seat distance on an 8p table
+  lord.hand = [slash];
+  lord.weapon = kylinBow; // guarantees the rebel is a legal slash target regardless of random seating
+  rebel.hp = 1;
+  rebel.hand = []; // no jink -- death guaranteed
+
+  let slashPlayed = false;
+  room.setController(lord.id, {
+    chooseFreeAction: async (_player, legalActions) => {
+      const mySlash = legalActions.find((a) => a.kind === "playCard" && a.cardKind === CardKind.Slash);
+      if (mySlash && !slashPlayed) {
+        slashPlayed = true;
+        return mySlash;
+      }
+      return null;
+    },
+    chooseSlashTarget: async (_actor, candidates) => candidates.find((c) => c.id === rebel.id) ?? null,
+  });
+
+  await room.playTurn(); // the lord acts first
+
+  strict.equal(slashPlayed, true, "test setup: the lord must actually have played the slash");
+  strict.equal(rebel.alive, false, "test setup: the rebel must actually die from the slash");
+  strict.equal(
+    lord.hand.length,
+    2 /* Draw phase: 2 cards */ + 3 /* kill-rebel reward */,
+    "killing a rebel must draw the killer exactly 3 extra cards on top of the normal draw phase",
+  );
+  strict.ok(
+    room.log.includes(`${lord.id} giết phản tặc ${rebel.id}, rút 3 lá`),
+    "the reward must be logged so clients can see why the hand grew",
+  );
+  console.log("PASS testKillingARebelRewardsTheKillerWithThreeCards: killer's hand included the +3 kill-rebel reward");
+}
+
+/**
+ * Standard rule: if the Lord kills a Loyalist (friendly fire), the Lord discards their entire
+ * hand AND every equipped card as punishment. Same real-Slash-through-Play-phase approach as
+ * above, so the punishment is keyed off the actual killer's role, not just "a lord exists".
+ */
+async function testLordKillingALoyalistLosesHandAndEquipment(): Promise<void> {
+  const room = new Room(playerIds(8), seededRng(1));
+  await room.pickGenerals();
+  const lord = room.players.find((p) => p.role === Role.Lord)!;
+  const loyalist = room.players.find((p) => p.role === Role.Loyalist)!;
+  lord.skills = []; // no general hooks (e.g. xiaoji) to complicate the punishment assertions
+  loyalist.skills = []; // no onIncomingSlash nullify/redirect to interfere with the guaranteed kill
+  const deck = buildStandardDeck();
+  const slash = deck.find((c) => c.kind === CardKind.Slash)!;
+  const kylinBow = deck.find((c) => c.weaponName === "KylinBow")!; // range 5 -- covers any seat distance on an 8p table
+  const defenseHorse = deck.find((c) => c.kind === CardKind.Horse && c.horseDelta === 1)!;
+  lord.hand = [slash];
+  lord.weapon = kylinBow; // guarantees the loyalist is a legal slash target regardless of random seating
+  lord.defenseHorse = defenseHorse;
+  loyalist.hp = 1;
+  loyalist.hand = []; // no jink -- death guaranteed
+
+  let slashPlayed = false;
+  room.setController(lord.id, {
+    chooseFreeAction: async (_player, legalActions) => {
+      const mySlash = legalActions.find((a) => a.kind === "playCard" && a.cardKind === CardKind.Slash);
+      if (mySlash && !slashPlayed) {
+        slashPlayed = true;
+        return mySlash;
+      }
+      return null;
+    },
+    chooseSlashTarget: async (_actor, candidates) => candidates.find((c) => c.id === loyalist.id) ?? null,
+  });
+
+  await room.playTurn(); // the lord acts first
+
+  strict.equal(slashPlayed, true, "test setup: the lord must actually have played the slash");
+  strict.equal(loyalist.alive, false, "test setup: the loyalist must actually die from the slash");
+  strict.equal(lord.hand.length, 0, "the lord's entire hand must be discarded as punishment");
+  strict.equal(lord.weapon, null, "the lord's weapon must be discarded as punishment");
+  strict.equal(lord.defenseHorse, null, "the lord's defense horse must be discarded as punishment");
+  strict.ok(room.discardPile.some((c) => c.id === kylinBow.id), "the discarded weapon must land in the discard pile");
+  strict.ok(room.discardPile.some((c) => c.id === defenseHorse.id), "the discarded defense horse must land in the discard pile");
+  strict.ok(
+    room.log.includes(`${lord.id} (chủ công) giết nhầm trung thần ${loyalist.id}, mất hết bài trên tay và trang bị`),
+    "the punishment must be logged so clients can see why the lord's hand/equip vanished",
+  );
+  console.log("PASS testLordKillingALoyalistLosesHandAndEquipment: lord lost hand + weapon + defense horse");
+}
+
 await testRoleDistribution();
 await testPhaseCyclingConservesCards();
 await testRebelKillsLord();
@@ -1498,4 +1601,6 @@ await testHumanControllerOverridesBot();
 await testExpandedControllerHooksRespected();
 await testChooseTrickTargetPicksExactPlayer();
 await testDuelSlashAndGanglieDiscardRespected();
+await testKillingARebelRewardsTheKillerWithThreeCards();
+await testLordKillingALoyalistLosesHandAndEquipment();
 console.log("\nAll Milestone 0-3.9 smoke tests passed.");

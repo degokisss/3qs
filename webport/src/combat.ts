@@ -177,8 +177,13 @@ export interface EngineContext {
    *  it to any player -- for one-off judgment reveals (e.g. Ganglie). Caller must push it to
    *  discardPile when done inspecting it. */
   drawTop: () => Card | null;
-  /** `killerRole` is null for a self-inflicted loss of hp with no credited attacker (e.g. Kurou). */
-  onDying: (player: GamePlayer, killerRole: Role | null) => void;
+  /** `killerRole` is null for a self-inflicted loss of hp with no credited attacker (e.g.
+   *  Kurou). `killer` is the actual player credited with the kill, present exactly when
+   *  `killerRole` is (real Slash/Duel/AOE damage always knows its source) -- absent for
+   *  `loseHp` and for Room.damagePlayer's test-only scripted-damage bypass, which only ever has
+   *  a role to credit, not a specific player, so kill-rewards keyed off a real killer (e.g. "kill
+   *  a Rebel, draw 3") don't fire for those paths. */
+  onDying: (player: GamePlayer, killerRole: Role | null, killer?: GamePlayer) => void;
   /** Fired right after hp is reduced, before the dying/Peach-rescue check -- general skill hooks
    *  on the DAMAGED player (e.g. Ganglie) attach here. */
   onDamage?: (target: GamePlayer, source: GamePlayer) => Promise<void> | void;
@@ -326,7 +331,7 @@ export async function applyDamage(ctx: EngineContext, target: GamePlayer, amount
   ctx.log.push(`${target.id} chịu ${finalAmount} sát thương (máu ${target.hp}/${target.maxHp})`);
   await ctx.onDamage?.(target, source);
   await ctx.onDamageDealt?.(source, target, finalAmount);
-  if (target.hp <= 0) await resolveDying(ctx, target, source.role);
+  if (target.hp <= 0) await resolveDying(ctx, target, source.role, source);
 }
 
 /** Player::loseHp: reduces hp directly (no `onDamage`/`onDamageDealt` skill triggers -- this
@@ -358,7 +363,7 @@ export async function heal(ctx: EngineContext, player: GamePlayer, amount: numbe
  * still <=0 after a successful save's +1, same as the real "keep asking until >0 or nobody can
  * help" loop, until nobody at all can or will help, then gives up and records the death.
  */
-async function resolveDying(ctx: EngineContext, player: GamePlayer, killerRole: Role | null): Promise<void> {
+async function resolveDying(ctx: EngineContext, player: GamePlayer, killerRole: Role | null, killer?: GamePlayer): Promise<void> {
   ctx.log.push(`${player.id} đang hấp hối (máu ${player.hp})`);
   await ctx.onDyingStarted?.(player);
   while (player.hp <= 0) {
@@ -395,5 +400,5 @@ async function resolveDying(ctx: EngineContext, player: GamePlayer, killerRole: 
     }
     if (!rescued) break; // nobody could or would help this round -- give up
   }
-  if (player.hp <= 0) ctx.onDying(player, killerRole);
+  if (player.hp <= 0) ctx.onDying(player, killerRole, killer);
 }
