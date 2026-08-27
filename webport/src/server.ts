@@ -47,6 +47,7 @@ const MIME: Record<string, string> = {
   ".ttf": "font/ttf",
   ".ttc": "font/collection",
   ".ico": "image/x-icon",
+  ".ogg": "audio/ogg",
 };
 
 /** Resolves an incoming HTTP GET to a file on disk, or null for anything not explicitly
@@ -59,6 +60,13 @@ async function serveStatic(url: string): Promise<{ body: Buffer; contentType: st
   } else if (clean.startsWith("/image/") || clean.startsWith("/font/")) {
     filePath = path.join(REPO_ROOT, clean);
     if (!filePath.startsWith(REPO_ROOT + path.sep)) return null; // no escaping above the repo root
+  } else if (clean.startsWith("/audio/")) {
+    // Combat hit sound effects -- a small handful of files restored from git history (the
+    // original audio/ directory was stripped from the repo entirely; see the commit that did
+    // it) into webport/public/audio/, NOT the repo-root pattern above (that original directory
+    // no longer exists on disk at all, only the specific files this client actually plays do).
+    filePath = path.join(PUBLIC_DIR, clean);
+    if (!filePath.startsWith(PUBLIC_DIR + path.sep)) return null; // no escaping above public/
   } else {
     return null;
   }

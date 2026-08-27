@@ -91,6 +91,19 @@
     transition: background 0.15s, color 0.15s;
   }
   #toggleRoleBtn:hover { background: var(--gold-dim); color: var(--ink); }
+  #toggleSoundBtn, #toggleFxBtn {
+    background: transparent;
+    color: var(--gold-dim);
+    border: 1px solid var(--gold-dim);
+    border-radius: 3px;
+    padding: 6px 14px;
+    cursor: pointer;
+    font-family: var(--font-label);
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    transition: background 0.15s, color 0.15s;
+  }
+  #toggleSoundBtn:hover, #toggleFxBtn:hover { background: var(--gold-dim); color: var(--ink); }
   #startGameBtn {
     background: var(--gold);
     color: var(--ink);
@@ -120,6 +133,7 @@
 
   /* --- "your general": a large, prominent panel for the seat you're controlling --- */
   #myHero {
+    position: relative; /* anchors the hit/heal floating-number effect below */
     display: none;
     max-width: 1280px;
     margin: 0 auto 22px;
@@ -430,6 +444,44 @@
   @keyframes candidatePulse {
     0%, 100% { box-shadow: 0 0 0 2px var(--blood), 0 0 20px rgba(163,49,47,0.65); }
     50% { box-shadow: 0 0 0 2px var(--blood), 0 0 34px rgba(163,49,47,0.95); }
+  }
+
+  /* --- combat feedback: one-shot flash/shake/floating +-N number on hp change, triggered
+     client-side by diffing hp between consecutive state broadcasts (see computeHpDeltas /
+     triggerHpEffect in the script below). fxEnabled gates all 3 of these; the damage sound
+     effect is gated independently by soundEnabled (see playSfx). --- */
+  .avatarRing.hitFx, .heroAvatarRing.hitFx { animation: hitFlash 0.55s ease-out; }
+  .avatarRing.healFx, .heroAvatarRing.healFx { animation: healFlash 0.55s ease-out; }
+  .player.shakeFx { animation: shakeX 0.4s ease-in-out; }
+  @keyframes hitFlash {
+    0% { box-shadow: 0 0 0 0 rgba(163,49,47,0); filter: brightness(1) saturate(1); }
+    25% { box-shadow: 0 0 0 4px rgba(163,49,47,0.9), 0 0 22px rgba(163,49,47,0.9); filter: brightness(1.6) saturate(1.4); }
+    100% { box-shadow: 0 0 0 0 rgba(163,49,47,0); filter: brightness(1) saturate(1); }
+  }
+  @keyframes healFlash {
+    0% { box-shadow: 0 0 0 0 rgba(92,201,140,0); filter: brightness(1) saturate(1); }
+    25% { box-shadow: 0 0 0 4px rgba(92,201,140,0.9), 0 0 22px rgba(92,201,140,0.9); filter: brightness(1.5) saturate(1.3); }
+    100% { box-shadow: 0 0 0 0 rgba(92,201,140,0); filter: brightness(1) saturate(1); }
+  }
+  @keyframes shakeX {
+    0%, 100% { transform: translateX(0); }
+    20% { transform: translateX(-6px); }
+    40% { transform: translateX(5px); }
+    60% { transform: translateX(-4px); }
+    80% { transform: translateX(3px); }
+  }
+  .floatDelta {
+    position: absolute; top: 4px; left: 8px; z-index: 5; pointer-events: none;
+    font-family: var(--font-label); font-weight: 700; font-size: 20px; letter-spacing: 0.5px;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.9), 0 0 8px rgba(0,0,0,0.6);
+    animation: floatUp 0.9s ease-out forwards;
+  }
+  .floatDelta.dmg { color: #ff6b64; }
+  .floatDelta.heal { color: #5cc98c; }
+  @keyframes floatUp {
+    0% { opacity: 0; transform: translateY(4px) scale(0.8); }
+    15% { opacity: 1; transform: translateY(-2px) scale(1.15); }
+    100% { opacity: 0; transform: translateY(-34px) scale(1); }
   }
 
   .playerHead { display: flex; gap: 9px; align-items: flex-start; }
@@ -778,6 +830,8 @@
       <span id="roomIdLabel"></span>
       <span id="myseat"></span>
       <button id="toggleRoleBtn" style="display:none" onclick="window.__toggleRole()"></button>
+      <button id="toggleSoundBtn" onclick="window.__toggleSound()"></button>
+      <button id="toggleFxBtn" onclick="window.__toggleFx()"></button>
       <button id="leaveRoom" style="display:none">Rời phòng</button>
       <button id="newGame" style="display:none">Ván mới</button>
     </div>
@@ -893,6 +947,8 @@
     const myHandCardsEl = document.getElementById("myHandCards");
     const freeActionBarEl = document.getElementById("freeActionBar");
     const toggleRoleBtnEl = document.getElementById("toggleRoleBtn");
+    const toggleSoundBtnEl = document.getElementById("toggleSoundBtn");
+    const toggleFxBtnEl = document.getElementById("toggleFxBtn");
     const drawPileBtnEl = document.getElementById("drawPileBtn");
     const drawPileLabelEl = document.getElementById("drawPileLabel");
 
@@ -913,6 +969,26 @@
     // card) so someone sitting/looking nearby can't read it off the screen unless we choose to
     // reveal it. Persisted so the preference survives a reload.
     let hideOwnRole = localStorage.getItem("hideOwnRole") === "1";
+    // Combat feedback preferences -- persisted so they survive a reload, same convention as
+    // hideOwnRole above. Two independent toggles per user request: sound and visual fx separately.
+    let soundEnabled = localStorage.getItem("soundEnabled") !== "0"; // default on
+    let fxEnabled = localStorage.getItem("fxEnabled") !== "0"; // default on
+    const AUDIO = "audio";
+    // Original QSanguosha injure grunts, restored from git history (see webport/README.md's
+    // deploy notes) -- the original engine itself picks one of these at random per hit; reused
+    // here for the same "not always the identical sound" feel. No clean heal SFX asset exists in
+    // the original audio set, so healing only gets the visual effect below, not a sound.
+    const INJURE_SFX = ["system/injure1.ogg", "system/injure2.ogg", "system/injure3.ogg"];
+    function playSfx(relPath) {
+      if (!soundEnabled) return;
+      try {
+        const a = new Audio(`${AUDIO}/${relPath}`);
+        a.volume = 0.55;
+        a.play().catch(() => {}); // blocked until the first user gesture on some browsers -- ignore
+      } catch {
+        // Audio() can throw in some embedded/headless contexts -- never let a sound glitch break rendering
+      }
+    }
 
     function send(obj) {
       if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
@@ -981,6 +1057,26 @@
       if (lastState) render(lastState); // re-render the hero panel + own table card with the new mask state
     };
     updateToggleRoleBtn();
+
+    function updateToggleSoundBtn() {
+      toggleSoundBtnEl.textContent = soundEnabled ? "🔊 Âm thanh" : "🔇 Đã tắt tiếng";
+    }
+    window.__toggleSound = () => {
+      soundEnabled = !soundEnabled;
+      localStorage.setItem("soundEnabled", soundEnabled ? "1" : "0");
+      updateToggleSoundBtn();
+    };
+    updateToggleSoundBtn();
+
+    function updateToggleFxBtn() {
+      toggleFxBtnEl.textContent = fxEnabled ? "✨ Hiệu ứng" : "🚫 Đã tắt hiệu ứng";
+    }
+    window.__toggleFx = () => {
+      fxEnabled = !fxEnabled;
+      localStorage.setItem("fxEnabled", fxEnabled ? "1" : "0");
+      updateToggleFxBtn();
+    };
+    updateToggleFxBtn();
 
     /** Custom hover tooltip for equip icons on the table (replaces the native `title` attribute,
      *  which was slow to appear and easy to miss against this dark theme). Delegated to `tableEl`
@@ -1115,6 +1211,51 @@
       }
     }
 
+    /** Diffs hp per player id between two state snapshots -- returns {id, delta} for anyone
+     *  whose hp actually changed. No dedicated server-side "you took damage" event exists (or is
+     *  needed): the client already gets a full snapshot after nearly every resolved action (see
+     *  onLiveUpdate in room.ts), so comparing consecutive snapshots is enough to drive the
+     *  one-shot combat feedback below. */
+    function computeHpDeltas(prevState, nextState) {
+      if (!prevState || !prevState.players || !nextState || !nextState.players) return [];
+      const out = [];
+      for (const p of nextState.players) {
+        const before = prevState.players.find((q) => q.id === p.id);
+        if (!before || typeof before.hp !== "number" || typeof p.hp !== "number") continue;
+        const delta = p.hp - before.hp;
+        if (delta !== 0) out.push({ id: p.id, delta });
+      }
+      return out;
+    }
+
+    /** Fires the flash/shake/floating-number combat feedback for one player's hp change on
+     *  every DOM spot that currently shows them: their table slot, and (if it's our own seat)
+     *  the big hero panel too. Called right after renderPlayers()/renderHero() rebuild those
+     *  nodes from the new state, so the elements looked up here are always freshly created --
+     *  purely cosmetic, never touches game state. fxEnabled/soundEnabled are independent
+     *  per-user toggles (see the header buttons). */
+    function triggerHpEffect(playerId, delta) {
+      const damage = delta < 0;
+      if (damage) playSfx(INJURE_SFX[Math.floor(Math.random() * INJURE_SFX.length)]);
+      if (!fxEnabled) return;
+      const amountLabel = `${damage ? "" : "+"}${delta}`;
+      const targets = [];
+      const playerCard = tableEl.querySelector(`.player[data-player-id="${playerId}"]`);
+      if (playerCard) targets.push({ card: playerCard, ring: playerCard.querySelector(".avatarRing") });
+      if (playerId === mySeat && myHeroEl.classList.contains("active")) {
+        targets.push({ card: myHeroEl, ring: myHeroEl.querySelector(".heroAvatarRing") });
+      }
+      for (const { card, ring } of targets) {
+        if (ring) ring.classList.add(damage ? "hitFx" : "healFx");
+        if (damage) card.classList.add("shakeFx");
+        const float = document.createElement("span");
+        float.className = `floatDelta ${damage ? "dmg" : "heal"}`;
+        float.textContent = amountLabel;
+        card.appendChild(float);
+        setTimeout(() => float.remove(), 950);
+      }
+    }
+
     /** Weapon/horse icons WITH their effect always visible (not hover-only): weapon shows its
      *  Sát attack range, defense horse shows +1 (others need +1 distance to reach you), offense
      *  horse shows -1 (your distance to others -1) -- so a glance at the icon row says what it
@@ -1189,7 +1330,7 @@
       const onclick = isCandidate ? ` onclick="window.__answer('${p.id}')"` : "";
       const kcolorVar = KINGDOM_VAR[p.kingdom];
       const style = kcolorVar ? ` style="--kcolor:var(${kcolorVar})"` : "";
-      return `<div class="${classes.join(" ")}"${onclick}${style}>
+      return `<div class="${classes.join(" ")}"${onclick}${style} data-player-id="${p.id}">
         <div class="playerHead">
           <div class="avatarRing"><img class="avatar" src="${IMG}/generals/avatar/${p.general}.png" alt="${p.general}"
                onerror="this.parentElement.style.visibility='hidden'"></div>
@@ -1428,6 +1569,7 @@
     };
 
     function render(state) {
+      const prevState = lastState;
       lastState = state;
       amICreator = !!state.isCreator;
       const started = !!state.started;
@@ -1486,6 +1628,9 @@
 
       renderPlayers();
       renderHero(!picking && mySeat ? state.players.find((p) => p.id === mySeat) : null);
+      if (started && !picking) {
+        for (const eff of computeHpDeltas(prevState, state)) triggerHpEffect(eff.id, eff.delta);
+      }
       if (picking) {
         myHandWrapEl.className = ""; // no hand dealt yet during general selection
       } else {
