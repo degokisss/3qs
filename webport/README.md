@@ -1187,7 +1187,7 @@ asset directories this repo already ships: `image/` (~183MB) + `font/` (~6.3MB),
 deployed alongside `webport/` (the server reads them via `../image`, `../font`, i.e. one level
 above `webport/`) -- don't `.gitignore`/prune them out of whatever you deploy.
 
-Three reasonable options, in order of ongoing cost/control tradeoff:
+Four reasonable options, in order of ongoing cost/control tradeoff:
 
 1. **A free-forever VPS: Oracle Cloud "Always Free"** -- genuinely permanent (not a trial),
    real always-on VM, no sleep/cold-start. 200GB disk (dwarfs the ~190MB of bundled assets), and
@@ -1232,6 +1232,33 @@ Three reasonable options, in order of ongoing cost/control tradeoff:
      `process.env.PORT`). Free tiers that DO sleep an idle service (Render, etc.) cold-start on
      the next request -- fine for "play with friends when you're actually online", less fine for
      a server meant to be always-on/joinable at any time.
+
+4. **A machine you already have running 24/7, no VPS/PaaS/domain at all** -- zero setup cost,
+   but the game's uptime is tied to that machine's uptime (sleep, reboot, or the tunnel process
+   dying all take it offline). Good fit for "an always-on home PC I already keep running", incl.
+   one only reachable via a remote-desktop tool like AnyDesk (no SSH needed -- every command
+   below is typed directly into a terminal inside that remote session):
+   - Install Node.js LTS + git (Windows: `winget install OpenJS.NodeJS.LTS` and
+     `winget install Git.Git`; macOS: `brew install node git`; Linux: your distro's package
+     manager), then `git clone` this repo, `cd webport && npm install && npm run build`.
+   - Install `ngrok` (Windows: `winget install ngrok.ngrok`; macOS: `brew install ngrok`; Linux:
+     see ngrok.com/download) -- a tunnel client that exposes a `localhost` port to a public HTTPS
+     URL without opening any port on the machine's own firewall/router (works fine from behind
+     NAT/CGNAT, e.g. a home connection with no public IP).
+   - Sign up free at `dashboard.ngrok.com/signup` (no card needed), copy the authtoken from
+     `dashboard.ngrok.com/get-started/your-authtoken`, run `ngrok config add-authtoken <token>`.
+     Optional but recommended: **Domains -> Create Domain** for one free static subdomain (e.g.
+     `your-name.ngrok-free.app`) so the link never changes across restarts -- otherwise a plain
+     `ngrok http` session gets a new random URL every time.
+   - Run the server (`node dist/server.js`, or `npm run server` if keeping the `tsx`/TypeScript
+     path instead of building) in one terminal, `ngrok http --domain=your-name.ngrok-free.app
+     8787` (or plain `ngrok http 8787` without a static domain) in a second terminal, both left
+     open. ngrok prints the public `Forwarding https://...` URL to share.
+   - Disconnecting the remote-desktop session does **not** stop either process -- they keep
+     running in the still-logged-in OS session. What DOES take the game offline: the machine
+     sleeping (Windows: Settings -> System -> Power & battery -> set sleep to Never), a reboot
+     (schedule both commands as an "At log on" Task Scheduler job / login item / systemd user
+     service to auto-resume), or closing either terminal window.
 
 Either way, once it's reachable at `https://your-domain/`, anyone who opens that URL lands in the
 same shared room lobby and can create/join rooms together -- no separate client install, nothing
