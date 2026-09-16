@@ -122,6 +122,11 @@ export interface Controller {
    *  the pile; everything else stays on top in its original relative order. Returns the ids of
    *  cards to bury -- an empty set leaves the pile untouched. */
   chooseGuanxingBottom(player: GamePlayer, revealed: Card[]): Promise<Set<number>>;
+  /** Guicai (Sima Yi): `player` may replace an in-progress judgment's `currentCard` (owned by
+   *  `judgeOwner`, for skill `reason`) with a card from their own hand (a "retrial"). Return
+   *  the chosen card (must be present in `player.hand`) or null to decline. Only ever called
+   *  when `player.hand.length > 0`. */
+  wantsToUseGuicai(player: GamePlayer, judgeOwner: GamePlayer, currentCard: Card, reason: string): Promise<Card | null>;
   /** End-of-turn Discard phase: `player`'s hand exceeds their card limit by exactly `count`.
    *  Return exactly `count` distinct cards currently in `player.hand` to discard. Room falls
    *  back to `pickLeastImportantCards` if this returns something invalid (wrong length, or
@@ -234,6 +239,12 @@ export function makeBotController(rng: () => number): Controller {
       // "known/valuable resource" preferences instead of leaving the pile untouched.
       const buryCount = Math.floor(revealed.length / 2);
       return new Set(pickLeastImportantCards(revealed, buryCount).map((c) => c.id));
+    },
+    async wantsToUseGuicai() {
+      // No alignment-aware AI to judge whether flipping a given judgment helps or hurts
+      // `judgeOwner` (same "naive, no ally/enemy inference" limitation as the combat bot) --
+      // always declines rather than guess, matching this policy's other no-real-strategy defaults.
+      return null;
     },
     async chooseDiscards(player, count) {
       // Discard the least valuable cards (see pickLeastImportantCards) instead of an arbitrary

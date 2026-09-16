@@ -310,6 +310,11 @@ export interface EngineContext {
    *  skill.ts's header for why). Returns the ids of cards to bury; an empty result leaves the
    *  pile exactly as `peekTop` found it. */
   askGuanxingBottom: (player: GamePlayer, revealed: Card[]) => Promise<Set<number>>;
+  /** Guicai (Sima Yi): `player` may replace an in-progress judgment's `currentCard` (owned by
+   *  `judgeOwner`, for skill `reason`) with a card from their own hand (a "retrial" --
+   *  bổ sung phán đoán). Returns the chosen replacement card (already confirmed present in
+   *  `player.hand`) or null to decline. Only ever called when `player.hand.length > 0`. */
+  askGuicaiRetrial: (player: GamePlayer, judgeOwner: GamePlayer, currentCard: Card, reason: string) => Promise<Card | null>;
 }
 
 /** Resolves one Slash from `attacker` at `target`: Jink cancels it, otherwise 1 damage + dying check. */

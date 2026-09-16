@@ -340,6 +340,8 @@ export class Room {
       peekTop: (n) => this.peekTop(n),
       arrangeTop: (top, bottom) => this.arrangeTop(top, bottom),
       askGuanxingBottom: (player, revealed) => this.controllers.get(player.id)!.chooseGuanxingBottom(player, revealed),
+      askGuicaiRetrial: (player, judgeOwner, currentCard, reason) =>
+        this.controllers.get(player.id)!.wantsToUseGuicai(player, judgeOwner, currentCard, reason),
     };
   }
 

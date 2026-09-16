@@ -1207,7 +1207,43 @@ function makeTestContext(alivePlayers: GamePlayer[], log: string[], drawTop: () 
     peekTop: () => [],
     arrangeTop: () => {},
     askGuanxingBottom: async () => new Set<number>(),
+    askGuicaiRetrial: async () => null,
   };
+}
+
+/**
+ * Guicai (Sima Yi) proof: applies to ANY judgment, not just his own -- here overriding Ganglie's
+ * judgment on a DIFFERENT player (Xiahoudun). The naive bot policy always declines Guicai (no
+ * alignment-aware AI to judge whether flipping a given judgment helps or hurts), so this can
+ * never be log-mined from ordinary bot-vs-bot play; driven directly with a controller that
+ * always accepts, forcing the drawn judgment card to be a non-heart (Ganglie's "bad" result)
+ * and the retrial card to be a heart (which would cancel Ganglie's punishment).
+ */
+async function testGuicaiRetrialsAnotherPlayersJudgment(): Promise<void> {
+  const xiahoudun = new GamePlayer("XHD");
+  xiahoudun.skills = [SKILLS.ganglie];
+  const simayi = new GamePlayer("SMY");
+  simayi.skills = [SKILLS.guicai];
+  const source = new GamePlayer("SRC");
+  source.hand = []; // <2 cards -> ganglie's punishment (if not overridden) deals 1 damage, no discard-choice ask
+
+  const deck = buildStandardDeck();
+  const badJudgeCard = deck.find((c) => c.suit !== Suit.Heart)!; // triggers ganglie's punishment branch
+  const retrialCard = deck.find((c) => c.suit === Suit.Heart && c.id !== badJudgeCard.id)!; // would cancel it
+  simayi.hand = [retrialCard];
+
+  const log: string[] = [];
+  const ctx = makeTestContext([xiahoudun, simayi, source], log, () => badJudgeCard);
+  ctx.askGuicaiRetrial = async () => retrialCard;
+
+  await SKILLS.ganglie.onDamaged!(ctx, xiahoudun, source, Math.random);
+
+  strict.ok(log.some((l) => l.includes("dùng Quỷ Tài")), "guicai's retrial must be logged");
+  strict.equal(source.hp, source.maxHp, "the retrial's red result must cancel ganglie's punishment -- the original bad card was overridden");
+  strict.ok(!simayi.hand.includes(retrialCard), "the retrial card must be spent from simayi's hand");
+  strict.ok(ctx.discardPile.includes(badJudgeCard), "the original overridden judgment card must be voided to the discard pile");
+  strict.ok(ctx.discardPile.includes(retrialCard), "the retrial card itself must also end up in the discard pile");
+  console.log("PASS testGuicaiRetrialsAnotherPlayersJudgment: sima yi's retrial overrode xiahoudun's ganglie judgment, cancelling its punishment");
 }
 
 /**
@@ -1628,6 +1664,7 @@ testMashuReducesDistance();
 await testSavageAssaultAvoidImmunity();
 await testDismantlementSnatchCanTargetEquipmentAndRespectChoice();
 await testSavageAssaultAndArcheryAttackAreAChoice();
+await testGuicaiRetrialsAnotherPlayersJudgment();
 await testTieqiBlocksDodge();
 await testViewAsJinkDodges();
 await testLiegongBlocksJink();

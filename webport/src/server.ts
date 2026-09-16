@@ -397,6 +397,14 @@ function makeHumanController(gr: GameRoom, playerId: string): Partial<Controller
         new Set<number>(), // fallback on timeout/disconnect: leave the pile untouched (nothing buried), matching
         // wantsToPlayTrick's "silent human passes" policy -- this ask is optional, never forced
       ),
+    wantsToUseGuicai: (player, judgeOwner, currentCard, reason) =>
+      askClient(
+        gr,
+        playerId,
+        { type: "chooseGuicaiRetrial", actorId: playerId, judgeOwnerId: judgeOwner.id, currentCard, reason, hand: player.hand },
+        (msg) => (msg.cardId == null ? null : (player.hand.find((c) => c.id === msg.cardId) ?? null)),
+        null, // fallback on timeout/disconnect: decline, matching wantsToPlayTrick's "silent human passes" policy
+      ),
     choosePickCard: (_player, candidates) =>
       askClient(
         gr,
