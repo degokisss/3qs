@@ -121,15 +121,21 @@ function generateRoomId(): string {
   return id;
 }
 
-function scheduleLoop(gr: GameRoom): void {
+function scheduleLoop(gr: GameRoom, room: Room): void {
   gr.loopTimer = setTimeout(async () => {
-    if (!rooms.has(gr.id)) return; // torn down while this callback was queued
-    if (!gr.room.gameOver) {
-      await gr.room.playTurn();
+    // Stop entirely (do NOT reschedule) once this loop's room is no longer the room the game
+    // room is actually pointing at -- e.g. "new" reset gr.room to a fresh, ungenerated Room
+    // while `await room.playTurn()` below was still in flight on the OLD room. Without this
+    // check the unconditional `scheduleLoop(gr, room)` at the bottom would keep re-arming
+    // itself against whatever `gr.room` becomes, eventually calling playTurn() on a room that
+    // never went through pickGenerals() and crashing the whole process.
+    if (!rooms.has(gr.id) || gr.room !== room) return;
+    if (!room.gameOver) {
+      await room.playTurn();
       broadcast(gr);
       broadcastLobby(); // the room's turnNumber/gameOver summary changed
     }
-    scheduleLoop(gr);
+    scheduleLoop(gr, room);
   }, TURN_INTERVAL_MS);
 }
 
@@ -174,6 +180,10 @@ function roomSummary(gr: GameRoom) {
     turnNumber: gr.room.turnNumber,
     gameOver: !!gr.room.gameOver,
     started: gr.started,
+    // Mirrors the per-room `pickingGenerals` flag (see the personalized room-state builder
+    // below): true once `startGame` fired but before every seat has a general, so the lobby
+    // list can show "Đang chọn tướng" distinctly from "Đang chơi" / "Đang chờ".
+    pickingGenerals: gr.started && gr.room.players.some((p) => !p.general),
   };
 }
 
@@ -710,9 +720,11 @@ wss.on("connection", (ws) => {
         // must NOT schedule the turn loop against whatever DIFFERENT (fresh, ungenerated) Room
         // gr.room now points to -- that was the exact crash: playTurn() throwing because
         // pickGenerals() never ran on the room the loop actually started ticking against.
+        // scheduleLoop itself re-checks `gr.room === room` on every tick (see its own comment)
+        // so a LATER reset can't hijack this loop onto a fresh room either.
         void (async () => {
           await room.pickGenerals(() => broadcast(gr)); // broadcasts before/after every pick
-          if (gr.room === room) scheduleLoop(gr); // only start the loop if still the current room
+          if (gr.room === room) scheduleLoop(gr, room); // only start the loop if still the current room
         })();
         break;
       }
@@ -735,6 +747,10 @@ wss.on("connection", (ws) => {
       case "new": {
         const gr = wsRoom.get(ws);
         if (!gr) return;
+        if (gr.creatorWs !== ws) {
+          ws.send(JSON.stringify({ type: "error", message: "Chỉ người tạo phòng mới có thể bắt đầu ván mới." }));
+          return;
+        }
         releaseSeatsHeldBy(gr, ws); // don't carry a stale claim's socket-specific state across resets
         clearTimeout(gr.loopTimer ?? undefined);
         gr.loopTimer = null;
