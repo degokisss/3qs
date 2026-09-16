@@ -959,14 +959,14 @@ export const GENERALS: GeneralDef[] = [
   { name: "guanyu", displayName: "Quan Vũ", kingdom: "shu", maxHp: 5, skillNames: ["wusheng"] },
   { name: "xiahoudun", displayName: "Hạ Hầu Đôn", kingdom: "wei", maxHp: 4, skillNames: ["ganglie"] },
   { name: "zhaoyun", displayName: "Triệu Vân", kingdom: "shu", maxHp: 4, skillNames: ["longdan"] },
-  { name: "zhenji", displayName: "Chân Cơ", kingdom: "wei", maxHp: 3, skillNames: ["qingguo"], gender: "female" },
+  { name: "zhenji", displayName: "Chân Cơ", kingdom: "wei", maxHp: 3, skillNames: ["qingguo"], gender: "female" }, // Luoshen deferred, needs judge-area/retrial system
   { name: "zhugeliang", displayName: "Gia Cát Lượng", kingdom: "shu", maxHp: 3, skillNames: ["kongcheng", "guanxing"] },
-  { name: "machao", displayName: "Mã Siêu", kingdom: "shu", maxHp: 4, skillNames: ["tieqi"] }, // Mashu ported below under pangde/mateng's shared skill
+  { name: "machao", displayName: "Mã Siêu", kingdom: "shu", maxHp: 4, skillNames: ["tieqi", "mashu"] },
   { name: "simayi", displayName: "Tư Mã Ý", kingdom: "wei", maxHp: 3, skillNames: ["fankui"] }, // Guicai deferred, needs judge-area/retrial system
   { name: "huanggai", displayName: "Hoàng Cái", kingdom: "wu", maxHp: 4, skillNames: ["kurou"] },
   { name: "luxun", displayName: "Lục Tốn", kingdom: "wu", maxHp: 3, skillNames: ["qianxun"] }, // Duoshi deferred, needs a 2nd viewAs-Slash-limit skill slot
   { name: "weiyan", displayName: "Ngụy Diên", kingdom: "shu", maxHp: 4, skillNames: ["kuanggu"] },
-  { name: "caocao", displayName: "Tào Tháo", kingdom: "wei", maxHp: 4, skillNames: ["jianxiong"] },
+  { name: "caocao", displayName: "Tào Tháo", kingdom: "wei", maxHp: 4, skillNames: ["jianxiong"] }, // Hujia deferred, needs letting another same-kingdom player substitute a card play on your behalf
   { name: "zhouyu", displayName: "Chu Du", kingdom: "wu", maxHp: 3, skillNames: ["yingzi"] }, // Fanjian deferred, needs a suit-guessing UI ask
   { name: "ganning", displayName: "Cam Ninh", kingdom: "wu", maxHp: 4, skillNames: ["qixi"] },
   { name: "huangyueying", displayName: "Hoàng Nguyệt Anh", kingdom: "shu", maxHp: 3, skillNames: ["jizhi", "qicai"], gender: "female" },
