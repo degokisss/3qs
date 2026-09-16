@@ -14,7 +14,7 @@
 // with no matching skill, so the single-Jink/no-redirect path used by every earlier general is
 // byte-for-byte unchanged.
 
-import { Card, CardKind } from "./card.js";
+import { Card, CardKind, Suit } from "./card.js";
 import { GamePlayer } from "./player.js";
 import { isAlly } from "./gamerule.js";
 
@@ -198,6 +198,32 @@ export function allDuelLikeCards(player: GamePlayer): Card[] {
   return cards;
 }
 
+/** A real Indulgence card, or (e.g. Daqiao's Guose) the first card some skill allows viewing
+ *  as one. */
+export function findIndulgenceLikeCard(player: GamePlayer): Card | null {
+  const real = player.hand.find((c) => c.kind === CardKind.Indulgence);
+  if (real) return real;
+  for (const skill of player.skills) {
+    if (!skill.canViewAsIndulgence) continue;
+    const viewed = player.hand.find((c) => skill.canViewAsIndulgence!(c, player));
+    if (viewed) return viewed;
+  }
+  return null;
+}
+
+/** Every real Indulgence card plus every card a skill allows viewing as one (e.g. Guose) --
+ *  see `allSlashLikeCards`'s header for why this exists alongside `findIndulgenceLikeCard`. */
+export function allIndulgenceLikeCards(player: GamePlayer): Card[] {
+  const cards = player.hand.filter((c) => c.kind === CardKind.Indulgence);
+  for (const skill of player.skills) {
+    if (!skill.canViewAsIndulgence) continue;
+    for (const c of player.hand) {
+      if (c.kind !== CardKind.Indulgence && skill.canViewAsIndulgence(c, player) && !cards.includes(c)) cards.push(c);
+    }
+  }
+  return cards;
+}
+
 /** True if any of `player`'s skills (e.g. Kongcheng) make them immune to Slash/Duel targeting right now. */
 export function isImmuneToSlashAndDuel(player: GamePlayer): boolean {
   return player.skills.some((skill) => skill.immuneToSlashAndDuel?.(player));
@@ -315,6 +341,77 @@ export interface EngineContext {
    *  bổ sung phán đoán). Returns the chosen replacement card (already confirmed present in
    *  `player.hand`) or null to decline. Only ever called when `player.hand.length > 0`. */
   askGuicaiRetrial: (player: GamePlayer, judgeOwner: GamePlayer, currentCard: Card, reason: string) => Promise<Card | null>;
+  /** Generic "pick exactly `count` cards from your own hand" ask -- reuses the same
+   *  Controller method / client UI as the end-of-turn Discard phase (`chooseDiscards`), for
+   *  self-paid multi-card costs elsewhere (e.g. Jieyin, Dimeng). Falls back to
+   *  `pickLeastImportantCards` on an invalid response, same defensive behavior as the Discard
+   *  phase itself. Returns fewer than `count` only if `player` doesn't hold that many. */
+  askChooseDiscards: (player: GamePlayer, count: number) => Promise<Card[]>;
+  /** Zhijian (Erzhang): equips `card` (already detached from its owner's hand by the caller)
+   *  onto `target`'s matching slot (weapon, or the appropriate horse by `horseDelta`) --
+   *  identical mechanics to a player equipping their own card (discards whatever was there,
+   *  fires `onEquipLost` on `target`), just retargetable to someone other than the card's
+   *  original owner. */
+  equipPlayer: (target: GamePlayer, card: Card) => Promise<void>;
+}
+
+/** Vietnamese card-suit names for judge-card log lines (Ganglie/Tieqi/Shuangxiong/Leiji/Beige/
+ *  Indulgence). Lives here (not skill.ts) so `judge()` below can be shared by both skill.ts
+ *  (self-triggered judgments) and trick.ts (delayed-trick judge-area judgments) without a
+ *  circular import -- trick.ts already imports from combat.ts, and skill.ts imports from
+ *  trick.ts (`resolveDuel`), so `judge` can't live in either of those two without creating a
+ *  cycle; combat.ts is the shared base both already depend on. */
+export const SUIT_LABEL_VI: Record<Suit, string> = {
+  [Suit.Spade]: "Bích",
+  [Suit.Heart]: "Cơ",
+  [Suit.Club]: "Chuồn",
+  [Suit.Diamond]: "Rô",
+};
+
+/** Player::judge equivalent: draws the top card as a judgment for `judgeOwner` (skill `reason`,
+ *  used only for the retrial log line), then gives every alive player's `onJudgment` skills
+ *  (e.g. Sima Yi's Guicai) a chance to replace the result with a card from their own hand -- a
+ *  "retrial" (bổ sung phán đoán), which the REAL Sanguosha rule applies to EVERY judgment, not
+ *  just delayed-trick judge-area ones, so this wraps every implemented judgment site uniformly
+ *  instead of hardcoding Guicai into each one. The original drawn card, and any card
+ *  overridden by a later retrial, are immediately voided to the discard pile; only the FINAL
+ *  effective card is returned, for the caller to dispose of per their own skill's rule (most
+ *  discard it after logging, ideally via `disposeJudgmentCard` below so Tiandu can claim it;
+ *  Shuangxiong instead gives it to the judged player's hand unconditionally). Returns null if
+ *  the draw pile is exhausted. */
+export async function judge(ctx: EngineContext, judgeOwner: GamePlayer, reason: string): Promise<Card | null> {
+  let effective = ctx.drawTop();
+  if (!effective) return null;
+  for (const p of ctx.alivePlayers) {
+    for (const skill of p.skills) {
+      if (!skill.onJudgment || p.hand.length === 0) continue;
+      const retrial = await skill.onJudgment(ctx, p, judgeOwner, effective, reason);
+      if (!retrial) continue;
+      const idx = p.hand.indexOf(retrial);
+      if (idx === -1) continue; // defensive: a misbehaving controller named a card not actually held
+      p.hand.splice(idx, 1);
+      ctx.discardPile.push(effective); // the overridden card is voided
+      ctx.log.push(`${p.id} dùng ${skill.displayName}, thay phán quyết bằng ${SUIT_LABEL_VI[retrial.suit]} ${retrial.point}`);
+      effective = retrial;
+    }
+  }
+  return effective;
+}
+
+/** Disposes of a resolved judgment card (from `judge()` above) to the discard pile, unless
+ *  `judgeOwner`'s own skill claims it into their hand instead (e.g. Guojia's Tiandu -- "after
+ *  your judgment takes effect, you may take it"). Only relevant when `judgeOwner` actually owns
+ *  a `claimsOwnJudgment`-style skill; a no-op discard otherwise. */
+export async function disposeJudgmentCard(ctx: EngineContext, judgeOwner: GamePlayer, card: Card): Promise<void> {
+  for (const skill of judgeOwner.skills) {
+    if (!skill.claimsOwnJudgment) continue;
+    if (await skill.claimsOwnJudgment(ctx, judgeOwner)) {
+      judgeOwner.hand.push(card);
+      ctx.log.push(`${judgeOwner.id} thu lấy kết quả phán xét (tiandu)`);
+      return;
+    }
+  }
+  ctx.discardPile.push(card);
 }
 
 /** Resolves one Slash from `attacker` at `target`: Jink cancels it, otherwise 1 damage + dying check. */
@@ -422,6 +519,13 @@ export async function resolveSlash(
   }
 
   const damageDealt = await applyDamage(ctx, effectiveTarget, 1 + analepticBonus, attacker);
+  // Lieren (Zhurong): fired on the ATTACKER's skills specifically after a SLASH (not
+  // Duel/AOE/skill-inflicted) they played deals damage -- distinct from the generic
+  // `onDamageDealt` (which also fires for every other damage source) for the same reason
+  // KylinBow/DoubleSword/Triblade below are resolved here instead of as onDamageDealt hooks.
+  if (damageDealt) {
+    for (const skill of attacker.skills) await skill.onSlashDamageDealt?.(ctx, attacker, effectiveTarget);
+  }
 
   // Kylin Bow (weapon): resolved here (Slash-specific), not as a generic onDamageDealt hook,
   // since Duel/AOE damage must NOT trigger it -- the card's official wording is specifically
@@ -545,6 +649,14 @@ async function resolveDying(ctx: EngineContext, player: GamePlayer, killer?: Gam
       await heal(ctx, player, 1);
       ctx.log.push(`${player.id} dùng ${vnLabel} để hồi phục (máu ${player.hp}/${player.maxHp})`);
       continue;
+    }
+
+    // Wansha (Jiaxu): locked skill -- while it's Jiaxu's own turn, every OTHER alive player is
+    // barred from playing Peach to rescue whoever's dying (self-rescue above is unaffected).
+    const wanshaActive = ctx.alivePlayers.some((p) => p.skills.some((s) => s.suppressesAllyRescue?.(p)));
+    if (wanshaActive) {
+      ctx.log.push(`${player.id} không ai có thể cứu (wansha)`);
+      break;
     }
 
     // Self-rescue declined/unavailable -- offer every OTHER alive player one chance each, in

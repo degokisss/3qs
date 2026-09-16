@@ -9,9 +9,13 @@
 // Room. Kinds present in the real source but NOT YET resolvable are explicitly excluded here
 // rather than silently dropped:
 //   Trick: IronChain(x3), FireAttack(x2), Collateral(x1), Nullification(x1), HegNullification(x2),
-//     AwaitExhausted(x2), KnownBoth(x2), BefriendAttacking(x1), Indulgence(x2), SupplyShortage(x2),
-//     Lightning(x1) -- all need the delayed-trick/judge-area system or a reactive counter-play
-//     stack (respond-with-Nullification-to-a-trick-in-flight), neither of which exists yet.
+//     AwaitExhausted(x2), KnownBoth(x2), BefriendAttacking(x1), SupplyShortage(x2), Lightning(x1)
+//     -- all need the delayed-trick/judge-area system or a reactive counter-play stack
+//     (respond-with-Nullification-to-a-trick-in-flight), neither of which exists yet.
+//     Indulgence WAS in this list too -- now implemented (Guojia's Tiandu needed at least 1
+//     delayed trick to ever have anything to claim); see room.ts's judgeArea/runJudgePhase and
+//     trick.ts's resolveIndulgenceJudgment. Still no Nullification counter-play window (same
+//     precedent already accepted for every other targeted trick in this engine).
 //   Equip: EightDiagram/RenwangShield/Vine/SilverLion (all 4 Standard armors) -- need the
 //     trigger/skill system (judgment-based dodge, locked damage immunity, etc.)
 // AmazingGrace/GodSalvation/ArcheryAttack are constructed with no suit/point in the source
@@ -40,6 +44,7 @@ export enum CardKind {
   ExNihilo = "ex_nihilo",
   Snatch = "snatch",
   Dismantlement = "dismantlement",
+  Indulgence = "indulgence",
   Weapon = "weapon",
   Horse = "horse",
 }
@@ -109,6 +114,12 @@ function implementedTrickCards(): Card[] {
     card(CardKind.ExNihilo, H, 7), card(CardKind.ExNihilo, H, 8),
     card(CardKind.Snatch, S, 3), card(CardKind.Snatch, S, 4), card(CardKind.Snatch, D, 3),
     card(CardKind.Dismantlement, S, 3), card(CardKind.Dismantlement, S, 4), card(CardKind.Dismantlement, H, 12),
+    // Real Sanguosha standard ships 3 (Club 6/Heart 6/Spade 6, deliberately no Diamond so
+    // Guose's Diamond-only viewAs conversion is the only way to get a diamond-suited one) --
+    // this repo's dev-branch source only carries 2, per this file's header; picking 2 of the 3
+    // real suit/point combos (suit has no functional effect either way -- only the freshly
+    // drawn judgment card's suit matters, never the Indulgence card's own).
+    card(CardKind.Indulgence, C, 6), card(CardKind.Indulgence, S, 6),
   ];
 }
 
@@ -146,7 +157,7 @@ function equipCards(): Card[] {
   return [...weapons, ...horses];
 }
 
-/** Full deck actually dealt by Room: basics + the implemented trick/equip subset (85 cards). */
+/** Full deck actually dealt by Room: basics + the implemented trick/equip subset (87 cards). */
 export function buildStandardDeck(): Card[] {
   return [...basicCards(), ...implementedTrickCards(), ...equipCards()];
 }

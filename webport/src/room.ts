@@ -1,7 +1,7 @@
 // Authoritative game-state container. Structurally mirrors src/server/room.cpp (Room) +
 // src/server/gamerule.cpp (GameRule::onPhaseProceed) for the parts implemented so far:
-// per-player phase cycling, draw-pile/discard-pile card flow, and death -> win-condition checks.
-// Combat (Slash/Jink/Duel/...) and skills are wired in; delayed tricks/judge-area, armors, and
+// per-player phase cycling, draw-pile/discard-pile card flow, death -> win-condition checks,
+// and (Indulgence only, for Guojia's Tiandu) delayed-trick judge-area resolution. Armors and
 // several other subsystems are still out of scope -- see webport/README.md roadmap.
 
 import { Card, CardKind, Suit, buildStandardDeck, shuffle } from "./card.js";
@@ -12,18 +12,22 @@ import {
   EngineContext,
   allDismantlementLikeCards,
   allDuelLikeCards,
+  allIndulgenceLikeCards,
   allSlashLikeCards,
   findDismantlementLikeCard,
   findDuelLikeCard,
+  findIndulgenceLikeCard,
   findSlashLikeCard,
   heal,
   resolveSlash,
 } from "./combat.js";
-import { GENERALS, GeneralDef, SKILLS } from "./skill.js";
+import { GENERALS, GeneralDef, SKILLS, routeDiscard } from "./skill.js";
 import { Controller, FreeAction, makeBotController, pickLeastImportantCards, slashCandidates } from "./controller.js";
 import {
+  attachIndulgence,
   dismantlementCandidates,
   duelCandidates,
+  indulgenceCandidates,
   resolveAmazingGrace,
   resolveAnalepticBuff,
   resolveArcheryAttack,
@@ -31,6 +35,7 @@ import {
   resolveDuel,
   resolveExNihilo,
   resolveGodSalvation,
+  resolveIndulgenceJudgment,
   resolvePeachSelfHeal,
   resolveSavageAssault,
   resolveSnatch,
@@ -38,12 +43,14 @@ import {
 } from "./trick.js";
 
 // Vietnamese labels for the trick kinds tryPlayTargeted's viewAs/weimu-immune log lines embed --
-// mirrors the client's own TRICK_LABEL (public/index.html); only Dismantlement/Snatch/Duel ever
-// reach tryPlayTargeted, so those are the only entries needed here.
+// mirrors the client's own TRICK_LABEL (public/index.html); Dismantlement/Snatch/Duel/
+// Indulgence are the only entries needed here (the only trick kinds any tryPlay* method embeds
+// a label for).
 const TRICK_LABEL_VI: Partial<Record<CardKind, string>> = {
   [CardKind.Dismantlement]: "Quá Hạ Sách Kiều",
   [CardKind.Snatch]: "Thuận Thủ Khiên Dương",
   [CardKind.Duel]: "Quyết Đấu",
+  [CardKind.Indulgence]: "Lạc Bất Tư Thục",
 };
 
 export class Room {
@@ -62,6 +69,9 @@ export class Room {
   pickTurnPlayerId: string | null = null;
   /** Fired right after an equip resolves (weapon/horse) -- see `setLiveUpdateCallback`. */
   private onLiveUpdate: (() => void) | null = null;
+  /** Fangquan (Liushan): players queued for an immediate extra turn, consumed before the
+   *  normal seat rotation (`currentIndex`) resumes -- see `playTurn()`. */
+  private extraTurnQueue: GamePlayer[] = [];
 
   constructor(playerIds: string[], rng: () => number = Math.random) {
     if (playerIds.length < 5 || playerIds.length > 10) {
@@ -198,13 +208,17 @@ export class Room {
     const distinctHeld = [...new Set(chosen)].filter((c) => player.hand.includes(c));
     const discarded = distinctHeld.length === over ? distinctHeld : pickLeastImportantCards(player.hand, over);
     for (const c of discarded) player.hand.splice(player.hand.indexOf(c), 1);
-    this.discardPile.push(...discarded);
+    const ctx = this.makeContext(this.players.filter((p) => p.alive));
+    for (const c of discarded) await routeDiscard(ctx, player, c);
     this.log.push(`${player.id} bỏ ${discarded.length} lá bài (giới hạn bài ${player.maxCards})`);
 
-    // Guzheng (Erzhang): every OTHER alive player may claim one of these discarded cards.
+    // Guzheng (Erzhang): every OTHER alive player may claim one of these discarded cards --
+    // only cards that actually landed in the discard pile (Lirang may have redirected some
+    // straight to another player's hand instead, never touching the pile at all).
+    const actuallyDiscarded = discarded.filter((c) => this.discardPile.includes(c));
     for (const p of this.players.filter((p) => p.alive && p !== player)) {
       for (const skill of p.skills) {
-        await skill.onOtherPlayerOverDiscard?.(this.makeContext(this.players.filter((p) => p.alive)), p, player, discarded, this.rng);
+        await skill.onOtherPlayerOverDiscard?.(ctx, p, player, actuallyDiscarded, this.rng);
       }
     }
     this.onLiveUpdate?.();
@@ -342,6 +356,14 @@ export class Room {
       askGuanxingBottom: (player, revealed) => this.controllers.get(player.id)!.chooseGuanxingBottom(player, revealed),
       askGuicaiRetrial: (player, judgeOwner, currentCard, reason) =>
         this.controllers.get(player.id)!.wantsToUseGuicai(player, judgeOwner, currentCard, reason),
+      askChooseDiscards: async (player, count) => {
+        if (count <= 0 || player.hand.length === 0) return [];
+        const n = Math.min(count, player.hand.length);
+        const chosen = await this.controllers.get(player.id)!.chooseDiscards(player, n);
+        const distinctHeld = [...new Set(chosen)].filter((c) => player.hand.includes(c));
+        return distinctHeld.length === n ? distinctHeld : pickLeastImportantCards(player.hand, n);
+      },
+      equipPlayer: (target, card) => this.equip(target, card),
     };
   }
 
@@ -469,6 +491,47 @@ export class Room {
     }
 
     await resolve(card, target, alive);
+    for (const skill of player.skills) await skill.onTrickPlayed?.(this.makeContext(alive), player, kind);
+    this.onLiveUpdate?.();
+  }
+
+  /** Like `tryPlayTargeted`, but for delayed tricks (currently only Indulgence): the played
+   *  card is NOT discarded immediately -- it's ATTACHED to the target's judge area instead
+   *  (`attach`), to actually resolve later during the target's own Judge phase (see
+   *  `runJudgePhase`). Shares the same Weimu (black-trick immunity) and `chooseTrickTarget`
+   *  gating as `tryPlayTargeted`. */
+  private async tryPlayDelayedTrick(
+    player: GamePlayer,
+    kind: CardKind,
+    candidatesFor: (alive: GamePlayer[]) => GamePlayer[],
+    attach: (card: Card, target: GamePlayer, alive: GamePlayer[]) => void,
+    findCard: (player: GamePlayer) => Card | null = (p) => p.hand.find((c) => c.kind === kind) ?? null,
+  ): Promise<void> {
+    if (this.gameOver || !player.alive) return;
+    const card = findCard(player);
+    if (!card) return;
+    const alive = this.players.filter((p) => p.alive);
+    const candidates = candidatesFor(alive);
+    if (candidates.length === 0) return;
+    const target = await this.controllers.get(player.id)!.chooseTrickTarget(player, kind, candidates);
+    if (!target) return;
+
+    const blackTrickBlocked =
+      (card.suit === Suit.Spade || card.suit === Suit.Club) && target.skills.some((s) => s.immuneToBlackTrick?.(target));
+
+    player.hand.splice(player.hand.indexOf(card), 1);
+    if (card.kind !== kind) this.log.push(`${player.id} biến 1 lá bài thành ${TRICK_LABEL_VI[kind] ?? kind} (kỹ năng biến hóa)`);
+    await this.checkHandEmptied(player);
+
+    if (blackTrickBlocked) {
+      this.discardPile.push(card);
+      this.log.push(`${target.id} miễn nhiễm với ${TRICK_LABEL_VI[kind] ?? kind} này (weimu)`);
+      for (const skill of player.skills) await skill.onTrickPlayed?.(this.makeContext(alive), player, kind);
+      this.onLiveUpdate?.();
+      return;
+    }
+
+    attach(card, target, alive);
     for (const skill of player.skills) await skill.onTrickPlayed?.(this.makeContext(alive), player, kind);
     this.onLiveUpdate?.();
   }
@@ -633,6 +696,13 @@ export class Room {
       (_card, target, alive) => resolveDuel(this.makeContext(alive), player, target),
       (p) => findDuelLikeCard(p),
     );
+    await this.tryPlayDelayedTrick(
+      player,
+      CardKind.Indulgence,
+      (alive) => indulgenceCandidates(player, alive),
+      (card, target) => attachIndulgence(this.makeContext(this.players.filter((p) => p.alive)), target, card),
+      (p) => findIndulgenceLikeCard(p),
+    );
     await this.tryPlayOnce(
       player,
       CardKind.SavageAssault,
@@ -698,6 +768,9 @@ export class Room {
     }
     if (duelCandidates(player, alive).length > 0) {
       addPlayCard(allDuelLikeCards(player), CardKind.Duel);
+    }
+    if (indulgenceCandidates(player, alive).length > 0) {
+      addPlayCard(allIndulgenceLikeCards(player), CardKind.Indulgence);
     }
     addPlayCard(player.hand.filter((c) => c.kind === CardKind.ExNihilo), CardKind.ExNihilo);
     addPlayCard(player.hand.filter((c) => c.kind === CardKind.SavageAssault), CardKind.SavageAssault);
@@ -819,6 +892,15 @@ export class Room {
           () => card,
         );
         return false;
+      case CardKind.Indulgence:
+        await this.tryPlayDelayedTrick(
+          player,
+          CardKind.Indulgence,
+          (alive) => indulgenceCandidates(player, alive),
+          (c, target) => attachIndulgence(this.makeContext(this.players.filter((p) => p.alive)), target, c),
+          () => card,
+        );
+        return false;
       case CardKind.ExNihilo:
         await this.tryPlayOnce(player, CardKind.ExNihilo, (alive) => alive, (_c, alive) => resolveExNihilo(this.makeContext(alive), player), card);
         return false;
@@ -893,12 +975,28 @@ export class Room {
     }
   }
 
+  /** Judge phase: resolves every delayed trick currently in `player`'s own judge area, in
+   *  placement order, each removing itself before the next resolves (Indulgence never cycles
+   *  back in on this repo's ported revision -- see `resolveIndulgenceJudgment`). Stops early if
+   *  the game ends or `player` dies mid-resolution (e.g. a retrial-triggered self-damage
+   *  skill). */
+  private async runJudgePhase(player: GamePlayer): Promise<void> {
+    const ctx = this.makeContext(this.players.filter((p) => p.alive));
+    while (player.judgeArea.length > 0 && player.alive && !this.gameOver) {
+      const card = player.judgeArea.shift()!;
+      if (card.kind === CardKind.Indulgence) await resolveIndulgenceJudgment(ctx, player, card);
+      this.onLiveUpdate?.();
+    }
+  }
+
   private async runPhase(player: GamePlayer, phase: Phase): Promise<void> {
     player.phase = phase;
     await this.runOtherPhaseActions(player, phase);
     switch (phase) {
       case Phase.RoundStart:
-      case Phase.Judge: // judging-area resolution deferred until delayed tricks are ported
+        break;
+      case Phase.Judge:
+        await this.runJudgePhase(player);
         break;
       case Phase.Start:
         break;
@@ -916,28 +1014,54 @@ export class Room {
         }
         break;
       }
-      case Phase.Play:
-        await this.runPlayPhase(player);
+      case Phase.Play: {
+        if (player.forcedSkipPlayPhase) {
+          // Indulgence: a failed Judge-phase judgment already armed this -- always skips, no ask.
+          player.forcedSkipPlayPhase = false;
+          this.log.push(`${player.id} bỏ qua giai đoạn ra bài (indulgence)`);
+          break;
+        }
+        // Fangquan (Liushan): may skip his own Play phase entirely -- gated by an ask, unlike
+        // Keji's compulsory skipsDiscardPhase.
+        const canSkip = player.skills.some((s) => s.canSkipPlayPhase?.(player));
+        if (canSkip && (await this.controllers.get(player.id)!.wantsToUseSelfAction(player, "fangquan-skip"))) {
+          this.log.push(`${player.id} bỏ qua giai đoạn ra bài (fangquan)`);
+        } else {
+          await this.runPlayPhase(player);
+        }
         break;
+      }
       case Phase.Discard:
         await this.discardDownToLimit(player);
         break;
-      case Phase.Finish:
+      case Phase.Finish: {
         await this.runOtherPlayerFinishReactions(player);
+        // Fangquan (Liushan): may grant another player (or himself) an immediate extra turn,
+        // inserted before the normal seat rotation continues -- see playTurn()'s extraTurnQueue.
+        const ctx = this.makeContext(this.players.filter((p) => p.alive));
+        for (const skill of player.skills) {
+          if (!skill.grantsExtraTurn) continue;
+          const recipient = await skill.grantsExtraTurn(ctx, player);
+          if (recipient) this.extraTurnQueue.push(recipient);
+        }
         break;
+      }
       case Phase.NotActive:
         break;
     }
   }
 
-  /** Runs one full player turn (RoundStart..Finish) unless the game already ended mid-turn. */
+  /** Runs one full player turn (RoundStart..Finish) unless the game already ended mid-turn.
+   *  Drains `extraTurnQueue` first (Fangquan) -- an extra-turn player doesn't touch
+   *  `currentIndex`, so the normal rotation resumes exactly where it would have otherwise. */
   async playTurn(): Promise<void> {
     if (this.players.some((p) => !p.general)) {
       throw new Error("Room.pickGenerals() must complete (every player must have a general) before playTurn() runs");
     }
-    const player = this.players[this.currentIndex];
+    const fromQueue = this.extraTurnQueue.length > 0;
+    const player = fromQueue ? this.extraTurnQueue.shift()! : this.players[this.currentIndex];
     if (!player.alive) {
-      this.advanceToNextAlivePlayer();
+      if (!fromQueue) this.advanceToNextAlivePlayer();
       return;
     }
     this.turnNumber++;
@@ -950,7 +1074,7 @@ export class Room {
       await this.runPhase(player, phase);
     }
     player.phase = Phase.NotActive;
-    this.advanceToNextAlivePlayer();
+    if (!fromQueue) this.advanceToNextAlivePlayer();
   }
 
   private advanceToNextAlivePlayer(): void {

@@ -85,9 +85,10 @@
 
 import { Card, CardKind, Suit } from "./card.js";
 import { GamePlayer } from "./player.js";
-import { Phase } from "./types.js";
+import { Phase, Role } from "./types.js";
 import { alliesOf, isAlly } from "./gamerule.js";
-import { EngineContext, applyDamage, effectiveAttackRange, effectiveDistance, heal, loseHp } from "./combat.js";
+import { EngineContext, SUIT_LABEL_VI, applyDamage, detachCardFrom, effectiveAttackRange, effectiveDistance, findSlashLikeCard, heal, judge, loseHp, resolveSlash } from "./combat.js";
+import { resolveDuel } from "./trick.js";
 
 export interface Skill {
   name: string;
@@ -114,6 +115,8 @@ export interface Skill {
   canViewAsPeach?(card: Card, player: GamePlayer): boolean;
   /** ViewAs: can `card` be played/discarded as if it were a Duel (e.g. Shuangxiong)? */
   canViewAsDuel?(card: Card, player: GamePlayer): boolean;
+  /** ViewAs: can `card` be played as if it were Indulgence (e.g. Daqiao's Guose, any Diamond)? */
+  canViewAsIndulgence?(card: Card, player: GamePlayer): boolean;
   /** True while `player` should be immune to being targeted by Slash/Duel (e.g. Kongcheng). */
   immuneToSlashAndDuel?(player: GamePlayer): boolean;
   /** True while `player` should be immune to being targeted by Snatch (e.g. Qianxun). */
@@ -224,6 +227,43 @@ export interface Skill {
   /** Fired on every OTHER alive player's matching skill at `finishingPlayer`'s own Finish phase
    *  (e.g. Yuejin's Xiaoguo). */
   otherPlayerFinishReaction?(ctx: EngineContext, self: GamePlayer, finishingPlayer: GamePlayer, rng: () => number): Promise<void> | void;
+  /** Fired on the ATTACKER's skills specifically after a SLASH (not Duel/AOE/skill-inflicted)
+   *  they played deals damage -- e.g. Lieren (Zhurong). Distinct from the generic
+   *  `onDamageDealt` (fires for every damage source) for the same reason KylinBow/DoubleSword/
+   *  Triblade are resolved directly in `resolveSlash` instead of as `onDamageDealt` hooks. */
+  onSlashDamageDealt?(ctx: EngineContext, source: GamePlayer, target: GamePlayer): Promise<void> | void;
+  /** Fired whenever one of `player`'s OWN cards is about to enter the discard pile via a real
+   *  discard action (not being played) -- e.g. Lirang (Kong Rong): may redirect it straight to
+   *  another player's hand instead. Only wired into the shared `discardRandom` helper and
+   *  `Room.discardDownToLimit`'s over-limit discard (the 2 most common "you discard your own
+   *  card(s)" sites); proactive self-paid skill costs elsewhere aren't intercepted -- a
+   *  deliberate "faithful behavior, simplified interaction" scope line, not a bug. */
+  redirectsOwnDiscard?(ctx: EngineContext, self: GamePlayer, card: Card): Promise<GamePlayer | null>;
+  /** True while `self` should block every OTHER alive player from playing Peach to rescue
+   *  whoever is currently dying (e.g. Jiaxu's Wansha, active during his own turn) -- self-
+   *  rescue is unaffected. Locked/compulsory: no ask. */
+  suppressesAllyRescue?(self: GamePlayer): boolean;
+  /** True if `player` may choose to skip their own Play phase entirely this turn (e.g.
+   *  Liushan's Fangquan) -- gated by `wantsToUseSelfAction`, unlike Keji's compulsory
+   *  `skipsDiscardPhase`. */
+  canSkipPlayPhase?(player: GamePlayer): boolean;
+  /** Fired once right after `player`'s Finish phase resolves normally -- may grant another
+   *  player (or `player` themselves) an immediate extra turn inserted before the normal seat
+   *  rotation continues (e.g. Liushan's Fangquan, after discarding 1 card). Returns the chosen
+   *  recipient or null to decline. */
+  grantsExtraTurn?(ctx: EngineContext, player: GamePlayer): Promise<GamePlayer | null>;
+  /** Ask: does `judgeOwner` want to claim their own just-resolved judgment card into hand
+   *  instead of it going to the discard pile (e.g. Guojia's Tiandu)? Consulted by
+   *  `disposeJudgmentCard` (combat.ts), which every `judge()` call site that discards its own
+   *  judgment card should route through. Guojia has no self-triggered judgment source of his
+   *  own, so this only ever matters when a delayed trick (e.g. Indulgence) lands in HIS judge
+   *  area -- see `trick.ts`'s `resolveIndulgenceJudgment`. */
+  claimsOwnJudgment?(ctx: EngineContext, judgeOwner: GamePlayer): Promise<boolean>;
+  /** True if a delayed trick entering `player`'s judge area should be discarded immediately
+   *  instead of actually attaching (e.g. Qianxun's 2nd clause: Lu Xun auto-discards an
+   *  Indulgence targeting him, on top of his existing Snatch immunity). Locked/compulsory: no
+   *  ask. Consulted only for Indulgence right now (the only delayed trick implemented). */
+  blocksIndulgenceEntry?(player: GamePlayer): boolean;
 }
 
 function isRed(card: Card): boolean {
@@ -234,52 +274,34 @@ function isBlack(card: Card): boolean {
   return card.suit === Suit.Spade || card.suit === Suit.Club;
 }
 
-/** Vietnamese card-suit names for judge-card log lines (Ganglie/Tieqi/Shuangxiong/Leiji/Beige). */
-const SUIT_LABEL_VI: Record<Suit, string> = {
-  [Suit.Spade]: "Bích",
-  [Suit.Heart]: "Cơ",
-  [Suit.Club]: "Chuồn",
-  [Suit.Diamond]: "Rô",
-};
+/** Lirang (Kong Rong): routes `card` (already detached from `player`'s hand/equip by the
+ *  caller) to the discard pile, unless some skill of `player`'s redirects it to another
+ *  player's hand instead -- see `Skill.redirectsOwnDiscard`'s doc comment for exactly which
+ *  discard call sites check this. Exported for `Room.discardDownToLimit`'s over-limit discard
+ *  to share the same interception. */
+export async function routeDiscard(ctx: EngineContext, player: GamePlayer, card: Card): Promise<void> {
+  for (const skill of player.skills) {
+    if (!skill.redirectsOwnDiscard) continue;
+    const to = await skill.redirectsOwnDiscard(ctx, player, card);
+    if (to && to.alive) {
+      to.hand.push(card);
+      ctx.log.push(`${player.id} giao 1 lá bài bỏ cho ${to.id} (lirang)`);
+      return;
+    }
+  }
+  ctx.discardPile.push(card);
+}
 
-/** Discards a uniformly random card from `player`'s hand, if any. Used by several skills below
- *  that force a discard without a specific-card choice UI (matches the Fankui/Kongcheng
- *  precedent of collapsing "choose which card" down to random). */
-function discardRandom(ctx: EngineContext, player: GamePlayer, rng: () => number): Card | null {
+/** Discards a uniformly random card from `player`'s hand, if any (routed through
+ *  `routeDiscard`, so Lirang can intercept it). Used by several skills below that force a
+ *  discard without a specific-card choice UI (matches the Fankui/Kongcheng precedent of
+ *  collapsing "choose which card" down to random). */
+async function discardRandom(ctx: EngineContext, player: GamePlayer, rng: () => number): Promise<Card | null> {
   if (player.hand.length === 0) return null;
   const idx = Math.floor(rng() * player.hand.length);
   const [card] = player.hand.splice(idx, 1);
-  ctx.discardPile.push(card);
+  await routeDiscard(ctx, player, card);
   return card;
-}
-
-/** Player::judge equivalent: draws the top card as a judgment for `judgeOwner` (skill `reason`,
- *  used only for the retrial log line), then gives every alive player's `onJudgment` skills
- *  (e.g. Sima Yi's Guicai) a chance to replace the result with a card from their own hand -- a
- *  "retrial" (bổ sung phán đoán), which the REAL Sanguosha rule applies to EVERY judgment, not
- *  just delayed-trick judge-area ones, so this wraps every implemented judgment site below
- *  uniformly instead of hardcoding Guicai into each one. The original drawn card, and any
- *  card overridden by a later retrial, are immediately voided to the discard pile; only the
- *  FINAL effective card is returned, for the caller to dispose of per their own skill's rule
- *  (most discard it after logging; Shuangxiong instead gives it to the judged player's hand).
- *  Returns null if the draw pile is exhausted. */
-async function judge(ctx: EngineContext, judgeOwner: GamePlayer, reason: string): Promise<Card | null> {
-  let effective = ctx.drawTop();
-  if (!effective) return null;
-  for (const p of ctx.alivePlayers) {
-    for (const skill of p.skills) {
-      if (!skill.onJudgment || p.hand.length === 0) continue;
-      const retrial = await skill.onJudgment(ctx, p, judgeOwner, effective, reason);
-      if (!retrial) continue;
-      const idx = p.hand.indexOf(retrial);
-      if (idx === -1) continue; // defensive: a misbehaving controller named a card not actually held
-      p.hand.splice(idx, 1);
-      ctx.discardPile.push(effective); // the overridden card is voided
-      ctx.log.push(`${p.id} dùng Quỷ Tài, thay phán quyết bằng ${SUIT_LABEL_VI[retrial.suit]} ${retrial.point}`);
-      effective = retrial;
-    }
-  }
-  return effective;
 }
 
 async function ganglieOnDamaged(ctx: EngineContext, player: GamePlayer, source: GamePlayer, rng: () => number): Promise<void> {
@@ -440,6 +462,12 @@ async function yijiOnDamaged(ctx: EngineContext, player: GamePlayer): Promise<vo
   }
 }
 
+/** Tiandu (Guo Jia): may claim his own just-resolved judgment card into hand instead of it
+ *  going to the discard pile -- reuses the generic `askUseSelfAction` ask, no new wiring. */
+async function tianduClaim(ctx: EngineContext, judgeOwner: GamePlayer): Promise<boolean> {
+  return ctx.askUseSelfAction(judgeOwner, "tiandu");
+}
+
 const qiangxiAction = {
   candidatesFor(alive: GamePlayer[], player: GamePlayer): GamePlayer[] {
     return alive.filter((p) => p !== player && effectiveDistance(alive, player, p) <= effectiveAttackRange(alive, player));
@@ -523,7 +551,7 @@ const yinghunAction = {
     if (!to) return;
     const x = player.maxHp - player.hp;
     ctx.draw(to, x === 1 ? 1 : x);
-    discardRandom(ctx, to, rng);
+    await discardRandom(ctx, to, rng);
     ctx.log.push(`${to.id} bốc rồi bỏ bài (yinghun)`);
   },
 };
@@ -563,7 +591,7 @@ const qingnangAction = {
   },
   async run(ctx: EngineContext, player: GamePlayer, target: GamePlayer, rng: () => number): Promise<void> {
     if (player.handcardNum === 0) return;
-    discardRandom(ctx, player, rng);
+    await discardRandom(ctx, player, rng);
     await heal(ctx, target, 1);
     ctx.log.push(`${target.id} hồi 1 máu (qingnang)`);
   },
@@ -612,8 +640,8 @@ const guanxingAction = {
   },
 };
 
-function mengjinOnSlashDodged(ctx: EngineContext, attacker: GamePlayer, target: GamePlayer): void {
-  if (!discardRandom(ctx, target, ctx.rng)) return;
+async function mengjinOnSlashDodged(ctx: EngineContext, attacker: GamePlayer, target: GamePlayer): Promise<void> {
+  if (!(await discardRandom(ctx, target, ctx.rng))) return;
   ctx.log.push(`${target.id} bỏ 1 lá bài (mengjin)`);
   void attacker;
 }
@@ -631,7 +659,7 @@ async function leijiOnSlashDodged(ctx: EngineContext, _attacker: GamePlayer, zha
 
 async function beigeOnDamaged(ctx: EngineContext, player: GamePlayer, source: GamePlayer, rng: () => number): Promise<void> {
   if (player.handcardNum === 0 || !(await ctx.askUseSelfAction(player, "beige"))) return;
-  discardRandom(ctx, player, rng);
+  await discardRandom(ctx, player, rng);
   const judgeCard = await judge(ctx, player, "beige");
   if (!judgeCard) return;
   ctx.discardPile.push(judgeCard);
@@ -647,7 +675,7 @@ async function beigeOnDamaged(ctx: EngineContext, player: GamePlayer, source: Ga
       break;
     case Suit.Club:
       if (source.alive) {
-        for (let i = 0; i < 2; i++) discardRandom(ctx, source, rng);
+        for (let i = 0; i < 2; i++) await discardRandom(ctx, source, rng);
         ctx.log.push(`${source.id} bỏ 2 lá bài (beige)`);
       }
       break;
@@ -666,7 +694,7 @@ async function sijianOnHandEmptied(ctx: EngineContext, player: GamePlayer, rng: 
   if (candidates.length === 0 || !(await ctx.askUseSelfAction(player, "sijian"))) return;
   const to = await ctx.askChooseAnyPlayer(player, candidates);
   if (!to) return;
-  if (discardRandom(ctx, to, rng)) ctx.log.push(`${to.id} bỏ 1 lá bài (sijian)`);
+  if (await discardRandom(ctx, to, rng)) ctx.log.push(`${to.id} bỏ 1 lá bài (sijian)`);
 }
 
 async function suishiOnAllyDying(ctx: EngineContext, self: GamePlayer, dyingAlly: GamePlayer): Promise<void> {
@@ -678,6 +706,330 @@ async function suishiOnAllyDying(ctx: EngineContext, self: GamePlayer, dyingAlly
 async function suishiOnAllyDeath(ctx: EngineContext, self: GamePlayer, deadAlly: GamePlayer): Promise<void> {
   if (!isAlly(self, deadAlly)) return;
   await loseHp(ctx, self, 1);
+}
+// Post-Milestone-2.6 batch 2: 12 more generals (14 skills) ported, closing most of the
+// "sibling skill deferred" gaps the first 44-general pass left behind. Recovered the real
+// Vietnamese skill text from this repo's own git history (lang/vi_VN/Package/Standard*General.lua
+// was tracked before a later "strip legacy desktop client" commit deleted it from the working
+// tree) instead of guessing from generic domain knowledge -- this caught 2 prior comments that
+// were flat wrong (Cao Cao's Standard kit has no 2nd skill in this repo's actual localization,
+// "Hujia" doesn't exist here; Huang Zhong's "LiegongRange" is Hegemony-lord-only, not a 2nd
+// Role-mode skill either -- neither is a real gap) and 1 that was overly pessimistic (Duoshi
+// turned out to be an ordinary immediate AOE trick, not delayed-trick-dependent -- see
+// `duoshiSelfAction` below). Still blocked, genuinely: Guojia's Tiandu (needs Guo Jia to ever
+// own a delayed-trick judgment, which needs the delayed-trick/judge-area subsystem this repo
+// explicitly excludes -- see card.ts's header), Da Qiao's Guose (needs the Indulgence delayed-
+// trick card, same reason), and Cai Wenji's Duanchang (needs the dual-general head/deputy
+// mechanic, explicitly out of scope for Role mode -- see this file's header).
+
+/** Luoshen (Zhen Ji): automatic activation ask (same "no real cost to declining" precedent as
+ *  Guanxing/Kongcheng/Tieqi), then judges repeatedly for as long as the result is black AND
+ *  she chooses to continue; all black judgment cards collected end up in her hand, the first
+ *  non-black one that ends the loop is discarded. */
+async function luoshenOtherPhaseAction(ctx: EngineContext, player: GamePlayer): Promise<void> {
+  if (!(await ctx.askUseSelfAction(player, "luoshen"))) return;
+  const collected: Card[] = [];
+  for (;;) {
+    const judgeCard = await judge(ctx, player, "luoshen");
+    if (!judgeCard) break;
+    if (!isBlack(judgeCard)) {
+      ctx.discardPile.push(judgeCard);
+      break;
+    }
+    collected.push(judgeCard);
+    if (!(await ctx.askUseSelfAction(player, "luoshen"))) break;
+  }
+  if (collected.length > 0) {
+    player.hand.push(...collected);
+    ctx.log.push(`${player.id} thu lấy ${collected.length} lá phán xét màu Đen (luoshen)`);
+  }
+}
+
+/** Fires `player`'s own `onEquipLost` skills (e.g. Sunshangxiang's Xiaoji) `times` times in a
+ *  row -- used where several equip slots are lost in one go (e.g. Fanjian discarding multiple
+ *  matching-suit equips at once), matching `equip()`'s per-card trigger elsewhere. */
+async function notifyEquipLost(ctx: EngineContext, player: GamePlayer, times: number): Promise<void> {
+  for (let n = 0; n < times; n++) {
+    for (const skill of player.skills) await skill.onEquipLost?.(ctx, player);
+  }
+}
+
+/** Fanjian (Zhou Yu): reveals+gives 1 hand card to a chosen target; the target then chooses
+ *  between discarding every hand/equipped card matching that card's suit (the revealed card
+ *  itself just joined their hand, so they always have >=1 card to check -- the real "if they
+ *  have hand cards" gate is therefore always satisfied) or losing 1 hp. No suit-guessing is
+ *  involved (the card is revealed openly) -- a prior comment guessing this needed "a
+ *  suit-guessing UI ask" was wrong; see this file's header. */
+async function fanjianSelfAction(ctx: EngineContext, player: GamePlayer): Promise<void> {
+  if (player.hand.length === 0) return;
+  const candidates = ctx.alivePlayers.filter((p) => p !== player);
+  if (candidates.length === 0 || !(await ctx.askUseSelfAction(player, "fanjian"))) return;
+  const target = await ctx.askChooseAnyPlayer(player, candidates);
+  if (!target) return;
+  const revealed = await ctx.askPickCard(player, player.hand);
+  player.hand.splice(player.hand.indexOf(revealed), 1);
+  target.hand.push(revealed);
+  ctx.log.push(`${player.id} lật 1 lá (${SUIT_LABEL_VI[revealed.suit]} ${revealed.point}) và giao cho ${target.id} (fanjian)`);
+  const matchesSuit = (c: Card) => c.suit === revealed.suit;
+  if (await ctx.askUseSelfAction(target, "fanjian-reveal")) {
+    const handMatches = target.hand.filter(matchesSuit);
+    for (const c of handMatches) target.hand.splice(target.hand.indexOf(c), 1);
+    const equipMatches = [target.weapon, target.defenseHorse, target.offenseHorse].filter((c): c is Card => c !== null && matchesSuit(c));
+    if (target.weapon && matchesSuit(target.weapon)) target.weapon = null;
+    if (target.defenseHorse && matchesSuit(target.defenseHorse)) target.defenseHorse = null;
+    if (target.offenseHorse && matchesSuit(target.offenseHorse)) target.offenseHorse = null;
+    ctx.discardPile.push(...handMatches, ...equipMatches);
+    await notifyEquipLost(ctx, target, equipMatches.length);
+    ctx.log.push(`${target.id} mở bài, bỏ ${handMatches.length + equipMatches.length} lá cùng chất ${SUIT_LABEL_VI[revealed.suit]} (fanjian)`);
+  } else {
+    await loseHp(ctx, target, 1);
+    ctx.log.push(`${target.id} mất 1 máu (fanjian)`);
+  }
+}
+
+/** Shared pindian ("đấu điểm", card-point duel) for Lieren/Quhu: `initiator` and `opponent`
+ *  each reveal 1 card from their own hand -- reusing `askPickCard` (the same generalized "pick
+ *  exactly 1 from a candidate list" shape Amazing Grace's picker already has, here given the
+ *  player's own hand as the candidate list) rather than adding a dedicated new ask. Higher
+ *  point value wins; a tie favors `opponent` (the real rule: the side that INITIATED the
+ *  pindian loses ties). Both revealed cards go to the discard pile regardless of outcome. A
+ *  card-less `opponent` auto-loses (counted as 0 -- real Sanguosha rule for "nothing to
+ *  reveal"); callers already guarantee `initiator.hand.length > 0`. */
+async function pindian(ctx: EngineContext, initiator: GamePlayer, opponent: GamePlayer, reason: string): Promise<boolean> {
+  const myCard = await ctx.askPickCard(initiator, initiator.hand);
+  initiator.hand.splice(initiator.hand.indexOf(myCard), 1);
+  ctx.discardPile.push(myCard);
+  let oppCard: Card | null = null;
+  if (opponent.hand.length > 0) {
+    oppCard = await ctx.askPickCard(opponent, opponent.hand);
+    opponent.hand.splice(opponent.hand.indexOf(oppCard), 1);
+    ctx.discardPile.push(oppCard);
+  }
+  const won = !oppCard || myCard.point > oppCard.point;
+  const oppLabel = oppCard ? `${oppCard.point}` : "(không có bài)";
+  ctx.log.push(`${initiator.id} đấu điểm với ${opponent.id}: ${myCard.point} vs ${oppLabel} (${reason}) -- ${won ? initiator.id : opponent.id} thắng`);
+  return won;
+}
+
+/** Lieren (Zhurong): after dealing Slash damage, may pindian with the target; on a win, takes
+ *  1 of the target's cards (hand or equipped) into her own hand. */
+async function lierenOnSlashDamageDealt(ctx: EngineContext, source: GamePlayer, target: GamePlayer): Promise<void> {
+  if (source.hand.length === 0 || !target.alive) return;
+  if (!(await ctx.askUseSelfAction(source, "lieren"))) return;
+  if (!(await pindian(ctx, source, target, "lieren"))) return;
+  const candidates = [target.weapon, target.defenseHorse, target.offenseHorse, ...target.hand].filter((c): c is Card => c !== null);
+  if (candidates.length === 0) return;
+  const taken = await ctx.askPickPlayerCard(source, target, candidates);
+  await detachCardFrom(ctx, target, taken);
+  source.hand.push(taken);
+  ctx.log.push(`${source.id} thu lấy 1 lá của ${target.id} (lieren)`);
+}
+
+/** Quhu (Xun Yu): once per Play phase, may pindian with a player who has more hp than him. On
+ *  a win, that player deals 1 damage to a player Xun Yu designates within their own attack
+ *  range; on a loss, that player deals 1 damage to Xun Yu instead. */
+async function quhuSelfAction(ctx: EngineContext, player: GamePlayer): Promise<void> {
+  if (player.hand.length === 0) return;
+  const candidates = ctx.alivePlayers.filter((p) => p !== player && p.hp > player.hp);
+  if (candidates.length === 0 || !(await ctx.askUseSelfAction(player, "quhu"))) return;
+  const target = await ctx.askChooseAnyPlayer(player, candidates);
+  if (!target) return;
+  if (await pindian(ctx, player, target, "quhu")) {
+    const designated = ctx.alivePlayers.filter(
+      (p) => p !== target && effectiveDistance(ctx.alivePlayers, target, p) <= effectiveAttackRange(ctx.alivePlayers, target),
+    );
+    if (designated.length === 0) return;
+    const victim = await ctx.askChooseAnyPlayer(player, designated);
+    if (!victim) return;
+    ctx.log.push(`${target.id} gây 1 sát thương cho ${victim.id} (quhu)`);
+    await applyDamage(ctx, victim, 1, target);
+  } else {
+    ctx.log.push(`${target.id} gây 1 sát thương cho ${player.id} (quhu)`);
+    await applyDamage(ctx, player, 1, target);
+  }
+}
+
+/** Jieyin (Sun Shangxiang): once per Play phase, discard 2 hand cards and pick a wounded male
+ *  player -- both of them recover 1 hp. */
+async function jieyinSelfAction(ctx: EngineContext, player: GamePlayer): Promise<void> {
+  if (player.hand.length < 2) return;
+  const candidates = ctx.alivePlayers.filter((p) => p !== player && p.gender === "male" && p.isWounded());
+  if (candidates.length === 0 || !(await ctx.askUseSelfAction(player, "jieyin"))) return;
+  const target = await ctx.askChooseAnyPlayer(player, candidates);
+  if (!target) return;
+  const paid = await ctx.askChooseDiscards(player, 2);
+  for (const c of paid) player.hand.splice(player.hand.indexOf(c), 1);
+  for (const c of paid) await routeDiscard(ctx, player, c);
+  await heal(ctx, player, 1);
+  await heal(ctx, target, 1);
+  ctx.log.push(`${player.id} và ${target.id} hồi 1 máu (jieyin)`);
+}
+
+/** Dimeng (Lu Su): once per Play phase, pick 2 other players, discard up to X of Lu Su's own
+ *  cards (X = the hand-count difference between the 2 chosen), then swap their hands. */
+async function dimengSelfAction(ctx: EngineContext, player: GamePlayer): Promise<void> {
+  const candidates = ctx.alivePlayers.filter((p) => p !== player);
+  if (candidates.length < 2 || !(await ctx.askUseSelfAction(player, "dimeng"))) return;
+  const p1 = await ctx.askChooseAnyPlayer(player, candidates);
+  if (!p1) return;
+  const p2 = await ctx.askChooseAnyPlayer(player, candidates.filter((p) => p !== p1));
+  if (!p2) return;
+  const x = Math.min(Math.abs(p1.handcardNum - p2.handcardNum), player.hand.length);
+  if (x > 0) {
+    const paid = await ctx.askChooseDiscards(player, x);
+    for (const c of paid) player.hand.splice(player.hand.indexOf(c), 1);
+    for (const c of paid) await routeDiscard(ctx, player, c);
+  }
+  const tmp = p1.hand;
+  p1.hand = p2.hand;
+  p2.hand = tmp;
+  ctx.log.push(`${p1.id} và ${p2.id} hoán đổi bài trên tay (dimeng)`);
+}
+
+/** Zhijian (Erzhang): places a held equip card into another player's matching equip slot
+ *  (replacing whatever was there), then draws 1. */
+async function zhijianSelfAction(ctx: EngineContext, player: GamePlayer): Promise<void> {
+  const equipCards = player.hand.filter((c) => c.kind === CardKind.Weapon || c.kind === CardKind.Horse);
+  if (equipCards.length === 0 || !(await ctx.askUseSelfAction(player, "zhijian"))) return;
+  const card = await ctx.askPickCard(player, equipCards);
+  const candidates = ctx.alivePlayers.filter((p) => p !== player);
+  if (candidates.length === 0) return;
+  const target = await ctx.askChooseAnyPlayer(player, candidates);
+  if (!target) return;
+  player.hand.splice(player.hand.indexOf(card), 1);
+  await ctx.equipPlayer(target, card);
+  ctx.draw(player, 1);
+  ctx.log.push(`${player.id} đặt 1 lá trang bị vào vùng của ${target.id}, bốc 1 lá (zhijian)`);
+}
+
+/** Lijian (Diao Chan): once per Play phase, discard 1 card and pick 2 other male players --
+ *  the second-chosen is treated as using Duel against the first-chosen. */
+async function lijianSelfAction(ctx: EngineContext, player: GamePlayer): Promise<void> {
+  if (player.hand.length === 0) return;
+  const candidates = ctx.alivePlayers.filter((p) => p !== player && p.gender === "male");
+  if (candidates.length < 2 || !(await ctx.askUseSelfAction(player, "lijian"))) return;
+  const first = await ctx.askChooseAnyPlayer(player, candidates);
+  if (!first) return;
+  const second = await ctx.askChooseAnyPlayer(player, candidates.filter((p) => p !== first));
+  if (!second) return;
+  const paid = await ctx.askPickCard(player, player.hand);
+  player.hand.splice(player.hand.indexOf(paid), 1);
+  ctx.discardPile.push(paid);
+  ctx.log.push(`${player.id} dùng Ly Gián: ${second.id} xem như dùng Quyết Đấu với ${first.id} (lijian)`);
+  await resolveDuel(ctx, second, first);
+}
+
+/** Luanwu (Jia Xu): once per GAME (hạn định kỹ), during a Play phase: every other player
+ *  chooses to play a held Slash-like card at whoever is nearest to them (ties asked), or lose
+ *  1 hp if they decline/can't. Reuses `askUseSelfAction` with a synthetic per-player prompt
+ *  name (same precedent as Xiaoguo's "xiaoguo-defend" ask on the non-owning finishing player). */
+async function luanwuSelfAction(ctx: EngineContext, self: GamePlayer): Promise<void> {
+  if (self.usedLimitSkills.has("luanwu") || !(await ctx.askUseSelfAction(self, "luanwu"))) return;
+  self.usedLimitSkills.add("luanwu");
+  ctx.log.push(`${self.id} phát động Loạn Vũ (luanwu)`);
+  for (const p of ctx.alivePlayers.filter((x) => x !== self)) {
+    if (!p.alive) continue;
+    const others = ctx.alivePlayers.filter((o) => o !== p);
+    if (others.length === 0) continue;
+    const minDist = Math.min(...others.map((o) => effectiveDistance(ctx.alivePlayers, p, o)));
+    const nearest = others.filter((o) => effectiveDistance(ctx.alivePlayers, p, o) === minDist);
+    const slash = findSlashLikeCard(p);
+    if (slash && (await ctx.askUseSelfAction(p, "luanwu-slash"))) {
+      const target = nearest.length === 1 ? nearest[0] : ((await ctx.askChooseAnyPlayer(p, nearest)) ?? nearest[0]);
+      p.hand.splice(p.hand.indexOf(slash), 1);
+      if (slash.kind !== CardKind.Slash) ctx.log.push(`${p.id} biến 1 lá bài thành Sát (kỹ năng biến hóa)`);
+      await resolveSlash(ctx, p, target, slash);
+    } else {
+      await loseHp(ctx, p, 1);
+    }
+  }
+}
+
+/** Xiongyi's "which side" key: Lord+Loyalist share one side, Rebels share another, each
+ *  Renegade is their own side of 1 -- same grouping `gamerule.ts`'s `isAlly` uses. */
+function xiongyiSideKey(p: GamePlayer): string {
+  if (p.role === Role.Renegade) return `renegade-${p.id}`;
+  if (p.role === Role.Rebel) return "rebel";
+  return "lord";
+}
+
+/** Xiongyi (Ma Teng): once per GAME, during a Play phase: every ally (and Ma Teng himself)
+ *  draws 3; if his side currently has the fewest alive members (tied for fewest counts), he
+ *  also recovers 1 hp. */
+async function xiongyiSelfAction(ctx: EngineContext, self: GamePlayer): Promise<void> {
+  if (self.usedLimitSkills.has("xiongyi") || !(await ctx.askUseSelfAction(self, "xiongyi"))) return;
+  self.usedLimitSkills.add("xiongyi");
+  const allies = alliesOf(self, ctx.alivePlayers);
+  for (const p of [self, ...allies]) ctx.draw(p, 3);
+  ctx.log.push(`${self.id} phát động Hùng Dị: đồng minh bốc 3 lá (xiongyi)`);
+  const counts = new Map<string, number>();
+  for (const p of ctx.alivePlayers) counts.set(xiongyiSideKey(p), (counts.get(xiongyiSideKey(p)) ?? 0) + 1);
+  const minCount = Math.min(...counts.values());
+  if (counts.get(xiongyiSideKey(self)) === minCount) {
+    await heal(ctx, self, 1);
+    ctx.log.push(`${self.id} hồi 1 máu (xiongyi)`);
+  }
+}
+
+/** Guidao (Zhang Jiao): whenever ANY judgment resolves (reusing the same `onJudgment` retrial
+ *  hook Guicai introduced -- the real rule applies retrials to every judgment uniformly, not
+ *  just this one's owner), may discard 1 black hand card to replace the result. */
+async function guidaoOnJudgment(ctx: EngineContext, self: GamePlayer): Promise<Card | null> {
+  const blackCards = self.hand.filter(isBlack);
+  if (blackCards.length === 0 || !(await ctx.askUseSelfAction(self, "guidao"))) return null;
+  return ctx.askPickCard(self, blackCards);
+}
+
+/** Lirang (Kong Rong): `redirectsOwnDiscard` -- may give an about-to-be-discarded card of his
+ *  own straight to another player instead. See `Skill.redirectsOwnDiscard`'s doc comment for
+ *  exactly which discard sites this is wired into. */
+async function lirangRedirect(ctx: EngineContext, self: GamePlayer): Promise<GamePlayer | null> {
+  const candidates = ctx.alivePlayers.filter((p) => p !== self);
+  if (candidates.length === 0 || !(await ctx.askUseSelfAction(self, "lirang"))) return null;
+  return ctx.askChooseAnyPlayer(self, candidates);
+}
+
+/** Duoshi (Lu Xun): up to 4 times per Play phase, converts a red hand card into playing
+ *  [Await Exhausted] (Dĩ Dật Đãi Lao) -- confirmed a genuine immediate AOE trick (targets Lu
+ *  Xun and all allies, each draws 2 then discards 2), NOT a delayed trick, despite card.ts's
+ *  header lumping "AwaitExhausted" into its combined "needs delayed-trick/judge-area OR a
+ *  reactive counter-play stack" exclusion blurb for a batch of 11 different trick kinds -- see
+ *  this file's header for how that was confirmed. Implemented directly here (self+allies
+ *  draw-then-discard) rather than adding a whole new `CardKind`/`trick.ts` resolver +
+ *  `canViewAs*` hook for a card no other general ever draws for real. */
+async function duoshiSelfAction(ctx: EngineContext, player: GamePlayer): Promise<void> {
+  for (let i = 0; i < 4; i++) {
+    const redCards = player.hand.filter(isRed);
+    if (redCards.length === 0 || !(await ctx.askUseSelfAction(player, "duoshi"))) break;
+    const paid = await ctx.askPickCard(player, redCards);
+    player.hand.splice(player.hand.indexOf(paid), 1);
+    ctx.discardPile.push(paid);
+    const targets = [player, ...alliesOf(player, ctx.alivePlayers)];
+    for (const t of targets) ctx.draw(t, 2);
+    for (const t of targets) {
+      const n = Math.min(2, t.hand.length);
+      if (n === 0) continue;
+      const chosen = await ctx.askChooseDiscards(t, n);
+      for (const c of chosen) t.hand.splice(t.hand.indexOf(c), 1);
+      for (const c of chosen) await routeDiscard(ctx, t, c);
+    }
+    ctx.log.push(`${player.id} chuyển hóa 1 lá Đỏ thành Dĩ Dật Đãi Lao: ${targets.map((t) => t.id).join(", ")} bốc 2 rồi bỏ 2 lá (duoshi)`);
+  }
+}
+
+/** Fangquan (Liu Shan) part 2: at Finish phase, may discard 1 card to give any player
+ *  (including himself) an immediate extra turn, inserted before the normal seat rotation
+ *  continues -- see room.ts's `extraTurnQueue`. Part 1 (may skip his own Play phase) is the
+ *  trivial `canSkipPlayPhase: () => true` in this skill's registration below. */
+async function fangquanGrantsExtraTurn(ctx: EngineContext, player: GamePlayer): Promise<GamePlayer | null> {
+  if (player.hand.length === 0 || !(await ctx.askUseSelfAction(player, "fangquan-extra-turn"))) return null;
+  const target = await ctx.askChooseAnyPlayer(player, ctx.alivePlayers);
+  if (!target) return null;
+  const paid = await ctx.askPickCard(player, player.hand);
+  player.hand.splice(player.hand.indexOf(paid), 1);
+  ctx.discardPile.push(paid);
+  ctx.log.push(`${player.id} bỏ 1 lá bài, ${target.id} có thêm 1 lượt (fangquan)`);
+  return target;
 }
 
 export const SKILLS: Record<string, Skill> = {
@@ -753,8 +1105,9 @@ export const SKILLS: Record<string, Skill> = {
   qianxun: {
     name: "qianxun",
     displayName: "Khiêm Tốn",
-    description: "Miễn nhiễm với [Đoạt] nhắm vào bạn.",
+    description: "Miễn nhiễm với [Đoạt] nhắm vào bạn. Khi [Lạc Bất Tư Thục] tiến vào vùng phán xét của bạn, đưa nó vào thẳng chồng bài bỏ.",
     immuneToSnatch: () => true,
+    blocksIndulgenceEntry: () => true,
   },
   kuanggu: {
     name: "kuanggu",
@@ -853,6 +1206,12 @@ export const SKILLS: Record<string, Skill> = {
     description: "Khi bạn bị thương, có thể lật 2 lá từ chồng rút bài và giao mỗi lá cho 1 người bất kỳ (kể cả bạn).",
     onDamaged: yijiOnDamaged,
   },
+  tiandu: {
+    name: "tiandu",
+    displayName: "Thiên Khiển",
+    description: "Sau khi phán xét thuộc vùng phán xét của bạn có hiệu lực, có thể thu lấy kết quả phán xét thay vì để nó vào chồng bài bỏ.",
+    claimsOwnJudgment: tianduClaim,
+  },
   qiangxi: {
     name: "qiangxi",
     displayName: "Cường Tập",
@@ -888,6 +1247,12 @@ export const SKILLS: Record<string, Skill> = {
     displayName: "Lưu Ly",
     description: "Khi bạn trở thành mục tiêu của [Sát], có thể bỏ 1 lá để chuyển mục tiêu sang 1 người khác trong tầm đánh của bạn.",
     onIncomingSlash: liuliOnIncomingSlash,
+  },
+  guose: {
+    name: "guose",
+    displayName: "Quốc Sắc",
+    description: "Giai đoạn ra bài, có thể chuyển hóa sử dụng 1 lá Rô trên tay thành [Lạc Bất Tư Thục].",
+    canViewAsIndulgence: (card) => card.kind !== CardKind.Indulgence && card.suit === Suit.Diamond,
   },
   xiaoji: {
     name: "xiaoji",
@@ -997,6 +1362,97 @@ export const SKILLS: Record<string, Skill> = {
     onAllyDying: suishiOnAllyDying,
     onAllyDeath: suishiOnAllyDeath,
   },
+  luoshen: {
+    name: "luoshen",
+    displayName: "Lạc Thần",
+    description: "Đầu lượt, có thể phán liên tục (dừng khi ra lá không phải Đen hoặc bạn không tiếp tục); thu hết các lá Đen đã phán vào tay.",
+    otherPhaseAction: { phase: Phase.Start, run: luoshenOtherPhaseAction },
+  },
+  fanjian: {
+    name: "fanjian",
+    displayName: "Phản Gián",
+    description: "Mỗi lượt 1 lần: lật 1 lá trên tay giao cho 1 người, họ chọn bỏ hết bài cùng chất (tay+trang bị) hoặc mất 1 máu.",
+    selfAction: fanjianSelfAction,
+  },
+  lieren: {
+    name: "lieren",
+    displayName: "Liệt Nhận",
+    description: "Sau khi Sát của bạn gây sát thương, có thể đấu điểm với mục tiêu; thắng thì thu lấy 1 lá của họ.",
+    onSlashDamageDealt: lierenOnSlashDamageDealt,
+  },
+  quhu: {
+    name: "quhu",
+    displayName: "Vờn Hổ",
+    description: "Mỗi lượt 1 lần: đấu điểm với người có nhiều máu hơn bạn; thắng thì họ tự chỉ định gây 1 sát thương trong tầm đánh, thua thì họ gây 1 sát thương cho bạn.",
+    selfAction: quhuSelfAction,
+  },
+  jieyin: {
+    name: "jieyin",
+    displayName: "Kết Nhân",
+    description: "Mỗi lượt 1 lần: bỏ 2 lá trên tay, chọn 1 người nam đang bị thương -- cả hai cùng hồi 1 máu.",
+    selfAction: jieyinSelfAction,
+  },
+  dimeng: {
+    name: "dimeng",
+    displayName: "Kết Minh",
+    description: "Mỗi lượt 1 lần: chọn 2 người khác, bỏ tối đa X lá của bạn (X = chênh lệch bài trên tay giữa 2 người), lệnh họ hoán đổi bài trên tay.",
+    selfAction: dimengSelfAction,
+  },
+  zhijian: {
+    name: "zhijian",
+    displayName: "Trực Gián",
+    description: "Mỗi lượt: đặt 1 lá trang bị trên tay vào vùng trang bị của người khác, rồi rút 1 lá.",
+    selfAction: zhijianSelfAction,
+  },
+  lijian: {
+    name: "lijian",
+    displayName: "Ly Gián",
+    description: "Mỗi lượt 1 lần: bỏ 1 lá, chọn 2 người nam khác -- người chọn sau xem như dùng Quyết Đấu với người chọn trước.",
+    selfAction: lijianSelfAction,
+  },
+  wansha: {
+    name: "wansha",
+    displayName: "Hoàn Sát",
+    description: "Tỏa định kỹ: trong lượt của bạn, người khác không trong trạng thái hấp hối không thể dùng Đào cứu người đang hấp hối.",
+    suppressesAllyRescue: (player) => player.phase !== Phase.NotActive,
+  },
+  luanwu: {
+    name: "luanwu",
+    displayName: "Loạn Vũ",
+    description: "Hạn định kỹ: mỗi người khác chọn dùng Sát với người gần nhất hoặc mất 1 máu.",
+    selfAction: luanwuSelfAction,
+  },
+  xiongyi: {
+    name: "xiongyi",
+    displayName: "Hùng Dị",
+    description: "Hạn định kỹ: đồng minh rút 3 lá; nếu thế lực của bạn ít người nhất (hoặc đồng hạng), hồi 1 máu.",
+    selfAction: xiongyiSelfAction,
+  },
+  guidao: {
+    name: "guidao",
+    displayName: "Quỷ Đạo",
+    description: "Khi phán xét của 1 người có hiệu lực, có thể bỏ 1 lá Đen để thay đổi kết quả phán xét đó.",
+    onJudgment: guidaoOnJudgment,
+  },
+  lirang: {
+    name: "lirang",
+    displayName: "Lễ Nhượng",
+    description: "Khi 1 lá bài của bạn bị bỏ (không phải do đánh ra), có thể giao thẳng cho người khác thay vì vào chồng bài bỏ.",
+    redirectsOwnDiscard: lirangRedirect,
+  },
+  duoshi: {
+    name: "duoshi",
+    displayName: "Độ Thế",
+    description: "Tối đa 4 lần mỗi lượt: chuyển hóa 1 lá Đỏ trên tay thành Dĩ Dật Đãi Lao (bạn và đồng minh rút 2 rồi bỏ 2).",
+    selfAction: duoshiSelfAction,
+  },
+  fangquan: {
+    name: "fangquan",
+    displayName: "Ủy Quyền",
+    description: "Có thể bỏ qua giai đoạn ra bài của mình; cuối lượt có thể bỏ 1 lá để cho 1 người thêm 1 lượt ngay sau lượt này.",
+    canSkipPlayPhase: () => true,
+    grantsExtraTurn: fangquanGrantsExtraTurn,
+  },
 };
 
 export interface GeneralDef {
@@ -1019,44 +1475,44 @@ export const GENERALS: GeneralDef[] = [
   { name: "guanyu", displayName: "Quan Vũ", kingdom: "shu", maxHp: 5, skillNames: ["wusheng"] },
   { name: "xiahoudun", displayName: "Hạ Hầu Đôn", kingdom: "wei", maxHp: 4, skillNames: ["ganglie"] },
   { name: "zhaoyun", displayName: "Triệu Vân", kingdom: "shu", maxHp: 4, skillNames: ["longdan"] },
-  { name: "zhenji", displayName: "Chân Cơ", kingdom: "wei", maxHp: 3, skillNames: ["qingguo"], gender: "female" }, // Luoshen deferred, needs judge-area/retrial system
+  { name: "zhenji", displayName: "Chân Cơ", kingdom: "wei", maxHp: 3, skillNames: ["qingguo", "luoshen"], gender: "female" },
   { name: "zhugeliang", displayName: "Gia Cát Lượng", kingdom: "shu", maxHp: 3, skillNames: ["kongcheng", "guanxing"] },
   { name: "machao", displayName: "Mã Siêu", kingdom: "shu", maxHp: 4, skillNames: ["tieqi", "mashu"] },
   { name: "simayi", displayName: "Tư Mã Ý", kingdom: "wei", maxHp: 3, skillNames: ["fankui", "guicai"] },
   { name: "huanggai", displayName: "Hoàng Cái", kingdom: "wu", maxHp: 4, skillNames: ["kurou"] },
-  { name: "luxun", displayName: "Lục Tốn", kingdom: "wu", maxHp: 3, skillNames: ["qianxun"] }, // Duoshi deferred, needs a 2nd viewAs-Slash-limit skill slot
+  { name: "luxun", displayName: "Lục Tốn", kingdom: "wu", maxHp: 3, skillNames: ["qianxun", "duoshi"] },
   { name: "weiyan", displayName: "Ngụy Diên", kingdom: "shu", maxHp: 4, skillNames: ["kuanggu"] },
-  { name: "caocao", displayName: "Tào Tháo", kingdom: "wei", maxHp: 4, skillNames: ["jianxiong"] }, // Hujia deferred, needs letting another same-kingdom player substitute a card play on your behalf
-  { name: "zhouyu", displayName: "Chu Du", kingdom: "wu", maxHp: 3, skillNames: ["yingzi"] }, // Fanjian deferred, needs a suit-guessing UI ask
+  { name: "caocao", displayName: "Tào Tháo", kingdom: "wei", maxHp: 4, skillNames: ["jianxiong"] }, // complete: this repo's actual lang/vi_VN Standard package has no 2nd skill for Cao Cao ("Hujia" doesn't exist in it -- a prior comment guessing it did was wrong, see this file's header)
+  { name: "zhouyu", displayName: "Chu Du", kingdom: "wu", maxHp: 3, skillNames: ["yingzi", "fanjian"] },
   { name: "ganning", displayName: "Cam Ninh", kingdom: "wu", maxHp: 4, skillNames: ["qixi"] },
   { name: "huangyueying", displayName: "Hoàng Nguyệt Anh", kingdom: "shu", maxHp: 3, skillNames: ["jizhi", "qicai"], gender: "female" },
-  { name: "huangzhong", displayName: "Hoàng Trung", kingdom: "shu", maxHp: 4, skillNames: ["liegong"] }, // LiegongRange is Hegemony-lord-only
-  { name: "liushan", displayName: "Lưu Thiện", kingdom: "shu", maxHp: 3, skillNames: ["xiangle"] }, // Fangquan deferred, needs phase-skip/extra-turn
+  { name: "huangzhong", displayName: "Hoàng Trung", kingdom: "shu", maxHp: 4, skillNames: ["liegong"] }, // complete: LiegongRange is a Hegemony-lord-only extension of this same skill, not a distinct 2nd Role-mode skill
+  { name: "liushan", displayName: "Lưu Thiện", kingdom: "shu", maxHp: 3, skillNames: ["xiangle", "fangquan"] },
   { name: "menghuo", displayName: "Mạnh Hoạch", kingdom: "shu", maxHp: 4, skillNames: ["savageAssaultAvoid", "huoshou"] },
-  { name: "zhurong", displayName: "Chúc Dung", kingdom: "shu", maxHp: 4, skillNames: ["savageAssaultAvoid", "juxiang"], gender: "female" }, // Lieren deferred, needs pindian
+  { name: "zhurong", displayName: "Chúc Dung", kingdom: "shu", maxHp: 4, skillNames: ["savageAssaultAvoid", "juxiang", "lieren"], gender: "female" },
   { name: "ganfuren", displayName: "Cam Phu Nhân", kingdom: "shu", maxHp: 3, skillNames: ["shushen", "shenzhi"], gender: "female" },
   { name: "zhangliao", displayName: "Trương Liêu", kingdom: "wei", maxHp: 4, skillNames: ["tuxi"] },
   { name: "xuchu", displayName: "Hứa Chử", kingdom: "wei", maxHp: 4, skillNames: ["luoyi"] },
-  { name: "guojia", displayName: "Quách Gia", kingdom: "wei", maxHp: 3, skillNames: ["yiji"] }, // Tiandu deferred, needs judge-area
+  { name: "guojia", displayName: "Quách Gia", kingdom: "wei", maxHp: 3, skillNames: ["yiji", "tiandu"] },
   { name: "dianwei", displayName: "Điển Vi", kingdom: "wei", maxHp: 4, skillNames: ["qiangxi"] },
-  { name: "xunyu", displayName: "Tuân Úc", kingdom: "wei", maxHp: 3, skillNames: ["jieming"] }, // Quhu deferred, needs pindian
-  { name: "caopi", displayName: "Tào Phi", kingdom: "wei", maxHp: 3, skillNames: ["xingshang"] }, // Fangzhu deferred, needs face-up/down state
+  { name: "xunyu", displayName: "Tuân Úc", kingdom: "wei", maxHp: 3, skillNames: ["jieming", "quhu"] },
+  { name: "caopi", displayName: "Tào Phi", kingdom: "wei", maxHp: 3, skillNames: ["xingshang"] }, // Fangzhu still deferred, needs face-up/down state
   { name: "yuejin", displayName: "Nhạc Tiến", kingdom: "wei", maxHp: 4, skillNames: ["xiaoguo"] },
   { name: "lvmeng", displayName: "Lữ Mông", kingdom: "wu", maxHp: 4, skillNames: ["keji"] },
-  { name: "daqiao", displayName: "Đại Kiều", kingdom: "wu", maxHp: 3, skillNames: ["liuli"], gender: "female" }, // Guose deferred, needs Indulgence/judge-area
-  { name: "sunshangxiang", displayName: "Tôn Thượng Hương", kingdom: "wu", maxHp: 3, skillNames: ["xiaoji"], gender: "female" }, // Jieyin deferred, needs 2-card viewAs
+  { name: "daqiao", displayName: "Đại Kiều", kingdom: "wu", maxHp: 3, skillNames: ["liuli", "guose"], gender: "female" },
+  { name: "sunshangxiang", displayName: "Tôn Thượng Hương", kingdom: "wu", maxHp: 3, skillNames: ["xiaoji", "jieyin"], gender: "female" },
   { name: "sunjian", displayName: "Tôn Kiên", kingdom: "wu", maxHp: 4, skillNames: ["yinghun"] },
-  { name: "lusu", displayName: "Lỗ Túc", kingdom: "wu", maxHp: 3, skillNames: ["haoshi"] }, // Dimeng deferred, needs variable-count viewAs
-  { name: "erzhang", displayName: "Trương Chiêu & Trương Hoành", kingdom: "wu", maxHp: 3, skillNames: ["guzheng"] }, // Zhijian deferred, needs equip-onto-another-player
+  { name: "lusu", displayName: "Lỗ Túc", kingdom: "wu", maxHp: 3, skillNames: ["haoshi", "dimeng"] },
+  { name: "erzhang", displayName: "Trương Chiêu & Trương Hoành", kingdom: "wu", maxHp: 3, skillNames: ["guzheng", "zhijian"] },
   { name: "huatuo", displayName: "Hoa Đà", kingdom: "qun", maxHp: 3, skillNames: ["jijiu", "qingnang"] },
   { name: "lvbu", displayName: "Lữ Bố", kingdom: "qun", maxHp: 5, skillNames: ["wushuang"] },
-  { name: "diaochan", displayName: "Điêu Thuyền", kingdom: "qun", maxHp: 3, skillNames: ["biyue"], gender: "female" }, // Lijian deferred, needs pindian (gender now modeled, see DoubleSword)
+  { name: "diaochan", displayName: "Điêu Thuyền", kingdom: "qun", maxHp: 3, skillNames: ["biyue", "lijian"], gender: "female" },
   { name: "yanliangwenchou", displayName: "Nhan Lương & Văn Xú", kingdom: "qun", maxHp: 4, skillNames: ["shuangxiong"] },
-  { name: "jiaxu", displayName: "Giả Hủ", kingdom: "qun", maxHp: 3, skillNames: ["weimu"] }, // Wansha/Luanwu deferred, need ally-rescue-suppression/marks
+  { name: "jiaxu", displayName: "Giả Hủ", kingdom: "qun", maxHp: 3, skillNames: ["weimu", "wansha", "luanwu"] },
   { name: "pangde", displayName: "Bàng Đức", kingdom: "qun", maxHp: 4, skillNames: ["mashu", "mengjin"] },
-  { name: "zhangjiao", displayName: "Trương Giác", kingdom: "qun", maxHp: 3, skillNames: ["leiji"] }, // Guidao deferred, needs judge-area
-  { name: "caiwenji", displayName: "Thái Văn Cơ", kingdom: "qun", maxHp: 3, skillNames: ["beige"], gender: "female" }, // Duanchang deferred, needs dual-general head/deputy
-  { name: "mateng", displayName: "Mã Đằng", kingdom: "qun", maxHp: 4, skillNames: ["mashu"] }, // Xiongyi deferred, needs marks/limit-counters
-  { name: "kongrong", displayName: "Khổng Dung", kingdom: "qun", maxHp: 3, skillNames: ["mingshi"] }, // Lirang deferred, needs a card-pile subsystem
+  { name: "zhangjiao", displayName: "Trương Giác", kingdom: "qun", maxHp: 3, skillNames: ["leiji", "guidao"] },
+  { name: "caiwenji", displayName: "Thái Văn Cơ", kingdom: "qun", maxHp: 3, skillNames: ["beige"], gender: "female" }, // Duanchang still deferred, needs the dual-general head/deputy mechanic (explicitly out of scope for Role mode, see this file's header)
+  { name: "mateng", displayName: "Mã Đằng", kingdom: "qun", maxHp: 4, skillNames: ["mashu", "xiongyi"] },
+  { name: "kongrong", displayName: "Khổng Dung", kingdom: "qun", maxHp: 3, skillNames: ["mingshi", "lirang"] },
   { name: "tianfeng", displayName: "Điền Phong", kingdom: "qun", maxHp: 3, skillNames: ["sijian", "suishi"] },
 ];

@@ -62,6 +62,7 @@ const DISCARD_IMPORTANCE: Record<CardKind, number> = {
   [CardKind.ExNihilo]: 30,
   [CardKind.GodSalvation]: 25,
   [CardKind.AmazingGrace]: 25,
+  [CardKind.Indulgence]: 20, // delayed trick, no immediate value -- lowest of the trick kinds
 };
 
 /** Picks exactly `count` cards to discard from `hand` when nobody made a real choice: the

@@ -43,6 +43,16 @@ export class GamePlayer {
    *  whose black-ness matches this flag may be played/discarded as Duel this turn (cleared each
    *  new turn). true = black cards unlocked, false = red cards unlocked. */
   duelViewAsBlackAllowed: boolean | null = null;
+  /** Names of "limit skills" (hạn định kỹ -- once per GAME, not once per turn) `player` has
+   *  already invoked -- e.g. Jiaxu's Luanwu, Mateng's Xiongyi. Never reset mid-game. */
+  usedLimitSkills = new Set<string>();
+  /** Delayed trick cards currently attached (e.g. Indulgence) -- resolved in placement order
+   *  during this player's own Judge phase (Room.runJudgePhase), each removing itself once
+   *  resolved (none implemented yet cycle back in). */
+  judgeArea: Card[] = [];
+  /** Set by a delayed trick's failed Judge-phase judgment (e.g. Indulgence) -- consumed and
+   *  cleared the instant this player's own Play phase is reached (Room.runPhase). */
+  forcedSkipPlayPhase = false;
 
   constructor(id: string, maxHp = 4) {
     this.id = id;

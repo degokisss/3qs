@@ -88,6 +88,11 @@ const KIND_INFO: Record<BasicOrTrickKind, { label: string; description: string }
     label: "Quá Hạ Sách Kiều",
     description: "Buộc 1 người chơi bất kỳ bỏ đúng 1 lá bài (trên tay hoặc trang bị) do bạn chọn.",
   },
+  [CardKind.Indulgence]: {
+    label: "Lạc Bất Tư Thục",
+    description:
+      "Bài công cụ thời gian: đặt vào vùng phán xét của 1 người khác. Giai đoạn phán xét của họ, họ phán 1 lá; nếu không phải chất Cơ, họ bỏ qua giai đoạn ra bài lượt đó.",
+  },
 };
 
 const WEAPON_DESCRIPTION: Record<string, string> = {
@@ -114,7 +119,7 @@ const HORSE_DESCRIPTION: Record<string, string> = {
   ZiXing: HORSE_OFFENSIVE,
 };
 
-/** Builds the full card catalog once (12 basic/trick kinds + 10 weapons + 6 horses = 28
+/** Builds the full card catalog once (13 basic/trick kinds + 10 weapons + 6 horses = 29
  *  entries), grouped/deduped from the real dealt deck so counts and each entry's `range`/
  *  `distanceDelta` can never drift from what Room actually shuffles in. */
 function buildCardCatalog(): LibraryCard[] {

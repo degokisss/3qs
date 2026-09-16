@@ -3,9 +3,22 @@
 // onEffect() methods, simplified: no Nullification counter-play window (that card isn't
 // implemented).
 
-import { Card, CardKind } from "./card.js";
+import { Card, CardKind, Suit } from "./card.js";
 import { GamePlayer } from "./player.js";
-import { EngineContext, applyDamage, detachCardFrom, effectiveDistance, findJinkLikeCard, findSlashLikeCard, heal, isImmuneToSlashAndDuel, isImmuneToSnatch } from "./combat.js";
+import {
+  EngineContext,
+  SUIT_LABEL_VI,
+  applyDamage,
+  detachCardFrom,
+  disposeJudgmentCard,
+  effectiveDistance,
+  findJinkLikeCard,
+  findSlashLikeCard,
+  heal,
+  isImmuneToSlashAndDuel,
+  isImmuneToSnatch,
+  judge,
+} from "./combat.js";
 
 /** Alive players `actor` could legally target with Dismantlement: not self, has cards in play. */
 export function dismantlementCandidates(actor: GamePlayer, alive: GamePlayer[]): GamePlayer[] {
@@ -216,4 +229,45 @@ export async function resolveAmazingGrace(ctx: EngineContext, source: GamePlayer
     player.hand.push(card);
     ctx.log.push(`${player.id} nhận 1 lá từ Ngũ Cốc Phong Đăng`);
   }
+}
+
+/** Alive players `actor` could legally target with Indulgence: any OTHER player (real
+ *  lang/vi_VN text: "Lựa chọn: 1 người khác" -- not self-targetable in this localization),
+ *  who doesn't already have one attached (real rule: a judge area can't hold 2 copies of the
+ *  SAME delayed trick at once). */
+export function indulgenceCandidates(actor: GamePlayer, alive: GamePlayer[]): GamePlayer[] {
+  return alive.filter((p) => p !== actor && !p.judgeArea.some((c) => c.kind === CardKind.Indulgence));
+}
+
+/** Attaches `card` (Indulgence, already detached from the player's hand by the caller) to
+ *  `target`'s judge area -- unless Qianxun's `blocksIndulgenceEntry` auto-discards it on
+ *  entry instead (his skill's 2nd clause: it never actually gets to sit in his judge area). */
+export function attachIndulgence(ctx: EngineContext, target: GamePlayer, card: Card): void {
+  if (target.skills.some((s) => s.blocksIndulgenceEntry?.(target))) {
+    ctx.discardPile.push(card);
+    ctx.log.push(`${target.id} miễn nhiễm, Lạc Bất Tư Thục vào thẳng chồng bài bỏ (qianxun)`);
+    return;
+  }
+  target.judgeArea.push(card);
+  ctx.log.push(`${target.id} nhận Lạc Bất Tư Thục vào vùng phán xét`);
+}
+
+/** Indulgence's Judge-phase resolution (Room.runJudgePhase, called once `target`'s turn
+ *  reaches its own Judge phase): judges a card (reusing the shared `judge()` helper, so any
+ *  retrial skill -- e.g. Guicai/Guidao -- can still intervene); if the result is NOT Heart,
+ *  `target` skips their own Play phase this turn. The judgment card is disposed via
+ *  `disposeJudgmentCard` (so Guojia's Tiandu can claim it instead of it being discarded); the
+ *  Indulgence card itself always ends up in the discard pile afterward -- real Sanguosha
+ *  doesn't cycle it back for another attempt, unlike some other delayed tricks. */
+export async function resolveIndulgenceJudgment(ctx: EngineContext, target: GamePlayer, card: Card): Promise<void> {
+  const judgeCard = await judge(ctx, target, "indulgence");
+  if (judgeCard) {
+    ctx.log.push(`${target.id} phán Lạc Bất Tư Thục: ${SUIT_LABEL_VI[judgeCard.suit]} ${judgeCard.point}`);
+    if (judgeCard.suit !== Suit.Heart) {
+      target.forcedSkipPlayPhase = true;
+      ctx.log.push(`${target.id} sẽ bỏ qua giai đoạn ra bài lượt này (indulgence)`);
+    }
+    await disposeJudgmentCard(ctx, target, judgeCard);
+  }
+  ctx.discardPile.push(card);
 }

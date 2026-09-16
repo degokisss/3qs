@@ -1177,6 +1177,237 @@ by any player choice.
   (`GET /image/card/analeptic.png` 200), and that clicking it sent back the exact expected
   `{ type: "response", requestId, actionId }` payload.
 
+## Milestone 20 — DONE (14 more skills ported, closing most "sibling skill deferred" gaps)
+
+User asked to add the missing skills for the remaining generals. `skill.ts`'s `GENERALS` array
+documented 21 of the 44 ported generals as missing a sibling skill, each with an inline reason
+(needs pindian, judge-area, multi-card viewAs, equip-onto-another-player, etc.). This milestone
+recovered the real Vietnamese skill text from this repo's own git history --
+`lang/vi_VN/Package/Standard{Shu,Wei,Wu,Qun}General.lua` were tracked before a later "strip
+legacy desktop client" commit deleted them from the working tree, but the blobs are still
+reachable at the pre-strip commit -- instead of re-guessing from generic Three Kingdoms Kill
+domain knowledge the way some of those inline comments originally were. That immediately
+surfaced 2 comments that were flat wrong (Cao Cao's Standard kit has no 2nd skill in this
+repo's actual localization -- "Hujia" doesn't exist in it at all; Huang Zhong's
+"LiegongRange" is a Hegemony-lord-only extension of Liegong itself, not a distinct 2nd
+Role-mode skill) and 1 that was overly pessimistic (Duoshi turned out to be an ordinary
+immediate AOE trick once the real card text was checked against upstream, not delayed-trick-
+dependent -- see below).
+
+**14 skills ported across 13 generals**, all reusing EXISTING generic asks
+(`askUseSelfAction`/`askChooseAnyPlayer`/`askPickCard`/`askChooseDiscards`) instead of adding
+new Controller/server.ts/client-UI wiring per skill -- zero new WebSocket message types, zero
+new client-side prompt branches:
+- **Luoshen** (Zhen Ji): new `Phase.Start` `otherPhaseAction` -- repeated self-judgment (reusing
+  Guicai's `judge()` helper) while the result stays black and she keeps choosing to continue;
+  all black judgment cards collected go to her hand.
+- **Fanjian** (Zhou Yu): reveals+gives 1 hand card to a chosen target, who then chooses between
+  discarding every hand/equipped card matching that card's suit or losing 1 hp. No suit-
+  guessing UI needed (the card is revealed openly) -- a prior comment guessing otherwise was
+  wrong.
+- **Lieren** (Zhurong) / **Quhu** (Xun Yu): new shared `pindian()` helper (card-point duel) --
+  both sides reveal 1 card via `askPickCard` (reused for "pick 1 of your own hand", not just
+  Amazing Grace's original draft-pool shape); higher point wins, a tie favors the opponent (the
+  side that INITIATED the pindian loses ties, the real rule). New `onSlashDamageDealt` hook
+  (Lieren specifically fires after SLASH damage, not any damage, same reasoning as
+  KylinBow/DoubleSword/Triblade already being resolved inline in `resolveSlash`).
+- **Jieyin** (Sun Shangxiang): discard 2, pick a wounded male player, both heal 1.
+- **Dimeng** (Lu Su): pick 2 other players, pay up to X of Lu Su's own cards (X = their hand-
+  count difference), swap their hands.
+- **Zhijian** (Erzhang): places a held equip card into another player's matching slot, draws 1.
+  New `EngineContext.equipPlayer`, wrapping Room's already-recipient-generic private `equip()`.
+  Unreachable through normal bot play (the bot's own always-equip pass in `runPlayPhase` spends
+  any equip card from hand before a `selfAction` skill gets a turn) -- proven by a dedicated
+  test instead of log-mining, same class as Wushuang.
+- **Lijian** (Diao Chan): discard 1, pick 2 other male players -- the 2nd-chosen is compelled
+  into using Duel against the 1st-chosen, via `resolveDuel` imported directly from `trick.ts`
+  (no circular import: `trick.ts` never imports `skill.ts`).
+- **Wansha** (Jia Xu): new `suppressesAllyRescue` locked-skill hook -- while it's Jia Xu's own
+  turn (`player.phase !== NotActive`), `resolveDying`'s ally-rescue loop is skipped entirely
+  (self-rescue unaffected).
+- **Luanwu** (Jia Xu): once per GAME (new `GamePlayer.usedLimitSkills` set), every other player
+  is compelled to Slash whoever's nearest to them (via `resolveSlash` imported directly from
+  `combat.ts`) or lose 1 hp -- their own choice, asked via a synthetic `"luanwu-slash"` prompt
+  name (same precedent as Xiaoguo's `"xiaoguo-defend"` ask on a non-owning player).
+- **Xiongyi** (Ma Teng): once per game, every ally draws 3; heals 1 if his Role-mode side
+  currently has the fewest alive members.
+- **Guidao** (Zhang Jiao): reuses Guicai's `onJudgment` retrial hook directly (any judgment,
+  not just his own), restricted to discarding a black card. `judge()`'s retrial log line was
+  hardcoded to always say "dùng Quỷ Tài" (Guicai's own name) regardless of which skill actually
+  triggered it -- fixed to name the real triggering skill's `displayName` dynamically, since
+  Guidao now shares the same code path.
+- **Lirang** (Kong Rong): new `redirectsOwnDiscard` hook -- may redirect a card of his own
+  about to enter the discard pile (via a genuine discard, not being played) straight to another
+  player's hand instead. `discardRandom` (shared by 6 skills) and `discardDownToLimit`'s
+  over-limit discard now route through a new exported `routeDiscard` helper that checks this;
+  proactive self-paid skill costs elsewhere are NOT intercepted (deliberate scope line, not a
+  bug -- same "faithful behavior, simplified interaction" precedent used throughout).
+- **Duoshi** (Lu Xun): up to 4 times per Play phase, converts a red hand card into playing
+  [Await Exhausted] (Dĩ Dật Đãi Lao). Confirmed via a live web search against upstream (三国杀)
+  that this is a genuine IMMEDIATE AOE trick (self + all allies each draw 2 then discard 2),
+  NOT a delayed trick, despite `card.ts`'s header lumping "AwaitExhausted" into a combined
+  "needs delayed-trick/judge-area OR a reactive counter-play stack" exclusion blurb covering 11
+  different trick kinds at once. Implemented inline (no new `CardKind`/`trick.ts` resolver/
+  `canViewAs*` hook) since no other general ever draws this card for real.
+- **Fangquan** (Liu Shan): 2 new structural hooks, since Play-phase-skip and extra-turn-grant
+  don't fit the existing per-skill hook shapes. `canSkipPlayPhase` (ask-gated, unlike Keji's
+  compulsory `skipsDiscardPhase`) consulted directly in `Room.runPhase`'s `Phase.Play` case.
+  `grantsExtraTurn` consulted in the `Phase.Finish` case, pushing the chosen recipient onto a
+  new `Room.extraTurnQueue`; `playTurn()` now drains that queue first each call -- an
+  extra-turn player never touches `currentIndex`, so the normal rotation resumes exactly where
+  it would have otherwise once the queue drains.
+
+**Still genuinely blocked** (unchanged from before, now with corrected reasoning): Guojia's
+Tiandu (needs Guo Jia to ever own a delayed-trick judgment -- he has no self-judgment source of
+his own, so this needs the delayed-trick/judge-area subsystem `card.ts`'s header explicitly
+excludes), Da Qiao's Guose (needs the real Indulgence delayed-trick card, same reason), and Cai
+Wenji's Duanchang (needs the dual-general head/deputy mechanic, explicitly out of scope for Role
+mode per this file's own header). The other 16 fully-unported Standard generals from Milestone
+2.6 remain unchanged.
+
+- 2 existing tests needed adjustment, not because of a bug, but because 2 new compelled-action
+  mechanics (Luanwu forcing a Slash, Lijian forcing a Duel) legitimately bypass the exact
+  Controller hooks (`chooseSlashTarget`, `wantsToPlayTrick`/`chooseTrickTarget`) 2 pre-existing
+  tests asserted a declining seat would therefore never trigger -- both compelled paths are
+  real, intentional game behavior, so the tests were tightened to also decline the specific
+  compelled prompt rather than deleted or weakened.
+- 3 new dedicated deterministic tests for behavior too rare/never-bot-reachable to log-mine:
+  `testZhijianEquipsAnotherPlayer`, `testWanshaBlocksAllyRescueDuringOwnTurn` (both during AND
+  outside Jia Xu's own turn), `testPindianTieBreakFavorsOpponent`. `testGeneralSkillsAppearInPlay`
+  gained markers for the other 13 new skills.
+- **Verification, three layers:** (1) `npx tsc --noEmit` clean. (2) `npm run sim` 64/64 passing.
+  (3) Live `ws` server: created rooms with 5-10 all-bot seats and drove several full games to
+  `gameOver` with zero uncaught errors server-side.
+
+## Milestone 21 — DONE (delayed-trick/judge-area subsystem, closing Guojia's Tiandu)
+
+User asked to close Guojia's remaining gap (Tiandu). Real Tiandu ("after your judgment takes
+effect, you may take it") only ever matters when Guo Jia owns a judgment -- and he has no
+self-triggered judgment source of his own (Yiji doesn't judge), so this genuinely needed the
+delayed-trick/judge-area subsystem this repo explicitly excluded since Milestone 1.6. Rather
+than stub it, built the minimum real subsystem: `GamePlayer.judgeArea` (cards currently
+attached) + a real Judge phase (`Room.runJudgePhase`, previously a no-op) + Indulgence (Lạc Bất
+Tư Thục) as the one delayed trick actually implemented -- confirmed via a live web search
+against upstream (三国杀) that it's a genuine delayed trick (unlike Duoshi's AwaitExhausted from
+the prior milestone, which turned out NOT to be one).
+
+- `src/card.ts` -- new `CardKind.Indulgence`, 2 real cards added to the dealt deck (Club 6/
+  Spade 6, 2 of the real 3-copy Club6/Heart6/Spade6 set -- this repo's dev-branch source only
+  carries 2 per this file's own header; suit has no functional effect on the judgment, only the
+  freshly drawn card's suit does).
+- `src/combat.ts` -- `SUIT_LABEL_VI` and the shared `judge()` retrial helper MOVED here from
+  skill.ts (both now exported) so `trick.ts` can share them without a circular import
+  (skill.ts already imports `resolveDuel` from trick.ts, so `judge` can't live in either file
+  without one). New `disposeJudgmentCard(ctx, judgeOwner, card)`: discards a resolved judgment
+  card unless `judgeOwner`'s `claimsOwnJudgment` skill (Tiandu) claims it into hand instead.
+  `judge()`'s retrial log line was hardcoded to always say "dùng Quỷ Tài" (Guicai's own name)
+  regardless of which skill actually triggered it -- fixed to name the real triggering skill's
+  `displayName` dynamically (Guidao already shared this path since the prior milestone; this
+  bug was latent until now).
+- `src/player.ts` -- new `judgeArea: Card[]` (delayed tricks currently attached) and
+  `forcedSkipPlayPhase` (armed by a failed Indulgence judgment, consumed the instant the
+  owner's own Play phase is reached).
+- `src/trick.ts` -- `indulgenceCandidates` (any OTHER player without one already attached --
+  real rule: no 2 copies of the same delayed trick in one judge area), `attachIndulgence`
+  (respects Qianxun's new `blocksIndulgenceEntry`, see below), `resolveIndulgenceJudgment`
+  (Judge-phase resolution: `judge()` + skip-Play-phase-on-non-Heart + `disposeJudgmentCard`;
+  the Indulgence card itself always ends up discarded afterward -- this repo's ported revision
+  doesn't cycle it back for a 2nd attempt).
+- `src/room.ts` -- real `Phase.Judge` handling (`runJudgePhase`: resolves every card in
+  `judgeArea`, in placement order); new `tryPlayDelayedTrick` (like `tryPlayTargeted`, but
+  ATTACHES instead of discarding -- shares the same Weimu black-trick-immunity gate); wired
+  into both the bot's fixed pass and the human freeform path
+  (`computeLegalActions`/`resolveFreeAction`); `Phase.Play` now checks `forcedSkipPlayPhase`
+  before Fangquan's optional skip.
+- `src/skill.ts` -- **Tiandu** (Guojia): `claimsOwnJudgment` hook, reuses the generic
+  `askUseSelfAction` ask, zero new wiring. **Qianxun's (Lu Xun) 2nd clause**, newly relevant
+  now that Indulgence actually exists: new `blocksIndulgenceEntry` hook -- an Indulgence
+  targeting him is discarded immediately instead of ever attaching (his existing Snatch
+  immunity was the only clause modeled before, since the 2nd one had nothing to apply to).
+- `src/controller.ts`/`src/library.ts` -- `DISCARD_IMPORTANCE`/`KIND_INFO` are
+  `Record<CardKind, …>`, so both needed an Indulgence entry to keep compiling; `public/
+  index.html`'s `TRICK_LABEL` too, for a real Vietnamese name instead of the raw kind string
+  (the `image/card/indulgence.png` asset already shipped, unused until now).
+- 2 existing tests needed adjustment (not bugs): `testAmazingGraceIsATurnOrderDraft` (seed 1's
+  lord turned out to be Xun Yu, whose Quhu -- from the prior milestone -- also calls
+  `choosePickCard` for its pindian reveal; rewrote the test to extract the contiguous run of
+  picks whose pool sizes count down `n, n-1, …, 1`, instead of assuming every recorded call
+  belongs to the AmazingGrace draft); `totalCardsInPlay`/`DECK_SIZE` updated for the 2 new
+  cards and to include `judgeArea` in the conservation sum (a card sitting in a judge area
+  wasn't counted by hand/equip/draw-pile/discard-pile).
+- 3 new dedicated deterministic tests (Tiandu's precondition -- Guojia both owning a judgment
+  AND accepting the claim -- is too rare an intersection to log-mine reliably, same class as
+  Zhijian/Wansha): `testIndulgenceSkipsPlayPhaseOnFailedJudgment` (non-Heart arms the skip,
+  Heart doesn't), `testTianduClaimsOwnJudgmentCard`, `testQianxunBlocksIndulgenceEntry`.
+  `testGeneralSkillsAppearInPlay` gained an `indulgence` marker (log-mines fine now that any
+  general can hold+play it, unlike Tiandu's rarer intersection).
+- **Verification, three layers:** (1) `npx tsc --noEmit` clean. (2) `npm run sim` 67/67
+  passing. (3) Live `ws` server: 5 real all-bot games to completion/near-completion, zero
+  uncaught errors; every one logged a real Indulgence judgment and Play-phase skip in actual
+  gameplay, confirming the whole pipeline (not just isolated unit tests).
+
+**Post-Milestone-21: Guose (Da Qiao) too, closing the other gap this subsystem was built for.**
+User asked to also close Da Qiao's gap. Real Guose ("during your Play phase, you may convert a
+held Diamond card into playing [Indulgence]") turned out nearly free once the delayed-trick
+plumbing above existed -- just a viewAs hook, same shape as Wusheng/Qixi/Jijiu:
+- `src/combat.ts` -- new `findIndulgenceLikeCard`/`allIndulgenceLikeCards`, the same pair
+  pattern every other viewAs-eligible trick kind already has (Dismantlement/Duel/Slash).
+- `src/skill.ts` -- new `canViewAsIndulgence` hook; **Guose** registered on Da Qiao:
+  `canViewAsIndulgence: (card) => card.suit === Suit.Diamond`.
+- `src/room.ts` -- `tryPlayDelayedTrick` was missing the "biến 1 lá bài thành X (kỹ năng biến
+  hóa)" viewAs log line every other `tryPlay*` method already has (harmless while only real
+  Indulgence cards existed to play; a latent gap, not a new bug) -- added. Bot fixed pass now
+  finds Indulgence via `findIndulgenceLikeCard` (real card OR Guose's Diamond conversion);
+  `computeLegalActions` now offers every real-or-viewAs-eligible card via
+  `allIndulgenceLikeCards`, matching Dismantlement/Duel's existing freeform-play treatment.
+- New deterministic test `testGuoseLetsADiamondCardBePlayedAsIndulgence` (pure, same shape as
+  the existing Qicai/Wushuang viewAs proofs); `testGeneralSkillsAppearInPlay` gained an
+  `indulgenceViewAs` marker (log-mines fine, same reliability class as Guose's Diamond supply).
+- **Verification:** `npx tsc --noEmit` clean; `npm run sim` 69/69 passing; 3 more live `ws`
+  server games to completion, zero errors.
+
+**Only 2 of the 44 ported generals remain genuinely incomplete now:** Cao Pi's Fangzhu (needs
+face-up/down state) and Cai Wenji's Duanchang (needs the dual-general head/deputy mechanic,
+out of scope for Role mode).
+
+## Milestone 22 — DONE (optional display name, so players can tell each other apart)
+
+User asked for a way to set a name before entering a room, to identify who's who -- every seat
+was only ever labeled "P1".."P10", with no way to tell which real person was behind which one.
+
+- `src/server.ts` -- new `displayNames: Map<WebSocket, string>` (keyed by socket, not room, so
+  it survives leaving/rejoining a room without re-entering it; capped at 24 chars). New
+  `"setName"` message (works from the lobby or mid-room, like `"listLibrary"` -- no room/seat
+  required): sets or clears the name, then re-broadcasts the current room's state if the socket
+  is watching one. Cleaned up on disconnect (`ws.on("close")`) to avoid an unbounded leak across
+  reconnects. `snapshot()`'s per-player payload gained `playerName`: whatever name the socket
+  holding that seat (`gr.claimedSeats.get(p.id)`) has set, or `null` for bot/empty/nameless
+  seats -- fully backward compatible, a claimed-but-nameless human just shows the bare P-id like
+  before this feature existed.
+- `public/index.html` -- a persistent name field in the header (`localStorage`-backed, same
+  convention as the existing `hideOwnRole`/`soundEnabled`/`fxEnabled` toggles), committed on
+  blur/Enter (not every keystroke, to avoid spamming `setName` + a room-wide re-broadcast per
+  character typed) and re-sent on every fresh connection (the server only knows it per live
+  socket). Shown: prominently in each seat card (`Minh` with a small secondary `P1` tag,
+  replacing the bare id), in the pre-start "Đã có người" claimed-seat label, in "Đang điều
+  khiển"/"Đang đi"/"Đang chờ ... chọn tướng" status text, and substituted into the battle log
+  text itself (every whole-word P-id occurrence annotated, e.g. "P1 xuất Sát vào P2" ->
+  "Minh (P1) xuất Sát vào P2") via a new `namedLog` helper.
+- **Security note:** this is the first feature where genuinely free-form user-typed text (not
+  server-owned game data) flows into an `innerHTML` template string (the seat card, the
+  claimed-seat label) -- unescaped, a malicious player's name could have injected markup/script
+  into every other client watching that room (stored XSS). New `escapeHtml` helper (a
+  `textContent`-into-`div.innerHTML` round-trip) wraps `p.playerName` at both `innerHTML` call
+  sites. Every other `nameFor`/`namedLog` use case only ever assigns to `.textContent`
+  (inherently HTML-injection-safe), so no escaping needed there.
+- **Verification:** `npx tsc --noEmit` clean; `npm run sim` 69/69 passing (server.ts changes
+  don't touch the engine, no regressions). Live checks: a real headless-browser session setting
+  a name and claiming a seat rendered exactly `Minh <span class="seatIdTag">P1</span>` in the
+  actual seat card DOM; a 2-real-WebSocket-client script proved cross-client visibility (client
+  B, no name set, sees client A's `playerName: "Minh"` for the seat A claimed) and live
+  re-broadcast on rename (B receives `playerName: "MinhV2"` the instant A calls `setName` again,
+  no reconnect needed).
+
 ## Deploy
 
 This is a single stateless Node process (`src/server.ts`) with everything in memory -- no

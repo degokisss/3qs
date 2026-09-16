@@ -588,6 +588,7 @@
   }
   .info { flex: 1; min-width: 0; }
   .id { font-family: var(--font-label); font-weight: 700; font-size: 14px; color: var(--parchment); letter-spacing: 0.5px; }
+  .seatIdTag { font-weight: 400; font-size: 10px; color: var(--text-dim); letter-spacing: 0.3px; margin-left: 3px; }
   .role {
     display: inline-flex; align-items: center; gap: 3px;
     font-size: 9px; letter-spacing: 0.5px; text-transform: uppercase;
@@ -953,6 +954,18 @@
     transition: background 0.15s, color 0.15s;
   }
   #leaveRoom:hover { background: var(--gold); color: var(--ink); }
+  #myNameInput {
+    background: rgba(0,0,0,0.25);
+    color: var(--parchment);
+    border: 1px solid var(--gold-dim);
+    border-radius: 3px;
+    padding: 5px 10px;
+    font-family: var(--font-label);
+    font-size: 12px;
+    width: 120px;
+  }
+  #myNameInput:focus { outline: none; border-color: var(--gold); }
+  #myNameInput::placeholder { color: var(--text-dim); }
 
   @media (max-width: 860px) {
     #table {
@@ -966,6 +979,7 @@
   <header>
     <h1>三国杀・阵营战　Tam Quốc Sát - Phe Chiến</h1>
     <div class="headerMeta">
+      <input id="myNameInput" type="text" placeholder="Tên của bạn" maxlength="24" />
       <span id="status" class="disconnected">connecting…</span>
       <button id="libraryBtn" onclick="window.__openLibrary()">Thư viện</button>
       <span id="roomIdLabel"></span>
@@ -1069,12 +1083,14 @@
       archery_attack: "Vạn Tiễn Tề Phát",
       god_salvation: "Đào Viên Kết Nghĩa",
       amazing_grace: "Ngũ Cốc Phong Đăng",
+      indulgence: "Lạc Bất Tư Thục",
     };
     const CARD_LABEL = { ...TRICK_LABEL, slash: "Sát", jink: "Thiểm", peach: "Đào", analeptic: "Tửu" };
     const SLOT_ORDER = ["top1", "top2", "top3", "top4", "right", "bot4", "bot3", "bot2", "bot1", "left"]; // clockwise seating
     const IMG = "../../image";
 
     const statusEl = document.getElementById("status");
+    const myNameInputEl = document.getElementById("myNameInput");
     const myseatEl = document.getElementById("myseat");
     const turnBannerEl = document.getElementById("turnBanner");
     const centerTurnEl = document.getElementById("centerTurn");
@@ -1136,6 +1152,12 @@
     // hideOwnRole above. Two independent toggles per user request: sound and visual fx separately.
     let soundEnabled = localStorage.getItem("soundEnabled") !== "0"; // default on
     let fxEnabled = localStorage.getItem("fxEnabled") !== "0"; // default on
+    // Display name shown alongside our seat's P1..P10 id so other players can tell who's who --
+    // persisted like the toggles above, but re-sent to the server on every fresh connection
+    // (the server only knows it per live socket, see server.ts's `displayNames` map, which is
+    // naturally empty again after a reconnect).
+    let myName = localStorage.getItem("playerName") || "";
+    myNameInputEl.value = myName;
     const AUDIO = "audio";
     // Original QSanguosha injure grunts, restored from git history (see webport/README.md's
     // deploy notes) -- the original engine itself picks one of these at random per hit; reused
@@ -1167,6 +1189,47 @@
     function send(obj) {
       if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
     }
+
+    /** Escapes free-form user-typed text (currently only playerName, see "setName") before it
+     *  gets embedded in an `innerHTML` template string -- everything else rendered this way is
+     *  trusted server-owned game data (general/skill/card names), never raw user input. */
+    function escapeHtml(text) {
+      const div = document.createElement("div");
+      div.textContent = text;
+      return div.innerHTML;
+    }
+    /** `id` ("P1"), annotated with its display name if the seat is claimed by a named player --
+     *  e.g. "Minh (P1)". Safe to assign straight to `.textContent` (never `.innerHTML`); for
+     *  `innerHTML` contexts use `escapeHtml` on `p.playerName` directly instead (see the seat
+     *  card template). */
+    function nameFor(id, players) {
+      const p = players?.find((pp) => pp.id === id);
+      return p?.playerName ? `${p.playerName} (${id})` : id;
+    }
+    /** Same idea, applied across a whole battle-log text block: every whole-word occurrence of
+     *  a named player's P-id gets annotated. `.textContent`-safe (ids are always server-owned
+     *  "P<n>" tokens, never attacker-controlled, so building a RegExp from them is safe). */
+    function namedLog(logLines, players) {
+      const named = players.filter((p) => p.playerName);
+      let text = logLines.join("\n");
+      for (const p of named) text = text.replace(new RegExp(`\\b${p.id}\\b`, "g"), `${p.playerName} (${p.id})`);
+      return text;
+    }
+    /** Persists + sends whatever's currently in the name input -- on blur or Enter, not every
+     *  keystroke (avoids spamming a "setName" + room-wide re-broadcast per character typed). */
+    function commitName() {
+      const trimmed = myNameInputEl.value.trim().slice(0, 24);
+      if (trimmed === myName) return;
+      myName = trimmed;
+      localStorage.setItem("playerName", trimmed);
+      send({ type: "setName", name: trimmed });
+    }
+    myNameInputEl.addEventListener("blur", commitName);
+    myNameInputEl.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      commitName();
+      myNameInputEl.blur();
+    });
     function claim(playerId) {
       mySeat = playerId;
       send({ type: "claim", playerId });
@@ -1576,7 +1639,7 @@
       if (p.id === mySeat) {
         seatControls = `<button class="claimBtn" onclick="answerPromptNoop()" disabled>Ghế của bạn</button>`;
       } else if (p.claimed) {
-        seatControls = `<button class="claimBtn" disabled>Đã có người</button>`;
+        seatControls = `<button class="claimBtn" disabled>${p.playerName ? `Đã có người (${escapeHtml(p.playerName)})` : "Đã có người"}</button>`;
       } else if (!state.started) {
         const claimPart = `<button class="claimBtn" onclick="window.__claim('${p.id}')">Chiếm ghế</button>`;
         const botPart = amICreator
@@ -1599,7 +1662,7 @@
           <div class="avatarRing"><img class="avatar" src="${IMG}/generals/avatar/${p.general}.png" alt="${p.general}"
                onerror="this.parentElement.style.visibility='hidden'"></div>
           <div class="info">
-            <div class="id">${p.id}<span class="role ${roleCls}">${roleLabel}</span>${roleIcon}</div>
+            <div class="id">${p.playerName ? `${escapeHtml(p.playerName)} <span class="seatIdTag">${p.id}</span>` : p.id}<span class="role ${roleCls}">${roleLabel}</span>${roleIcon}</div>
             <div class="general">${p.generalName || p.general}</div>
             <div class="hp">${gems}</div>
           </div>
@@ -1866,7 +1929,7 @@
           .join("");
       } else {
         const waitingFor = lastState?.pickTurnPlayerId;
-        pickGeneralHintEl.textContent = waitingFor ? `Đang chờ ${waitingFor} chọn tướng…` : "Đang chọn tướng…";
+        pickGeneralHintEl.textContent = waitingFor ? `Đang chờ ${nameFor(waitingFor, lastState?.players)} chọn tướng…` : "Đang chọn tướng…";
         pickGeneralCardsEl.innerHTML = "";
       }
     }
@@ -1904,7 +1967,7 @@
       centerEmblemEl.className = over ? "over" : "";
       if (picking) {
         turnBannerEl.textContent =
-          state.pickTurnPlayerId === mySeat ? "Lượt của bạn — chọn tướng" : `Đang chờ ${state.pickTurnPlayerId} chọn tướng…`;
+          state.pickTurnPlayerId === mySeat ? "Lượt của bạn — chọn tướng" : `Đang chờ ${nameFor(state.pickTurnPlayerId, state.players)} chọn tướng…`;
         centerTurnEl.textContent = "Đang chọn tướng";
         centerActingEl.textContent = "";
         renderPickGeneral();
@@ -1920,13 +1983,13 @@
         const winnerLabel = over ? state.gameOver.winners.map((w) => ROLE_LABEL[w]).join(" + ") : "";
         turnBannerEl.textContent = over ? `${winnerLabel} chiến thắng` : "";
         centerTurnEl.textContent = `Lượt ${state.turnNumber}`;
-        centerActingEl.textContent = over ? "Ván đấu kết thúc" : `Đang đi: ${state.currentPlayerId ?? "-"}`;
+        centerActingEl.textContent = over ? "Ván đấu kết thúc" : `Đang đi: ${state.currentPlayerId ? nameFor(state.currentPlayerId, state.players) : "-"}`;
         centerWinnerEl.innerHTML = over
           ? `👑 ${winnerLabel} chiến thắng!<span class="winnerSub">Ván đấu kết thúc — mọi vai trò đã lộ diện</span>`
           : "";
       }
       myseatEl.textContent = mySeat
-        ? `Đang điều khiển: ${mySeat}`
+        ? `Đang điều khiển: ${nameFor(mySeat, state.players)}`
         : "Đang xem — bấm \"Chiếm ghế\" để điều khiển quyết định Sát.";
       toggleRoleBtnEl.style.display = mySeat ? "" : "none";
       // Safety net: if the current player has already moved past us (or we're no longer alive)
@@ -1958,7 +2021,7 @@
       }
       renderDrawPile();
 
-      logEl.textContent = state.log.join("\n");
+      logEl.textContent = namedLog(state.log, state.players);
       logEl.scrollTop = logEl.scrollHeight;
     }
 
@@ -2185,6 +2248,7 @@
       ws.onopen = () => {
         statusEl.textContent = "Đã kết nối";
         statusEl.className = "connected";
+        if (myName) send({ type: "setName", name: myName }); // server only knows it per live socket
       };
       ws.onclose = () => {
         statusEl.textContent = "Mất kết nối — đang thử lại…";

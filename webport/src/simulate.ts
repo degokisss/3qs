@@ -7,12 +7,12 @@ import strict from "node:assert/strict";
 import { Card, CardKind, Suit, buildStandardDeck } from "./card.js";
 import { Room } from "./room.js";
 import { GamePlayer } from "./player.js";
-import { EngineContext, effectiveAttackRange, effectiveDistance, findSlashLikeCard, loseHp, resolveSlash } from "./combat.js";
+import { EngineContext, allIndulgenceLikeCards, effectiveAttackRange, effectiveDistance, findIndulgenceLikeCard, findSlashLikeCard, loseHp, resolveSlash } from "./combat.js";
 import { SKILLS } from "./skill.js";
 import { pickLeastImportantCards, slashCandidates } from "./controller.js";
-import { duelCandidates, resolveArcheryAttack, resolveDismantlement, resolveDuel, resolveSavageAssault, resolveSnatch, snatchCandidates } from "./trick.js";
-import { Role } from "./types.js";
-const DECK_SIZE = 54 + 15 + 16; // basics(Slash-family 29+Jink 14+Peach 8+Analeptic 3) + implemented tricks(15) + equips(10 weapons+6 horses), see card.ts
+import { attachIndulgence, duelCandidates, resolveArcheryAttack, resolveDismantlement, resolveDuel, resolveIndulgenceJudgment, resolveSavageAssault, resolveSnatch, snatchCandidates } from "./trick.js";
+import { Phase, Role } from "./types.js";
+const DECK_SIZE = 54 + 17 + 16; // basics(Slash-family 29+Jink 14+Peach 8+Analeptic 3) + implemented tricks(17, incl. 2 Indulgence) + equips(10 weapons+6 horses), see card.ts
 
 function playerIds(n: number): string[] {
   return Array.from({ length: n }, (_, i) => `P${i + 1}`);
@@ -36,7 +36,8 @@ function totalCardsInPlay(room: Room): number {
     (sum, p) => sum + (p.weapon ? 1 : 0) + (p.defenseHorse ? 1 : 0) + (p.offenseHorse ? 1 : 0),
     0,
   );
-  return inHands + equipped + room.drawPile.length + room.discardPile.length;
+  const judged = room.players.reduce((sum, p) => sum + p.judgeArea.length, 0);
+  return inHands + equipped + judged + room.drawPile.length + room.discardPile.length;
 }
 
 async function testRoleDistribution(): Promise<void> {
@@ -603,12 +604,18 @@ async function testAmazingGraceIsATurnOrderDraft(): Promise<void> {
   lord.hand = [amazingGrace];
   for (const p of room.players) if (p !== lord) p.hand = [];
 
-  const picks: { playerId: string; poolSizeAtCallTime: number; chosenId: number }[] = [];
+  // Other generals' skills (e.g. Xun Yu's Quhu, if the lord happens to draw into it) can also
+  // call choosePickCard during the same turn -- find the contiguous run of exactly `alive`
+  // picks whose pool sizes count down n, n-1, ..., 1 (resolveAmazingGrace's own loop is a
+  // single uninterrupted async call chain, so its picks can never have another skill's call
+  // interleaved INSIDE that run, only before/after it) instead of assuming every recorded call
+  // belongs to this draft.
+  const allPicks: { playerId: string; poolSizeAtCallTime: number; chosenId: number }[] = [];
   for (const p of room.players) {
     room.setController(p.id, {
       choosePickCard: async (_player, candidates) => {
         const chosen = candidates[candidates.length - 1]; // deliberately the LAST, not the bot default's first
-        picks.push({ playerId: p.id, poolSizeAtCallTime: candidates.length, chosenId: chosen.id });
+        allPicks.push({ playerId: p.id, poolSizeAtCallTime: candidates.length, chosenId: chosen.id });
         return chosen;
       },
     });
@@ -616,24 +623,29 @@ async function testAmazingGraceIsATurnOrderDraft(): Promise<void> {
 
   await room.playTurn(); // the lord acts first
 
-  strict.equal(picks.length, 8, "exactly 8 (alive player count) cards must be revealed and picked, one per player");
+  const n = room.players.length;
+  let startIdx = -1;
+  for (let i = 0; i + n <= allPicks.length; i++) {
+    if (Array.from({ length: n }, (_, j) => allPicks[i + j].poolSizeAtCallTime).every((size, j) => size === n - j)) {
+      startIdx = i;
+      break;
+    }
+  }
+  strict.ok(startIdx !== -1, "must find a contiguous run of `alive` picks with pool sizes n, n-1, ..., 1 -- the actual AmazingGrace draft");
+  const picks = allPicks.slice(startIdx, startIdx + n);
+
   strict.equal(picks[0].playerId, lord.id, "the card's USER must pick first, not a random player");
 
   const lordIdx = room.players.indexOf(lord);
-  const expectedOrder = Array.from({ length: 8 }, (_, i) => room.players[(lordIdx + i) % 8].id);
+  const expectedOrder = Array.from({ length: n }, (_, i) => room.players[(lordIdx + i) % n].id);
   strict.deepEqual(
     picks.map((p) => p.playerId),
     expectedOrder,
     "turn order must start at the user and wrap around the table in seat order, not be random",
   );
-  strict.deepEqual(
-    picks.map((p) => p.poolSizeAtCallTime),
-    [8, 7, 6, 5, 4, 3, 2, 1],
-    "the revealed pool must shrink by exactly 1 after each player's pick",
-  );
 
   const chosenIds = picks.map((p) => p.chosenId);
-  strict.equal(new Set(chosenIds).size, 8, "every picked card must be distinct -- no two players end up with the same card");
+  strict.equal(new Set(chosenIds).size, n, "every picked card must be distinct -- no two players end up with the same card");
   for (const p of room.players) {
     const myPick = picks.find((pk) => pk.playerId === p.id)!;
     strict.ok(
@@ -865,9 +877,12 @@ async function testEquipAndTricksAppearInPlay(): Promise<void> {
 /**
  * Milestone 2/2.6 proof: confirms all 44 ported generals get assigned and as many of their
  * skills as can reliably be log-mined actually fire through real play. Kongcheng/Qianxun/
- * Liegong/Qicai/Mashu/Wushuang/SavageAssaultAvoid are proven separately (dedicated tests below)
- * since they're either passive filters with no log line, or gated behind a rare precondition
- * (e.g. Wushuang needs 2 held Jinks at once) too unreliable to log-mine in a fixed seed range.
+ * Liegong/Qicai/Mashu/Wushuang/SavageAssaultAvoid/Zhijian/Wansha/Tiandu are proven separately
+ * (dedicated tests below) since they're either passive filters with no log line, or gated
+ * behind a rare/never-reached-by-the-bot precondition (e.g. Wushuang needs 2 held Jinks at
+ * once; Zhijian needs an equip card to survive in hand past the bot's own always-equip pass;
+ * Tiandu needs Guojia specifically to both be dealt an Indulgence AND accept the claim ask,
+ * far too rare an intersection to reliably log-mine in a fixed seed range).
  */
 async function testGeneralSkillsAppearInPlay(): Promise<void> {
   const generalsSeen = new Set<string>();
@@ -876,6 +891,7 @@ async function testGeneralSkillsAppearInPlay(): Promise<void> {
     ["slashViewAs", "biến 1 lá bài thành Sát (kỹ năng biến hóa)"],
     ["jinkViewAs", "biến 1 lá bài thành Thiểm (kỹ năng biến hóa)"],
     ["dismantlementViewAs", "biến 1 lá bài thành Quá Hạ Sách Kiều (kỹ năng biến hóa)"],
+    ["indulgenceViewAs", "biến 1 lá bài thành Lạc Bất Tư Thục (kỹ năng biến hóa)"], // guose
     ["peachViewAs", "biến 1 lá bài thành Đào (kỹ năng biến hóa)"], // jijiu
     ["ganglieJudge", "phán Cương Liệt"],
     ["ganglieDiscard", "bỏ 2 lá bài (ganglie)"],
@@ -916,6 +932,20 @@ async function testGeneralSkillsAppearInPlay(): Promise<void> {
     ["sijian", "(sijian)"],
     ["suishiDraw", "(suishi)"],
     ["guanxing", "Quan Tinh:"],
+    ["luoshen", "(luoshen)"],
+    ["fanjian", "(fanjian)"],
+    ["lieren", "(lieren)"],
+    ["quhu", "(quhu)"],
+    ["jieyin", "(jieyin)"],
+    ["dimeng", "(dimeng)"],
+    ["lijian", "(lijian)"],
+    ["luanwu", "(luanwu)"],
+    ["xiongyi", "(xiongyi)"],
+    ["guidao", "dùng Quỷ Đạo"],
+    ["lirang", "(lirang)"],
+    ["duoshi", "(duoshi)"],
+    ["fangquan", "(fangquan)"],
+    ["indulgence", "phán Lạc Bất Tư Thục"],
   ];
   const seen = new Set<string>();
 
@@ -1208,6 +1238,12 @@ function makeTestContext(alivePlayers: GamePlayer[], log: string[], drawTop: () 
     arrangeTop: () => {},
     askGuanxingBottom: async () => new Set<number>(),
     askGuicaiRetrial: async () => null,
+    askChooseDiscards: async (player, count) => player.hand.slice(0, count),
+    equipPlayer: async (target, card) => {
+      if (card.kind === CardKind.Weapon) target.weapon = card;
+      else if (card.horseDelta === 1) target.defenseHorse = card;
+      else target.offenseHorse = card;
+    },
   };
 }
 
@@ -1399,7 +1435,14 @@ async function testKurouSelfInflictedDeathCreditsNoKiller(): Promise<void> {
 async function testHumanControllerOverridesBot(): Promise<void> {
   const room = new Room(playerIds(8), seededRng(300));
   await room.pickGenerals();
-  room.setController("P1", { chooseSlashTarget: async () => null });
+  // Luanwu (Jiaxu, new since this test was written) can compel ANY other player to Slash the
+  // nearest player via a separate "luanwu-slash" ask, bypassing chooseSlashTarget entirely --
+  // decline that specific compelled choice too so P1 genuinely never appears as an attacker,
+  // while every other wantsToUseSelfAction still falls back to the bot's normal always-accept.
+  room.setController("P1", {
+    chooseSlashTarget: async () => null,
+    wantsToUseSelfAction: async (_player, skillName) => skillName !== "luanwu-slash",
+  });
   await room.runUntilGameOver(300);
 
   const p1Attacked = room.log.some((line) => line.startsWith("P1 xuất Sát vào"));
@@ -1443,13 +1486,21 @@ async function testExpandedControllerHooksRespected(): Promise<void> {
     await room.pickGenerals();
     room.setController("P1", declineAll);
     await room.runUntilGameOver(300);
-    for (const line of room.log) {
+    for (let i = 0; i < room.log.length; i++) {
+      const line = room.log[i];
+      // Lijian (Diao Chan, new since this test was written) compels its 2nd-chosen player to
+      // use Duel via resolveDuel directly, bypassing wantsToPlayTrick/chooseTrickTarget
+      // entirely -- its own log line always immediately precedes the compelled "X dùng Quyết
+      // Đấu với Y" line, so skip that specific occurrence when checking self-sourcing.
+      const compelled = /dùng Ly Gián:.*xem như dùng Quyết Đấu với/.test(room.log[i - 1] ?? "");
       if (/^P1 trang bị/.test(line)) p1Equipped = true;
-      if (/^P1 (bốc 2 lá \(Vô Trung Sinh Hữu\)|dùng Quyết Đấu|dùng Nam Man Nhập Xâm|dùng Vạn Tiễn Tề Phát)/.test(line)) p1SelfTrickSourced = true;
+      if (!compelled && /^P1 (bốc 2 lá \(Vô Trung Sinh Hữu\)|dùng Quyết Đấu|dùng Nam Man Nhập Xâm|dùng Vạn Tiễn Tề Phát)/.test(line))
+        p1SelfTrickSourced = true;
       if (/^P1 né bằng Thiểm/.test(line)) p1Dodged = true;
       if (/^P1 dùng Đào để hồi phục/.test(line)) p1Peached = true;
       if (/^P[2-8] trang bị/.test(line)) otherEquipped = true;
-      if (/^P[2-8] (bốc 2 lá \(Vô Trung Sinh Hữu\)|dùng Quyết Đấu|dùng Nam Man Nhập Xâm|dùng Vạn Tiễn Tề Phát)/.test(line)) otherSelfTrickSourced = true;
+      if (!compelled && /^P[2-8] (bốc 2 lá \(Vô Trung Sinh Hữu\)|dùng Quyết Đấu|dùng Nam Man Nhập Xâm|dùng Vạn Tiễn Tề Phát)/.test(line))
+        otherSelfTrickSourced = true;
       if (/^P[2-8] né bằng Thiểm/.test(line)) otherDodged = true;
       if (/^P[2-8] dùng Đào để hồi phục/.test(line)) otherPeached = true;
     }
@@ -2196,4 +2247,222 @@ await testDoubleSwordLetsTargetDiscardOrTheAttackerDraw();
 await testDoubleSwordDoesNotTriggerOnSameGenderHit();
 await testSpearUsesTwoHandCardsAsASlash();
 await testSpearOfferedAsFreeformActionEvenWithARealSlashHeld();
-console.log("\nAll Milestone 0-3.9 smoke tests passed.");
+
+/**
+ * Zhijian (Erzhang) proof: places a held equip card into another player's matching slot, then
+ * draws 1 -- driven directly through the registered skill (`SKILLS.zhijian.selfAction`), since
+ * the bot's own always-equip pass in `Room.runPlayPhase` consumes any equip card from hand
+ * before a `selfAction` skill ever gets a turn, making this unreachable through normal bot
+ * play (see `testGeneralSkillsAppearInPlay`'s doc comment).
+ */
+async function testZhijianEquipsAnotherPlayer(): Promise<void> {
+  const deck = buildStandardDeck();
+  const weapon = deck.find((c) => c.kind === CardKind.Weapon)!;
+  const drawnCard = deck.find((c) => c.kind === CardKind.Slash)!;
+  const erzhang = new GamePlayer("EZ");
+  erzhang.hand = [weapon];
+  const target = new GamePlayer("TGT");
+  const log: string[] = [];
+  const ctx = makeTestContext([erzhang, target], log);
+  ctx.draw = (p, n) => {
+    for (let i = 0; i < n; i++) p.hand.push(drawnCard);
+  };
+
+  await SKILLS.zhijian.selfAction!(ctx, erzhang, Math.random);
+
+  strict.ok(!erzhang.hand.includes(weapon), "the equip card must leave Erzhang's own hand");
+  strict.equal(target.weapon, weapon, "the equip card must land in the target's matching weapon slot, not erzhang's own");
+  strict.ok(erzhang.hand.includes(drawnCard), "erzhang must draw 1 card after placing the equip");
+  console.log("PASS testZhijianEquipsAnotherPlayer: equip card moved to target's slot, erzhang drew 1");
+}
+
+/**
+ * Wansha (Jiaxu) proof: while it's Jiaxu's own turn (locked skill, no ask), every OTHER alive
+ * player is barred from playing Peach to rescue whoever's dying; outside his turn, ally rescue
+ * proceeds normally. Driven through `resolveSlash` (maxHp 1 so a landed hit drops straight to
+ * 0), same construction as `testAllyRescuePeachSavesADyingPlayer`.
+ */
+async function testWanshaBlocksAllyRescueDuringOwnTurn(): Promise<void> {
+  const deck = buildStandardDeck();
+  const slashA = deck.find((c) => c.kind === CardKind.Slash)!;
+  const slashB = deck.find((c) => c.kind === CardKind.Slash && c.id !== slashA.id)!;
+  const peachA = deck.find((c) => c.kind === CardKind.Peach)!;
+  const peachB = deck.find((c) => c.kind === CardKind.Peach && c.id !== peachA.id)!;
+
+  const jiaxu = new GamePlayer("JX");
+  jiaxu.skills = [SKILLS.wansha];
+  jiaxu.phase = Phase.Play; // it's currently jiaxu's own turn
+  const attacker = new GamePlayer("ATK");
+  const dying = new GamePlayer("DYING", 1);
+  const rescuer = new GamePlayer("RESCUE");
+  rescuer.hand = [peachA];
+  const log: string[] = [];
+  const ctx = makeTestContext([dying, rescuer, attacker, jiaxu], log);
+  ctx.onDying = (p) => {
+    p.alive = false;
+  };
+  ctx.askPeach = async () => false;
+  let rescuerAsked = false;
+  ctx.askPeachForOther = async () => {
+    rescuerAsked = true;
+    return true; // would accept if ever actually asked
+  };
+
+  await resolveSlash(ctx, attacker, dying, slashA);
+
+  strict.equal(dying.alive, false, "wansha must let the dying player actually die -- nobody may even be asked to rescue during jiaxu's own turn");
+  strict.equal(rescuerAsked, false, "the ally-rescue ask must never fire at all while wansha is active");
+  strict.ok(log.some((l) => l.includes("(wansha)")), "the wansha suppression must be logged");
+
+  // Outside Jiaxu's own turn, the identical scenario must let the rescuer save the dying player.
+  jiaxu.phase = Phase.NotActive;
+  const dying2 = new GamePlayer("DYING2", 1);
+  const rescuer2 = new GamePlayer("RESCUE2");
+  rescuer2.hand = [peachB];
+  const log2: string[] = [];
+  const ctx2 = makeTestContext([dying2, rescuer2, attacker, jiaxu], log2);
+  ctx2.onDying = (p) => {
+    p.alive = false;
+  };
+  ctx2.askPeach = async () => false;
+  ctx2.askPeachForOther = async () => true;
+
+  await resolveSlash(ctx2, attacker, dying2, slashB);
+
+  strict.ok(dying2.alive, "outside jiaxu's own turn, ally rescue must proceed normally");
+  console.log("PASS testWanshaBlocksAllyRescueDuringOwnTurn: rescue blocked during jiaxu's turn, allowed otherwise");
+}
+
+/**
+ * Pindian ("đấu điểm") tie-break proof: the shared `pindian()` helper used by Lieren/Quhu
+ * favors the OPPONENT on a tie (the real Sanguosha rule: the side that INITIATED the pindian
+ * loses ties) -- proven through Quhu (Xun Yu), forcing both sides to reveal equal-point cards.
+ */
+async function testPindianTieBreakFavorsOpponent(): Promise<void> {
+  const deck = buildStandardDeck();
+  const cardA = deck.find((c) => c.kind === CardKind.Slash && c.point === 7)!;
+  const cardB = deck.find((c) => c.kind === CardKind.Jink && c.point === 7)!;
+  strict.ok(cardA && cardB, "test setup needs 2 same-point (7), different-kind cards in the standard deck");
+
+  const xunyu = new GamePlayer("XY", 3);
+  xunyu.skills = [SKILLS.quhu];
+  xunyu.hand = [cardA];
+  const target = new GamePlayer("TGT", 5); // more hp than xunyu, satisfies quhu's target filter
+  target.hand = [cardB];
+  const log: string[] = [];
+  const ctx = makeTestContext([xunyu, target], log);
+
+  await SKILLS.quhu.selfAction!(ctx, xunyu, Math.random);
+
+  strict.equal(xunyu.hp, xunyu.maxHp - 1, "a tied pindian must count as the INITIATOR (xunyu) losing -- quhu's loss branch damages xunyu");
+  strict.equal(target.hp, target.maxHp, "the opponent must take no damage after winning a tie");
+  strict.ok(log.some((l) => l.includes("(quhu)")), "the pindian/quhu outcome must be logged");
+  console.log("PASS testPindianTieBreakFavorsOpponent: equal-point pindian counted as the initiator losing (real Sanguosha tie rule)");
+}
+
+/**
+ * Indulgence (delayed trick) proof: `resolveIndulgenceJudgment`'s Judge-phase resolution arms
+ * `forcedSkipPlayPhase` on a non-Heart judgment, and leaves it unset on a Heart one -- driven
+ * directly (pure, deterministic) since real bot play can't control which suit gets judged.
+ */
+async function testIndulgenceSkipsPlayPhaseOnFailedJudgment(): Promise<void> {
+  const deck = buildStandardDeck();
+  const indulgenceCard = deck.find((c) => c.kind === CardKind.Indulgence)!;
+  const spadeCard = deck.find((c) => c.suit === Suit.Spade && c.kind !== CardKind.Indulgence)!;
+  const heartCard = deck.find((c) => c.suit === Suit.Heart)!;
+
+  const target = new GamePlayer("TGT");
+  const log: string[] = [];
+  const ctx = makeTestContext([target], log, () => spadeCard);
+
+  await resolveIndulgenceJudgment(ctx, target, indulgenceCard);
+  strict.equal(target.forcedSkipPlayPhase, true, "a non-Heart judgment must arm forcedSkipPlayPhase");
+  strict.ok(ctx.discardPile.includes(indulgenceCard), "the Indulgence card itself must always end up discarded after resolving");
+  strict.ok(ctx.discardPile.includes(spadeCard), "the judgment card must be discarded too (no Tiandu claim without the skill)");
+
+  target.forcedSkipPlayPhase = false;
+  const log2: string[] = [];
+  const ctx2 = makeTestContext([target], log2, () => heartCard);
+  await resolveIndulgenceJudgment(ctx2, target, indulgenceCard);
+  strict.equal(target.forcedSkipPlayPhase, false, "a Heart judgment must NOT skip the Play phase");
+  console.log("PASS testIndulgenceSkipsPlayPhaseOnFailedJudgment: non-Heart armed the skip, Heart didn't");
+}
+
+/**
+ * Tiandu (Guojia) proof: may claim his own just-resolved judgment card into hand instead of it
+ * being discarded -- driven directly through `resolveIndulgenceJudgment` (the only real source
+ * of a judgment Guojia could ever own -- see this file's `testGeneralSkillsAppearInPlay` doc
+ * comment for why this can't be log-mined).
+ */
+async function testTianduClaimsOwnJudgmentCard(): Promise<void> {
+  const deck = buildStandardDeck();
+  const indulgenceCard = deck.find((c) => c.kind === CardKind.Indulgence)!;
+  const spadeCard = deck.find((c) => c.suit === Suit.Spade && c.kind !== CardKind.Indulgence)!;
+
+  const guojia = new GamePlayer("GJ");
+  guojia.skills = [SKILLS.tiandu];
+  const log: string[] = [];
+  const ctx = makeTestContext([guojia], log, () => spadeCard);
+
+  await resolveIndulgenceJudgment(ctx, guojia, indulgenceCard);
+
+  strict.ok(guojia.hand.includes(spadeCard), "tiandu must claim the judgment card into guojia's own hand");
+  strict.ok(!ctx.discardPile.includes(spadeCard), "the claimed judgment card must NOT end up in the discard pile");
+  strict.ok(ctx.discardPile.includes(indulgenceCard), "the indulgence card itself still always discards regardless of tiandu");
+  strict.ok(log.some((l) => l.includes("(tiandu)")), "the tiandu claim must be logged");
+  console.log("PASS testTianduClaimsOwnJudgmentCard: guojia claimed his own judgment card instead of discarding it");
+}
+
+/**
+ * Qianxun (Lu Xun) proof: an Indulgence entering his judge area is discarded immediately
+ * instead of actually attaching -- his skill's 2nd clause, newly relevant now that Indulgence
+ * exists. Driven directly through `attachIndulgence` (pure, deterministic).
+ */
+function testQianxunBlocksIndulgenceEntry(): void {
+  const deck = buildStandardDeck();
+  const indulgenceCard = deck.find((c) => c.kind === CardKind.Indulgence)!;
+  const luxun = new GamePlayer("LX");
+  luxun.skills = [SKILLS.qianxun];
+  const log: string[] = [];
+  const ctx = makeTestContext([luxun], log);
+
+  attachIndulgence(ctx, luxun, indulgenceCard);
+
+  strict.equal(luxun.judgeArea.length, 0, "qianxun must never actually let indulgence sit in his judge area");
+  strict.ok(ctx.discardPile.includes(indulgenceCard), "the blocked indulgence must go straight to the discard pile");
+  console.log("PASS testQianxunBlocksIndulgenceEntry: indulgence targeting lu xun discarded on entry, never attached");
+}
+
+/**
+ * Guose (Daqiao) proof: a held Diamond card (not a real Indulgence) is found/offered as a
+ * playable Indulgence, and a non-Diamond card is not -- via `findIndulgenceLikeCard`/
+ * `allIndulgenceLikeCards` directly (pure, deterministic, same shape as Wusheng/Qixi's own
+ * viewAs proofs).
+ */
+function testGuoseLetsADiamondCardBePlayedAsIndulgence(): void {
+  const deck = buildStandardDeck();
+  const diamondCard = deck.find((c) => c.suit === Suit.Diamond && c.kind !== CardKind.Indulgence)!;
+  const spadeCard = deck.find((c) => c.suit === Suit.Spade && c.kind !== CardKind.Indulgence)!;
+
+  const daqiao = new GamePlayer("DQ");
+  daqiao.skills = [SKILLS.guose];
+  daqiao.hand = [spadeCard, diamondCard];
+
+  strict.equal(findIndulgenceLikeCard(daqiao), diamondCard, "guose must offer the held Diamond card as a viewAs Indulgence");
+  strict.deepEqual(allIndulgenceLikeCards(daqiao), [diamondCard], "only the Diamond card must be offered, not the Spade one");
+
+  daqiao.hand = [spadeCard];
+  strict.equal(findIndulgenceLikeCard(daqiao), null, "with no Diamond card held, guose must offer nothing");
+  console.log("PASS testGuoseLetsADiamondCardBePlayedAsIndulgence: diamond card offered as viewAs indulgence, spade-only hand offered nothing");
+}
+
+await testZhijianEquipsAnotherPlayer();
+await testWanshaBlocksAllyRescueDuringOwnTurn();
+await testPindianTieBreakFavorsOpponent();
+await testIndulgenceSkipsPlayPhaseOnFailedJudgment();
+await testTianduClaimsOwnJudgmentCard();
+testQianxunBlocksIndulgenceEntry();
+testGuoseLetsADiamondCardBePlayedAsIndulgence();
+console.log(
+  "\nAll Milestone 0-3.9 smoke tests passed, plus Luoshen/Fanjian/Lieren/Quhu/Jieyin/Dimeng/Zhijian/Lijian/Wansha/Luanwu/Xiongyi/Guidao/Lirang/Duoshi/Fangquan/Indulgence/Tiandu/Guose.",
+);

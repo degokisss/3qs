@@ -109,6 +109,12 @@ const rooms = new Map<string, GameRoom>();
 // Which room (if any) each connected socket is currently watching -- a socket is either "in the
 // lobby" (absent from this map, sees the live room list) or watching exactly one room.
 const wsRoom = new Map<WebSocket, GameRoom>();
+// Optional display name a connected socket set via "setName", shown alongside the P1..P10 seat
+// id it claims (if any) so players can actually tell each other apart -- keyed by socket, not
+// room, so it survives a "leaveRoom"/rejoin and doesn't need re-entering per room. Cleared on
+// disconnect (see "close" below) to avoid an unbounded leak across reconnects.
+const displayNames = new Map<WebSocket, string>();
+const MAX_NAME_LENGTH = 24;
 
 // Room codes: 4 chars, excludes visually-ambiguous 0/O/1/I so they're easy to read/say aloud.
 const ROOM_ID_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -535,6 +541,13 @@ function snapshot(gr: GameRoom) {
       offenseHorse: p.offenseHorse?.horseName ?? null,
       offenseHorseDelta: p.offenseHorse?.horseDelta ?? null,
       claimed: gr.claimedSeats.has(p.id),
+      // Whatever name the claiming socket set via "setName", if any -- null for bot/empty
+      // seats or a claimed-but-nameless human (client falls back to showing just the P1..P10
+      // id, exactly like before this feature existed).
+      playerName: (() => {
+        const holder = gr.claimedSeats.get(p.id);
+        return holder ? (displayNames.get(holder) ?? null) : null;
+      })(),
       botEnabled: gr.botEnabledSlots.has(p.id),
       skills: p.skills.map((s) => ({
         name: s.displayName,
@@ -643,6 +656,7 @@ wss.on("connection", (ws) => {
 
   ws.on("close", () => {
     leaveRoom(ws);
+    displayNames.delete(ws);
   });
 
   ws.on("message", (raw) => {
@@ -662,6 +676,17 @@ wss.on("connection", (ws) => {
         // the lobby or mid-game alike (no room/seat required).
         ws.send(JSON.stringify({ type: "library", generals: GENERAL_CATALOG, cards: CARD_CATALOG }));
         break;
+      case "setName": {
+        // Works from the lobby or mid-room, like "listLibrary" -- no room/seat required. Sets
+        // (or clears, if blank after trimming) the name shown alongside whichever seat this
+        // socket claims, in every room it's currently watching.
+        const name = String(msg.name ?? "").trim().slice(0, MAX_NAME_LENGTH);
+        if (name) displayNames.set(ws, name);
+        else displayNames.delete(ws);
+        const gr = wsRoom.get(ws);
+        if (gr) broadcast(gr); // re-broadcast so every watcher's seat labels pick up the new name
+        break;
+      }
       case "createRoom": {
         leaveRoom(ws); // in case this socket was already watching another room
         const gr = createRoom(ws);
