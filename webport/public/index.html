@@ -775,6 +775,21 @@
     margin-right: 10px;
   }
   .roomMeta { font-size: 11.5px; color: var(--text-dim); }
+  .roomStatus {
+    display: inline-block;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: 3px;
+    margin-right: 8px;
+    border: 1px solid currentColor;
+  }
+  .roomStatus--waiting { color: var(--text-dim); }
+  .roomStatus--picking { color: var(--gold); }
+  .roomStatus--playing { color: var(--wu); }
+  .roomStatus--over { color: var(--blood); }
   .roomJoinBtn {
     background: transparent;
     color: var(--gold);
@@ -1185,24 +1200,34 @@
       roomIdLabelEl.textContent = `Phòng ${roomId}`;
     }
 
+    function roomStatusInfo(r) {
+      if (r.gameOver) return { cls: "over", label: "Đã kết thúc" };
+      if (!r.started) return { cls: "waiting", label: "Đang chờ" };
+      if (r.pickingGenerals) return { cls: "picking", label: "Đang chọn tướng" };
+      return { cls: "playing", label: `Đang chơi · lượt ${r.turnNumber}` };
+    }
     function renderLobby(rooms) {
       if (rooms.length === 0) {
         roomListEl.innerHTML = `<div class="roomEmpty">Chưa có phòng nào — hãy tạo phòng mới.</div>`;
         return;
       }
       roomListEl.innerHTML = rooms
-        .map(
-          (r) => `
+        .map((r) => {
+          const status = roomStatusInfo(r);
+          // Once a room has started, "claim" is server-rejected (see the "claim" handler's
+          // `gr.started` guard) -- joining only lets you watch from then on, so the button must
+          // say so instead of implying you can still take a seat.
+          const joinLabel = r.started ? "Xem" : "Vào";
+          return `
         <div class="roomRow">
           <div>
             <span class="roomCode">${r.id}</span>
-            <span class="roomMeta">${r.seatsClaimed} người · ${r.botCount} bot · ${r.watchers} đang xem · ${
-              r.gameOver ? "đã kết thúc" : `lượt ${r.turnNumber}`
-            }</span>
+            <span class="roomStatus roomStatus--${status.cls}">${status.label}</span>
+            <span class="roomMeta">${r.seatsClaimed} người · ${r.botCount} bot · ${r.watchers} đang xem</span>
           </div>
-          <button class="roomJoinBtn" onclick="window.__joinRoom('${r.id}')">Vào</button>
-        </div>`,
-        )
+          <button class="roomJoinBtn" onclick="window.__joinRoom('${r.id}')">${joinLabel}</button>
+        </div>`;
+        })
         .join("");
     }
     window.__joinRoom = (roomId) => send({ type: "joinRoom", roomId });
@@ -1648,6 +1673,7 @@
         pickGeneralCardsEl.innerHTML = ""; // clear stale (now hidden) candidate cards from the last pick
       }
       startGameBtn.style.display = !started && amICreator ? "" : "none";
+      newGameBtn.style.display = amICreator ? "" : "none";
       tableEl.style.display = picking ? "none" : "";
       pickGeneralPanelEl.style.display = picking ? "block" : "none";
       turnBannerEl.className = over ? "over" : "";
