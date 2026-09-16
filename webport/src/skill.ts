@@ -60,6 +60,29 @@
 // stealing) -- those generals/skills are simply not ported; see webport/README.md's Milestone
 // 2.6 section for the full per-general blocked list and reasons.
 
+// Post-Milestone-2.6: Guanxing (Zhuge Liang's 2nd skill) ported, closing the gap this file's
+// header and webport/README.md previously called out as "needs card-reorder UI". Real Guanxing
+// lets you look at the top X cards (X = alive player count, capped at 5) and arrange them in
+// ANY order onto the top or bottom of the draw pile; that free-form reorder is simplified down
+// to a top/bottom split (pick which revealed cards go to the bottom, the rest stay on top in
+// original relative order) -- same "faithful behavior, simplified interaction" precedent as
+// Kongcheng/Tieqi/Yingzi above, and still exercises the actual strategic decision (bury bad
+// cards vs. keep good ones accessible) without a drag-and-drop UI. See EngineContext's
+// peekTop/arrangeTop/askGuanxingBottom (combat.ts) and Room's backing peekTop/arrangeTop
+// (room.ts) for the mechanics, and Controller.chooseGuanxingBottom (controller.ts) for the
+// human/bot decision surface.
+
+// Post-Milestone-2.6 (cont'd): Guicai (Sima Yi's 2nd skill) ported too, closing another gap
+// this file long called "needs judge-area/retrial system". Turns out Guicai's real trigger
+// (AskForRetrial, confirmed from upstream src/package/standard-wei-generals.cpp) applies to
+// ANY judgment, not specifically delayed-trick judge-area ones -- so it plugs directly into
+// the 5 judgments this port already has (Ganglie/Tieqi/Shuangxiong/Leiji/Beige) via a new
+// shared `judge()` helper (replacing every raw `ctx.drawTop()` judgment call) and a new
+// `onJudgment` skill hook, no judge-area subsystem needed. Bots always decline (no
+// alignment-aware AI to judge whether flipping a given judgment helps or hurts its owner);
+// humans get a real card-pick-or-decline ask. See EngineContext.askGuicaiRetrial (combat.ts),
+// the `judge()` helper right below, and Controller.wantsToUseGuicai (controller.ts).
+
 import { Card, CardKind, Suit } from "./card.js";
 import { GamePlayer } from "./player.js";
 import { Phase } from "./types.js";
@@ -174,6 +197,19 @@ export interface Skill {
   /** Additive modifier to `player`'s distance TO other players (positive = closer, same -1-style
    *  shape as an offense horse). Consulted by combat.ts's effectiveDistance (e.g. Mashu). */
   attackDistanceDelta?(player: GamePlayer): number;
+  /** Broadcast to every alive player's skills whenever any judgment (Ganglie/Tieqi/Shuangxiong/
+   *  Leiji/Beige, via the shared `judge()` helper below) is resolving -- `self` is the reacting
+   *  player, `judgeOwner` is whose judgment it is (may equal `self`), `currentCard` is the
+   *  judgment's card so far (the fresh draw, or an earlier retrial's replacement). Return a
+   *  replacement card from `self.hand` (a "retrial" -- e.g. Sima Yi's Guicai) or null to
+   *  decline; `judge()` removes it from hand and voids the overridden card to the discard pile. */
+  onJudgment?(
+    ctx: EngineContext,
+    self: GamePlayer,
+    judgeOwner: GamePlayer,
+    currentCard: Card,
+    reason: string,
+  ): Promise<Card | null>;
   /** Fired on `player`'s own skills right after a card they played leaves their hand at 0 count
    *  (e.g. Tianfeng's Sijian). */
   onHandEmptied?(ctx: EngineContext, player: GamePlayer, rng: () => number): Promise<void> | void;
@@ -217,9 +253,38 @@ function discardRandom(ctx: EngineContext, player: GamePlayer, rng: () => number
   return card;
 }
 
+/** Player::judge equivalent: draws the top card as a judgment for `judgeOwner` (skill `reason`,
+ *  used only for the retrial log line), then gives every alive player's `onJudgment` skills
+ *  (e.g. Sima Yi's Guicai) a chance to replace the result with a card from their own hand -- a
+ *  "retrial" (bổ sung phán đoán), which the REAL Sanguosha rule applies to EVERY judgment, not
+ *  just delayed-trick judge-area ones, so this wraps every implemented judgment site below
+ *  uniformly instead of hardcoding Guicai into each one. The original drawn card, and any
+ *  card overridden by a later retrial, are immediately voided to the discard pile; only the
+ *  FINAL effective card is returned, for the caller to dispose of per their own skill's rule
+ *  (most discard it after logging; Shuangxiong instead gives it to the judged player's hand).
+ *  Returns null if the draw pile is exhausted. */
+async function judge(ctx: EngineContext, judgeOwner: GamePlayer, reason: string): Promise<Card | null> {
+  let effective = ctx.drawTop();
+  if (!effective) return null;
+  for (const p of ctx.alivePlayers) {
+    for (const skill of p.skills) {
+      if (!skill.onJudgment || p.hand.length === 0) continue;
+      const retrial = await skill.onJudgment(ctx, p, judgeOwner, effective, reason);
+      if (!retrial) continue;
+      const idx = p.hand.indexOf(retrial);
+      if (idx === -1) continue; // defensive: a misbehaving controller named a card not actually held
+      p.hand.splice(idx, 1);
+      ctx.discardPile.push(effective); // the overridden card is voided
+      ctx.log.push(`${p.id} dùng Quỷ Tài, thay phán quyết bằng ${SUIT_LABEL_VI[retrial.suit]} ${retrial.point}`);
+      effective = retrial;
+    }
+  }
+  return effective;
+}
+
 async function ganglieOnDamaged(ctx: EngineContext, player: GamePlayer, source: GamePlayer, rng: () => number): Promise<void> {
   if (!source.alive) return;
-  const judgeCard = ctx.drawTop();
+  const judgeCard = await judge(ctx, player, "ganglie");
   if (!judgeCard) return;
   ctx.discardPile.push(judgeCard);
   ctx.log.push(`${player.id} phán Cương Liệt: ${SUIT_LABEL_VI[judgeCard.suit]} ${judgeCard.point}`);
@@ -239,7 +304,7 @@ async function ganglieOnDamaged(ctx: EngineContext, player: GamePlayer, source: 
 }
 
 async function tieqiOnSlashTargeted(ctx: EngineContext, attacker: GamePlayer, target: GamePlayer): Promise<boolean> {
-  const judgeCard = ctx.drawTop();
+  const judgeCard = await judge(ctx, attacker, "tieqi");
   if (!judgeCard) return false;
   ctx.discardPile.push(judgeCard);
   ctx.log.push(`${attacker.id} phán Thiết Kỵ: ${SUIT_LABEL_VI[judgeCard.suit]} ${judgeCard.point}`);
@@ -517,11 +582,33 @@ const shuangxiongAction = {
   phase: Phase.Draw,
   async run(ctx: EngineContext, player: GamePlayer): Promise<void> {
     if (!(await ctx.askUseSelfAction(player, "shuangxiong"))) return;
-    const judgeCard = ctx.drawTop();
+    const judgeCard = await judge(ctx, player, "shuangxiong");
     if (!judgeCard) return;
     player.hand.push(judgeCard);
     player.duelViewAsBlackAllowed = isRed(judgeCard);
     ctx.log.push(`${player.id} phán Song Hùng: ${SUIT_LABEL_VI[judgeCard.suit]} ${judgeCard.point}, nhận vào tay`);
+  },
+};
+
+/** Guanxing (Zhuge Liang): automatic (no real cost to declining, same precedent as Kongcheng/
+ *  Tieqi/Yingzi above) -- peeks the top X cards of the draw pile (X = number of alive players,
+ *  capped at 5) and asks which go to the bottom of the pile; everything else stays on top in
+ *  its original relative order. This is a deliberate simplification of the real skill's
+ *  free-form "arrange these cards in any order onto the top or bottom of the pile" down to a
+ *  top/bottom split -- a full drag-and-drop reorder UI is out of scope (this was exactly
+ *  Milestone 2.6's original reason for not porting Guanxing at all; see EngineContext's
+ *  peekTop/arrangeTop/askGuanxingBottom doc comments for the mechanics). */
+const guanxingAction = {
+  phase: Phase.Start,
+  async run(ctx: EngineContext, player: GamePlayer): Promise<void> {
+    const n = Math.min(ctx.alivePlayers.length, 5);
+    const revealed = ctx.peekTop(n);
+    if (revealed.length === 0) return;
+    const bottomIds = await ctx.askGuanxingBottom(player, revealed);
+    const bottom = revealed.filter((c) => bottomIds.has(c.id));
+    const top = revealed.filter((c) => !bottomIds.has(c.id));
+    ctx.arrangeTop(top, bottom);
+    ctx.log.push(`${player.id} Quan Tinh: xem ${revealed.length} lá đầu bộ bài, đặt ${bottom.length} lá xuống đáy`);
   },
 };
 
@@ -535,7 +622,7 @@ async function leijiOnSlashDodged(ctx: EngineContext, _attacker: GamePlayer, zha
   if (!(await ctx.askUseSelfAction(zhangjiao, "leiji"))) return;
   const to = await ctx.askChooseAnyPlayer(zhangjiao, ctx.alivePlayers);
   if (!to) return;
-  const judgeCard = ctx.drawTop();
+  const judgeCard = await judge(ctx, zhangjiao, "leiji");
   if (!judgeCard) return;
   ctx.discardPile.push(judgeCard);
   ctx.log.push(`${zhangjiao.id} phán Lôi Kích: ${SUIT_LABEL_VI[judgeCard.suit]} ${judgeCard.point}`);
@@ -545,7 +632,7 @@ async function leijiOnSlashDodged(ctx: EngineContext, _attacker: GamePlayer, zha
 async function beigeOnDamaged(ctx: EngineContext, player: GamePlayer, source: GamePlayer, rng: () => number): Promise<void> {
   if (player.handcardNum === 0 || !(await ctx.askUseSelfAction(player, "beige"))) return;
   discardRandom(ctx, player, rng);
-  const judgeCard = ctx.drawTop();
+  const judgeCard = await judge(ctx, player, "beige");
   if (!judgeCard) return;
   ctx.discardPile.push(judgeCard);
   ctx.log.push(`${player.id} phán Bi Ca: ${SUIT_LABEL_VI[judgeCard.suit]} ${judgeCard.point}`);
@@ -631,6 +718,13 @@ export const SKILLS: Record<string, Skill> = {
     description: "Khi trên tay không còn lá bài nào, miễn nhiễm với [Sát] và [Quyết Đấu] nhắm vào bạn.",
     immuneToSlashAndDuel: (player) => player.handcardNum === 0,
   },
+  guanxing: {
+    name: "guanxing",
+    displayName: "Quan Tinh",
+    description:
+      "Đầu giai đoạn Chuẩn Bị, xem tối đa 5 lá đầu bộ bài, chọn lá nào đặt xuống đáy bộ bài (còn lại giữ nguyên thứ tự trên đỉnh).",
+    otherPhaseAction: guanxingAction,
+  },
   tieqi: {
     name: "tieqi",
     displayName: "Thiết Kỵ",
@@ -642,6 +736,13 @@ export const SKILLS: Record<string, Skill> = {
     displayName: "Phản Quỹ",
     description: "Sau khi bạn nhận sát thương, bạn thu lấy 1 lá ngẫu nhiên trên tay của nguồn sát thương (nếu có).",
     onDamaged: fankuiOnDamaged,
+  },
+  guicai: {
+    name: "guicai",
+    displayName: "Quỷ Tài",
+    description:
+      "Khi có phán đoán bất kỳ đang diễn ra (kể cả của chính bạn), có thể dùng 1 lá trên tay thay thế kết quả phán đoán đó (bổ sung phán đoán).",
+    onJudgment: (ctx, self, judgeOwner, currentCard, reason) => ctx.askGuicaiRetrial(self, judgeOwner, currentCard, reason),
   },
   kurou: {
     name: "kurou",
@@ -918,14 +1019,14 @@ export const GENERALS: GeneralDef[] = [
   { name: "guanyu", displayName: "Quan Vũ", kingdom: "shu", maxHp: 5, skillNames: ["wusheng"] },
   { name: "xiahoudun", displayName: "Hạ Hầu Đôn", kingdom: "wei", maxHp: 4, skillNames: ["ganglie"] },
   { name: "zhaoyun", displayName: "Triệu Vân", kingdom: "shu", maxHp: 4, skillNames: ["longdan"] },
-  { name: "zhenji", displayName: "Chân Cơ", kingdom: "wei", maxHp: 3, skillNames: ["qingguo"], gender: "female" },
-  { name: "zhugeliang", displayName: "Gia Cát Lượng", kingdom: "shu", maxHp: 3, skillNames: ["kongcheng"] }, // Guanxing deferred, needs card-reorder UI
-  { name: "machao", displayName: "Mã Siêu", kingdom: "shu", maxHp: 4, skillNames: ["tieqi"] }, // Mashu ported below under pangde/mateng's shared skill
-  { name: "simayi", displayName: "Tư Mã Ý", kingdom: "wei", maxHp: 3, skillNames: ["fankui"] }, // Guicai deferred, needs judge-area/retrial system
+  { name: "zhenji", displayName: "Chân Cơ", kingdom: "wei", maxHp: 3, skillNames: ["qingguo"], gender: "female" }, // Luoshen deferred, needs judge-area/retrial system
+  { name: "zhugeliang", displayName: "Gia Cát Lượng", kingdom: "shu", maxHp: 3, skillNames: ["kongcheng", "guanxing"] },
+  { name: "machao", displayName: "Mã Siêu", kingdom: "shu", maxHp: 4, skillNames: ["tieqi", "mashu"] },
+  { name: "simayi", displayName: "Tư Mã Ý", kingdom: "wei", maxHp: 3, skillNames: ["fankui", "guicai"] },
   { name: "huanggai", displayName: "Hoàng Cái", kingdom: "wu", maxHp: 4, skillNames: ["kurou"] },
   { name: "luxun", displayName: "Lục Tốn", kingdom: "wu", maxHp: 3, skillNames: ["qianxun"] }, // Duoshi deferred, needs a 2nd viewAs-Slash-limit skill slot
   { name: "weiyan", displayName: "Ngụy Diên", kingdom: "shu", maxHp: 4, skillNames: ["kuanggu"] },
-  { name: "caocao", displayName: "Tào Tháo", kingdom: "wei", maxHp: 4, skillNames: ["jianxiong"] },
+  { name: "caocao", displayName: "Tào Tháo", kingdom: "wei", maxHp: 4, skillNames: ["jianxiong"] }, // Hujia deferred, needs letting another same-kingdom player substitute a card play on your behalf
   { name: "zhouyu", displayName: "Chu Du", kingdom: "wu", maxHp: 3, skillNames: ["yingzi"] }, // Fanjian deferred, needs a suit-guessing UI ask
   { name: "ganning", displayName: "Cam Ninh", kingdom: "wu", maxHp: 4, skillNames: ["qixi"] },
   { name: "huangyueying", displayName: "Hoàng Nguyệt Anh", kingdom: "shu", maxHp: 3, skillNames: ["jizhi", "qicai"], gender: "female" },

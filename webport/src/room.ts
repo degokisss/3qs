@@ -160,6 +160,22 @@ export class Room {
     return this.drawPile.pop()!;
   }
 
+  /** Guanxing support: peeks the top `n` cards of the draw pile without removing them, in draw
+   *  order (index 0 would be drawn next). See EngineContext.peekTop's doc comment for the "no
+   *  forced reshuffle" simplification. */
+  private peekTop(n: number): Card[] {
+    const count = Math.min(n, this.drawPile.length);
+    return this.drawPile.slice(this.drawPile.length - count).reverse();
+  }
+
+  /** Guanxing support: re-stacks the exact cards a prior `peekTop` call returned -- see
+   *  EngineContext.arrangeTop's doc comment for `top`/`bottom` order semantics. */
+  private arrangeTop(top: Card[], bottom: Card[]): void {
+    const n = top.length + bottom.length;
+    this.drawPile.splice(this.drawPile.length - n, n);
+    this.drawPile = [...bottom.slice().reverse(), ...this.drawPile, ...top.slice().reverse()];
+  }
+
   private drawCards(player: GamePlayer, n: number): void {
     for (let i = 0; i < n; i++) {
       const c = this.drawOne();
@@ -195,16 +211,19 @@ export class Room {
   }
 
   /** Test/debug-only hook until a scripted-damage test needs the real hook pipeline: applies
-   *  damage directly, bypassing EngineContext (no onDamage/onDamageDealt/reduceDamage triggers). */
-  async damagePlayer(targetId: string, amount: number, sourceRole: Role | null): Promise<void> {
+   *  damage directly, bypassing EngineContext (no onDamage/onDamageDealt/reduceDamage triggers).
+   *  No killer credited -- matches loseHp's own "self-inflicted, credits nobody" shape, since
+   *  the win condition no longer needs a credited role (see gamerule.ts's checkWinCondition)
+   *  and kill-reward/punish logic needs a real killer player, never just a role. */
+  async damagePlayer(targetId: string, amount: number): Promise<void> {
     const target = this.players.find((p) => p.id === targetId);
     if (!target || !target.alive) return;
     target.hp -= amount;
     this.log.push(`${target.id} chịu ${amount} sát thương (máu ${target.hp}/${target.maxHp})`);
-    if (target.hp <= 0) await this.killPlayer(target, sourceRole);
+    if (target.hp <= 0) await this.killPlayer(target);
   }
 
-  private async killPlayer(player: GamePlayer, killerRole: Role | null, killer?: GamePlayer): Promise<void> {
+  private async killPlayer(player: GamePlayer, killer?: GamePlayer): Promise<void> {
     player.alive = false;
     player.roleShown = true; // Player death always reveals role (BuryVictim)
 
@@ -251,8 +270,7 @@ export class Room {
     this.log.push(`${player.id} (${ROLE_LABEL_VI[player.role]}) qua đời`);
 
     if (!this.gameOver) {
-      const lordKilledBy = player.role === Role.Lord ? killerRole : null;
-      const result = checkWinCondition(this.players, lordKilledBy);
+      const result = checkWinCondition(this.players);
       if (result) {
         this.gameOver = result;
         this.log.push(`Kết thúc ván: ${result.winners.map((r) => ROLE_LABEL_VI[r]).join(" + ")} thắng`);
@@ -299,7 +317,7 @@ export class Room {
       rng: this.rng,
       draw: (player, n) => this.drawCards(player, n),
       drawTop: () => this.drawOne(),
-      onDying: (dyingPlayer, killerRole, killer) => this.killPlayer(dyingPlayer, killerRole, killer),
+      onDying: (dyingPlayer, killer) => this.killPlayer(dyingPlayer, killer),
       onDyingStarted: (dyingPlayer) => this.triggerOnAllyDying(dyingPlayer),
       onDamage: (target, source) => this.triggerOnDamaged(target, source),
       onDamageDealt: (source, target, amount) => this.triggerOnDamageDealt(source, target, amount),
@@ -319,6 +337,11 @@ export class Room {
       askArcheryAttackJink: (player) => this.controllers.get(player.id)!.wantsToDiscardForArcheryAttack(player),
       askPickCard: (player, candidates) => this.controllers.get(player.id)!.choosePickCard(player, candidates),
       askPickPlayerCard: (player, owner, candidates) => this.controllers.get(player.id)!.choosePlayerCard(player, owner, candidates),
+      peekTop: (n) => this.peekTop(n),
+      arrangeTop: (top, bottom) => this.arrangeTop(top, bottom),
+      askGuanxingBottom: (player, revealed) => this.controllers.get(player.id)!.chooseGuanxingBottom(player, revealed),
+      askGuicaiRetrial: (player, judgeOwner, currentCard, reason) =>
+        this.controllers.get(player.id)!.wantsToUseGuicai(player, judgeOwner, currentCard, reason),
     };
   }
 

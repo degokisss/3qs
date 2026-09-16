@@ -16,7 +16,6 @@
 
 import { Card, CardKind } from "./card.js";
 import { GamePlayer } from "./player.js";
-import { Role } from "./types.js";
 import { isAlly } from "./gamerule.js";
 
 /**
@@ -222,13 +221,12 @@ export interface EngineContext {
    *  it to any player -- for one-off judgment reveals (e.g. Ganglie). Caller must push it to
    *  discardPile when done inspecting it. */
   drawTop: () => Card | null;
-  /** `killerRole` is null for a self-inflicted loss of hp with no credited attacker (e.g.
-   *  Kurou). `killer` is the actual player credited with the kill, present exactly when
-   *  `killerRole` is (real Slash/Duel/AOE damage always knows its source) -- absent for
-   *  `loseHp` and for Room.damagePlayer's test-only scripted-damage bypass, which only ever has
-   *  a role to credit, not a specific player, so kill-rewards keyed off a real killer (e.g. "kill
-   *  a Rebel, draw 3") don't fire for those paths. */
-  onDying: (player: GamePlayer, killerRole: Role | null, killer?: GamePlayer) => void;
+  /** `killer` is the actual player credited with the kill -- present exactly when real combat
+   *  knows the specific attacker (Slash/Duel/AOE damage always does); absent for `loseHp`
+   *  (a self-inflicted loss credits nobody, e.g. Kurou) and for Room.damagePlayer's test-only
+   *  scripted-damage bypass, so kill-rewards keyed off a real killer (e.g. "kill a Rebel, draw
+   *  3") don't fire for those paths. */
+  onDying: (player: GamePlayer, killer?: GamePlayer) => void;
   /** Fired right after hp is reduced, before the dying/Peach-rescue check -- general skill hooks
    *  on the DAMAGED player (e.g. Ganglie) attach here. */
   onDamage?: (target: GamePlayer, source: GamePlayer) => Promise<void> | void;
@@ -294,6 +292,29 @@ export interface EngineContext {
   /** Fired once, right when a player's hp first drops to <=0, before the Peach-rescue loop --
    *  broadcast to every OTHER alive player's skills (e.g. Tianfeng's Suishi). */
   onDyingStarted?: (player: GamePlayer) => Promise<void> | void;
+  /** Guanxing (Zhuge Liang): peeks at the top `n` cards of the draw pile WITHOUT removing them,
+   *  in draw order (index 0 would be drawn next). Simply caps at however many cards are
+   *  actually left if the pile is short -- no forced reshuffle-in for this look-ahead-only
+   *  effect (kept simple; reshuffling every time the pile runs low mid-peek would be a rare
+   *  edge case not worth the extra state churn). */
+  peekTop: (n: number) => Card[];
+  /** Re-stacks the exact cards a prior `peekTop` call returned: `top` goes back immediately on
+   *  top of the remaining pile (drawn soonest, in the given order -- top[0] drawn before
+   *  top[1]), `bottom` goes underneath the entire remaining pile (drawn last, in the given
+   *  order -- bottom[0] drawn before bottom[1] once the deck gets that deep). `top.length +
+   *  bottom.length` must equal the last `peekTop` call's return length. */
+  arrangeTop: (top: Card[], bottom: Card[]) => void;
+  /** Guanxing: `player` looked at `revealed` (see `peekTop`) and decides which of them go to
+   *  the bottom of the pile; everything else stays on top in its original relative order (this
+   *  port simplifies Guanxing's real free-form reorder down to a top/bottom split -- see
+   *  skill.ts's header for why). Returns the ids of cards to bury; an empty result leaves the
+   *  pile exactly as `peekTop` found it. */
+  askGuanxingBottom: (player: GamePlayer, revealed: Card[]) => Promise<Set<number>>;
+  /** Guicai (Sima Yi): `player` may replace an in-progress judgment's `currentCard` (owned by
+   *  `judgeOwner`, for skill `reason`) with a card from their own hand (a "retrial" --
+   *  bổ sung phán đoán). Returns the chosen replacement card (already confirmed present in
+   *  `player.hand`) or null to decline. Only ever called when `player.hand.length > 0`. */
+  askGuicaiRetrial: (player: GamePlayer, judgeOwner: GamePlayer, currentCard: Card, reason: string) => Promise<Card | null>;
 }
 
 /** Resolves one Slash from `attacker` at `target`: Jink cancels it, otherwise 1 damage + dying check. */
@@ -477,17 +498,17 @@ export async function applyDamage(ctx: EngineContext, target: GamePlayer, amount
   ctx.log.push(`${target.id} chịu ${finalAmount} sát thương (máu ${target.hp}/${target.maxHp})`);
   await ctx.onDamage?.(target, source);
   await ctx.onDamageDealt?.(source, target, finalAmount);
-  if (target.hp <= 0) await resolveDying(ctx, target, source.role, source);
+  if (target.hp <= 0) await resolveDying(ctx, target, source);
   return true;
 }
 
 /** Player::loseHp: reduces hp directly (no `onDamage`/`onDamageDealt` skill triggers -- this
- *  isn't "damage"), still runs the dying/Peach-rescue check. `killerRole` is null: a
- *  self-inflicted loss credits no side (e.g. Kurou). */
+ *  isn't "damage"), still runs the dying/Peach-rescue check. No killer credited: a
+ *  self-inflicted loss credits nobody (e.g. Kurou). */
 export async function loseHp(ctx: EngineContext, player: GamePlayer, amount: number): Promise<void> {
   player.hp -= amount;
   ctx.log.push(`${player.id} mất ${amount} máu (máu ${player.hp}/${player.maxHp})`);
-  if (player.hp <= 0) await resolveDying(ctx, player, null);
+  if (player.hp <= 0) await resolveDying(ctx, player);
 }
 
 /** Player::recover: heals `player` (capped at maxHp) and fires their `onRecover` skill hooks
@@ -510,7 +531,7 @@ export async function heal(ctx: EngineContext, player: GamePlayer, amount: numbe
  * still <=0 after a successful save's +1, same as the real "keep asking until >0 or nobody can
  * help" loop, until nobody at all can or will help, then gives up and records the death.
  */
-async function resolveDying(ctx: EngineContext, player: GamePlayer, killerRole: Role | null, killer?: GamePlayer): Promise<void> {
+async function resolveDying(ctx: EngineContext, player: GamePlayer, killer?: GamePlayer): Promise<void> {
   ctx.log.push(`${player.id} đang hấp hối (máu ${player.hp})`);
   await ctx.onDyingStarted?.(player);
   while (player.hp <= 0) {
@@ -547,5 +568,5 @@ async function resolveDying(ctx: EngineContext, player: GamePlayer, killerRole: 
     }
     if (!rescued) break; // nobody could or would help this round -- give up
   }
-  if (player.hp <= 0) ctx.onDying(player, killerRole, killer);
+  if (player.hp <= 0) ctx.onDying(player, killer);
 }

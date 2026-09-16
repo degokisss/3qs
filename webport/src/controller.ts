@@ -117,6 +117,16 @@ export interface Controller {
   /** Dismantlement/Snatch: `player` chooses exactly one of `owner`'s cards (hand or equipped)
    *  to take/discard, instead of a random pick -- `candidates` is always non-empty when asked. */
   choosePlayerCard(player: GamePlayer, owner: GamePlayer, candidates: Card[]): Promise<Card>;
+  /** Guanxing (Zhuge Liang): `player` looked at `revealed` (top of the draw pile, in draw
+   *  order -- revealed[0] would be drawn next) and decides which of them go to the bottom of
+   *  the pile; everything else stays on top in its original relative order. Returns the ids of
+   *  cards to bury -- an empty set leaves the pile untouched. */
+  chooseGuanxingBottom(player: GamePlayer, revealed: Card[]): Promise<Set<number>>;
+  /** Guicai (Sima Yi): `player` may replace an in-progress judgment's `currentCard` (owned by
+   *  `judgeOwner`, for skill `reason`) with a card from their own hand (a "retrial"). Return
+   *  the chosen card (must be present in `player.hand`) or null to decline. Only ever called
+   *  when `player.hand.length > 0`. */
+  wantsToUseGuicai(player: GamePlayer, judgeOwner: GamePlayer, currentCard: Card, reason: string): Promise<Card | null>;
   /** End-of-turn Discard phase: `player`'s hand exceeds their card limit by exactly `count`.
    *  Return exactly `count` distinct cards currently in `player.hand` to discard. Room falls
    *  back to `pickLeastImportantCards` if this returns something invalid (wrong length, or
@@ -222,6 +232,19 @@ export function makeBotController(rng: () => number): Controller {
       // resource is worth denying/taking over an unseen one, matching this policy's other
       // "known/valuable resource" preferences (e.g. wantsToDiscardForGanglie).
       return candidates.find((c) => c.kind === CardKind.Weapon || c.kind === CardKind.Horse) ?? candidates[0];
+    },
+    async chooseGuanxingBottom(_player, revealed) {
+      // Bury the least valuable half (see pickLeastImportantCards/DISCARD_IMPORTANCE) so the
+      // more useful revealed cards stay on top, drawn sooner -- matches this policy's other
+      // "known/valuable resource" preferences instead of leaving the pile untouched.
+      const buryCount = Math.floor(revealed.length / 2);
+      return new Set(pickLeastImportantCards(revealed, buryCount).map((c) => c.id));
+    },
+    async wantsToUseGuicai() {
+      // No alignment-aware AI to judge whether flipping a given judgment helps or hurts
+      // `judgeOwner` (same "naive, no ally/enemy inference" limitation as the combat bot) --
+      // always declines rather than guess, matching this policy's other no-real-strategy defaults.
+      return null;
     },
     async chooseDiscards(player, count) {
       // Discard the least valuable cards (see pickLeastImportantCards) instead of an arbitrary
