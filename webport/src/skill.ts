@@ -60,6 +60,18 @@
 // stealing) -- those generals/skills are simply not ported; see webport/README.md's Milestone
 // 2.6 section for the full per-general blocked list and reasons.
 
+// Post-Milestone-2.6: Guanxing (Zhuge Liang's 2nd skill) ported, closing the gap this file's
+// header and webport/README.md previously called out as "needs card-reorder UI". Real Guanxing
+// lets you look at the top X cards (X = alive player count, capped at 5) and arrange them in
+// ANY order onto the top or bottom of the draw pile; that free-form reorder is simplified down
+// to a top/bottom split (pick which revealed cards go to the bottom, the rest stay on top in
+// original relative order) -- same "faithful behavior, simplified interaction" precedent as
+// Kongcheng/Tieqi/Yingzi above, and still exercises the actual strategic decision (bury bad
+// cards vs. keep good ones accessible) without a drag-and-drop UI. See EngineContext's
+// peekTop/arrangeTop/askGuanxingBottom (combat.ts) and Room's backing peekTop/arrangeTop
+// (room.ts) for the mechanics, and Controller.chooseGuanxingBottom (controller.ts) for the
+// human/bot decision surface.
+
 import { Card, CardKind, Suit } from "./card.js";
 import { GamePlayer } from "./player.js";
 import { Phase } from "./types.js";
@@ -525,6 +537,28 @@ const shuangxiongAction = {
   },
 };
 
+/** Guanxing (Zhuge Liang): automatic (no real cost to declining, same precedent as Kongcheng/
+ *  Tieqi/Yingzi above) -- peeks the top X cards of the draw pile (X = number of alive players,
+ *  capped at 5) and asks which go to the bottom of the pile; everything else stays on top in
+ *  its original relative order. This is a deliberate simplification of the real skill's
+ *  free-form "arrange these cards in any order onto the top or bottom of the pile" down to a
+ *  top/bottom split -- a full drag-and-drop reorder UI is out of scope (this was exactly
+ *  Milestone 2.6's original reason for not porting Guanxing at all; see EngineContext's
+ *  peekTop/arrangeTop/askGuanxingBottom doc comments for the mechanics). */
+const guanxingAction = {
+  phase: Phase.Start,
+  async run(ctx: EngineContext, player: GamePlayer): Promise<void> {
+    const n = Math.min(ctx.alivePlayers.length, 5);
+    const revealed = ctx.peekTop(n);
+    if (revealed.length === 0) return;
+    const bottomIds = await ctx.askGuanxingBottom(player, revealed);
+    const bottom = revealed.filter((c) => bottomIds.has(c.id));
+    const top = revealed.filter((c) => !bottomIds.has(c.id));
+    ctx.arrangeTop(top, bottom);
+    ctx.log.push(`${player.id} Quan Tinh: xem ${revealed.length} lá đầu bộ bài, đặt ${bottom.length} lá xuống đáy`);
+  },
+};
+
 function mengjinOnSlashDodged(ctx: EngineContext, attacker: GamePlayer, target: GamePlayer): void {
   if (!discardRandom(ctx, target, ctx.rng)) return;
   ctx.log.push(`${target.id} bỏ 1 lá bài (mengjin)`);
@@ -630,6 +664,13 @@ export const SKILLS: Record<string, Skill> = {
     displayName: "Không Thành",
     description: "Khi trên tay không còn lá bài nào, miễn nhiễm với [Sát] và [Quyết Đấu] nhắm vào bạn.",
     immuneToSlashAndDuel: (player) => player.handcardNum === 0,
+  },
+  guanxing: {
+    name: "guanxing",
+    displayName: "Quan Tinh",
+    description:
+      "Đầu giai đoạn Chuẩn Bị, xem tối đa 5 lá đầu bộ bài, chọn lá nào đặt xuống đáy bộ bài (còn lại giữ nguyên thứ tự trên đỉnh).",
+    otherPhaseAction: guanxingAction,
   },
   tieqi: {
     name: "tieqi",
@@ -919,7 +960,7 @@ export const GENERALS: GeneralDef[] = [
   { name: "xiahoudun", displayName: "Hạ Hầu Đôn", kingdom: "wei", maxHp: 4, skillNames: ["ganglie"] },
   { name: "zhaoyun", displayName: "Triệu Vân", kingdom: "shu", maxHp: 4, skillNames: ["longdan"] },
   { name: "zhenji", displayName: "Chân Cơ", kingdom: "wei", maxHp: 3, skillNames: ["qingguo"], gender: "female" },
-  { name: "zhugeliang", displayName: "Gia Cát Lượng", kingdom: "shu", maxHp: 3, skillNames: ["kongcheng"] }, // Guanxing deferred, needs card-reorder UI
+  { name: "zhugeliang", displayName: "Gia Cát Lượng", kingdom: "shu", maxHp: 3, skillNames: ["kongcheng", "guanxing"] },
   { name: "machao", displayName: "Mã Siêu", kingdom: "shu", maxHp: 4, skillNames: ["tieqi"] }, // Mashu ported below under pangde/mateng's shared skill
   { name: "simayi", displayName: "Tư Mã Ý", kingdom: "wei", maxHp: 3, skillNames: ["fankui"] }, // Guicai deferred, needs judge-area/retrial system
   { name: "huanggai", displayName: "Hoàng Cái", kingdom: "wu", maxHp: 4, skillNames: ["kurou"] },

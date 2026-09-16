@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { Room } from "./room.js";
 import { Controller, pickLeastImportantCards } from "./controller.js";
 import { SKILLS } from "./skill.js";
+import { CARD_CATALOG, GENERAL_CATALOG } from "./library.js";
 import type { Card } from "./card.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -384,6 +385,18 @@ function makeHumanController(gr: GameRoom, playerId: string): Partial<Controller
         // never forced, matching wantsToPlayTrick's "silent human passes" policy, unlike
         // chooseDiscards which substitutes a real pick because that ask IS mandatory
       ),
+    chooseGuanxingBottom: (_player, revealed) =>
+      askClient(
+        gr,
+        playerId,
+        { type: "chooseGuanxingBottom", actorId: playerId, revealed },
+        (msg) => {
+          const ids = Array.isArray(msg.bottomIds) ? msg.bottomIds : [];
+          return new Set(revealed.filter((c) => ids.includes(c.id)).map((c) => c.id));
+        },
+        new Set<number>(), // fallback on timeout/disconnect: leave the pile untouched (nothing buried), matching
+        // wantsToPlayTrick's "silent human passes" policy -- this ask is optional, never forced
+      ),
     choosePickCard: (_player, candidates) =>
       askClient(
         gr,
@@ -624,6 +637,12 @@ wss.on("connection", (ws) => {
     switch (msg.type) {
       case "listRooms":
         ws.send(JSON.stringify(roomListPayload()));
+        break;
+      case "listLibrary":
+        // Static reference data (every ported general's skills + every card kind's rules text)
+        // -- computed once at module load in library.ts, never changes at runtime, works from
+        // the lobby or mid-game alike (no room/seat required).
+        ws.send(JSON.stringify({ type: "library", generals: GENERAL_CATALOG, cards: CARD_CATALOG }));
         break;
       case "createRoom": {
         leaveRoom(ws); // in case this socket was already watching another room

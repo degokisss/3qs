@@ -117,6 +117,11 @@ export interface Controller {
   /** Dismantlement/Snatch: `player` chooses exactly one of `owner`'s cards (hand or equipped)
    *  to take/discard, instead of a random pick -- `candidates` is always non-empty when asked. */
   choosePlayerCard(player: GamePlayer, owner: GamePlayer, candidates: Card[]): Promise<Card>;
+  /** Guanxing (Zhuge Liang): `player` looked at `revealed` (top of the draw pile, in draw
+   *  order -- revealed[0] would be drawn next) and decides which of them go to the bottom of
+   *  the pile; everything else stays on top in its original relative order. Returns the ids of
+   *  cards to bury -- an empty set leaves the pile untouched. */
+  chooseGuanxingBottom(player: GamePlayer, revealed: Card[]): Promise<Set<number>>;
   /** End-of-turn Discard phase: `player`'s hand exceeds their card limit by exactly `count`.
    *  Return exactly `count` distinct cards currently in `player.hand` to discard. Room falls
    *  back to `pickLeastImportantCards` if this returns something invalid (wrong length, or
@@ -222,6 +227,13 @@ export function makeBotController(rng: () => number): Controller {
       // resource is worth denying/taking over an unseen one, matching this policy's other
       // "known/valuable resource" preferences (e.g. wantsToDiscardForGanglie).
       return candidates.find((c) => c.kind === CardKind.Weapon || c.kind === CardKind.Horse) ?? candidates[0];
+    },
+    async chooseGuanxingBottom(_player, revealed) {
+      // Bury the least valuable half (see pickLeastImportantCards/DISCARD_IMPORTANCE) so the
+      // more useful revealed cards stay on top, drawn sooner -- matches this policy's other
+      // "known/valuable resource" preferences instead of leaving the pile untouched.
+      const buryCount = Math.floor(revealed.length / 2);
+      return new Set(pickLeastImportantCards(revealed, buryCount).map((c) => c.id));
     },
     async chooseDiscards(player, count) {
       // Discard the least valuable cards (see pickLeastImportantCards) instead of an arbitrary

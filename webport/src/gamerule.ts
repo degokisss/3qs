@@ -52,20 +52,29 @@ export const ROLE_LABEL_VI: Record<Role, string> = {
 };
 
 /**
- * Mirrors GameRule's BeforeGameOverJudge check for identity mode:
- * - Lord dead -> if killer was Rebel, rebels win; if killer was Renegade, renegade wins alone;
- *   otherwise (lord died to friendly fire/no credited killer) neither side scores a clean win.
- * - No rebels and no renegade left alive -> lord + loyalist win.
+ * Official Identity-mode win conditions, checked in this exact precedence order:
+ * 1. Renegade is the LAST player left alive (everyone else -- Lord, every Loyalist, every
+ *    Rebel -- is dead) -> Renegade wins ALONE. This is the Renegade's only win path: survive
+ *    everyone else, including outliving the rebels they may have helped kill earlier. In
+ *    practice this is almost always the Renegade landing the final blow on the Lord in a 1-on-1
+ *    endgame (every Loyalist/Rebel already dead), but the check itself is "am I the sole
+ *    survivor", not "did I kill the Lord" -- checked FIRST so it takes precedence over case 2
+ *    below whenever the Lord's death happens to be that exact final death.
+ * 2. Lord is dead (and case 1 didn't already fire) -> Rebels win, REGARDLESS of who actually
+ *    delivered the killing blow -- a Rebel, a Loyalist's friendly fire, a self-inflicted death
+ *    with no credited killer, even the Renegade striking early while Rebels/Loyalists are still
+ *    alive, all end the game the same way here. The Renegade does NOT also win in this case --
+ *    Rebel+Renegade is never a valid win pair; the Renegade's only win is case 1.
+ * 3. No Rebels and no Renegade left alive (Lord still alive) -> Lord + Loyalist win.
+ * Otherwise the game continues.
  */
-export function checkWinCondition(players: GamePlayer[], lordKilledBy: Role | null): WinResult {
+export function checkWinCondition(players: GamePlayer[]): WinResult {
   const alive = players.filter((p) => p.alive);
-  const lordAlive = alive.some((p) => p.role === Role.Lord);
 
-  if (!lordAlive) {
-    if (lordKilledBy === Role.Rebel) return { winners: [Role.Rebel] };
-    if (lordKilledBy === Role.Renegade) return { winners: [Role.Renegade] };
-    return { winners: [Role.Rebel, Role.Renegade] };
-  }
+  if (alive.length === 1 && alive[0].role === Role.Renegade) return { winners: [Role.Renegade] };
+
+  const lordAlive = alive.some((p) => p.role === Role.Lord);
+  if (!lordAlive) return { winners: [Role.Rebel] };
 
   const rebelsAlive = alive.some((p) => p.role === Role.Rebel);
   const renegadeAlive = alive.some((p) => p.role === Role.Renegade);

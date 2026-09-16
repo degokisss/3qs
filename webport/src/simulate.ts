@@ -84,11 +84,19 @@ async function testPhaseCyclingConservesCards(): Promise<void> {
   );
 }
 
+/** Corrected Identity-mode rule (see gamerule.ts's checkWinCondition doc comment): the Lord
+ *  dying while OTHER players (any Rebel, Loyalist, or the Renegade) are still alive always
+ *  wins for the Rebels alone -- regardless of who/what actually delivered the killing blow
+ *  (`damagePlayer` no longer even threads a credited role through, since checkWinCondition
+ *  doesn't need one any more). Critically, this proves the Renegade does NOT also win here --
+ *  `deepEqual` against exactly `[Role.Rebel]` would fail if it were `[Role.Rebel,
+ *  Role.Renegade]`. See testRenegadeAloneWinsAsSoleSurvivor below for the Renegade's own
+ *  (mutually exclusive) win path. */
 async function testRebelKillsLord(): Promise<void> {
   const room = new Room(playerIds(8), seededRng(1));
   await room.pickGenerals();
   const lord = room.players.find((p) => p.role === Role.Lord)!;
-  await room.damagePlayer(lord.id, lord.maxHp, Role.Rebel);
+  await room.damagePlayer(lord.id, lord.maxHp);
   strict.equal(lord.alive, false);
   strict.deepEqual(room.gameOver, { winners: [Role.Rebel] });
   console.log("PASS testRebelKillsLord:", room.gameOver);
@@ -100,13 +108,31 @@ async function testLordAndLoyalistWin(): Promise<void> {
   const enemies = room.players.filter((p) => p.role === Role.Rebel || p.role === Role.Renegade);
   strict.equal(enemies.length, 5, "8p table has 4 rebels + 1 renegade");
   for (const enemy of enemies.slice(0, -1)) {
-    await room.damagePlayer(enemy.id, enemy.maxHp, Role.Lord);
+    await room.damagePlayer(enemy.id, enemy.maxHp);
     strict.equal(room.gameOver, null, "side should not win until every rebel+renegade is dead");
   }
   const last = enemies[enemies.length - 1];
-  await room.damagePlayer(last.id, last.maxHp, Role.Lord);
+  await room.damagePlayer(last.id, last.maxHp);
   strict.deepEqual(room.gameOver, { winners: [Role.Lord, Role.Loyalist] });
   console.log("PASS testLordAndLoyalistWin:", room.gameOver);
+}
+
+/** The Renegade's actual (only) win path: every other player -- Lord, every Loyalist, every
+ *  Rebel -- is dead, leaving the Renegade the sole survivor. This is mutually exclusive with
+ *  testRebelKillsLord above (Rebel wins whenever the Lord dies while others remain alive). */
+async function testRenegadeAloneWinsAsSoleSurvivor(): Promise<void> {
+  const room = new Room(playerIds(8), seededRng(1));
+  await room.pickGenerals();
+  const lord = room.players.find((p) => p.role === Role.Lord)!;
+  const renegade = room.players.find((p) => p.role === Role.Renegade)!;
+  const others = room.players.filter((p) => p !== lord && p !== renegade); // 2 loyalists + 4 rebels
+  for (const p of others) {
+    await room.damagePlayer(p.id, p.maxHp);
+    strict.equal(room.gameOver, null, "no side wins until the lord dies or the renegade is the sole survivor");
+  }
+  await room.damagePlayer(lord.id, lord.maxHp); // renegade is now the only one left alive
+  strict.deepEqual(room.gameOver, { winners: [Role.Renegade] }, "renegade must win alone as the sole survivor");
+  console.log("PASS testRenegadeAloneWinsAsSoleSurvivor:", room.gameOver);
 }
 
 /**
@@ -124,7 +150,7 @@ async function testGameOverRevealsAllSurvivingRoles(): Promise<void> {
     survivors.some((p) => !p.roleShown),
     "test setup: at least one non-lord survivor must still be fogged before the match ends",
   );
-  await room.damagePlayer(lord.id, lord.maxHp, Role.Rebel);
+  await room.damagePlayer(lord.id, lord.maxHp);
   strict.ok(room.gameOver, "test setup: the lord's death must have ended the match");
   for (const p of room.players) {
     strict.ok(p.roleShown, `${p.id} (${p.role}, alive=${p.alive}) must have its role revealed once the match ends`);
@@ -135,10 +161,10 @@ async function testGameOverRevealsAllSurvivingRoles(): Promise<void> {
 /**
  * Regression proof: a cascading death that happens AFTER the win condition is already decided
  * (e.g. Tianfeng's Suishi: an ally of the just-dead player loses 1 hp and can die from it too)
- * must NOT re-run checkWinCondition and overwrite the already-correct winner. Found live: an
- * unseeded testLordAndLoyalistWin run drew Suishi onto a loyalist, whose Suishi-triggered death
- * (credited to no side, per loseHp's null-killerRole rule) overwrote a correct
- * `{winners:[Rebel]}` result with the wrong `{winners:[Rebel,Renegade]}` "friendly fire" result.
+ * must NOT re-run checkWinCondition and overwrite/re-log the already-decided result. Found live
+ * pre-dating the current sole-survivor Renegade rule: an unseeded testLordAndLoyalistWin run
+ * drew Suishi onto a loyalist, whose cascading death re-triggered the win check and overwrote an
+ * already-correct result with a different (also then-valid, but wrong for THIS game) one.
  * Driven directly through Room.damagePlayer with Suishi force-assigned onto a 1-hp loyalist, so
  * the cascade is deterministic instead of depending on the random general draw.
  */
@@ -152,7 +178,7 @@ async function testCascadingDeathDoesNotOverwriteGameOver(): Promise<void> {
   // this test is about the win-condition-overwrite bug, not whether a rescue happens to be available
   loyalist.hp = 1; // Suishi's -1 hp on the lord's death must kill this ally too, in the same cascade
 
-  await room.damagePlayer(lord.id, lord.maxHp, Role.Rebel);
+  await room.damagePlayer(lord.id, lord.maxHp);
 
   strict.equal(lord.alive, false, "lord must be dead");
   strict.equal(loyalist.alive, false, "the suishi-holding loyalist must also die from the ally-death cascade");
@@ -397,7 +423,7 @@ async function testFreeformPlayLetsHumanSelfHealWithPeach(): Promise<void> {
   const room = new Room(playerIds(8), seededRng(1));
   await room.pickGenerals();
   const lord = room.players.find((p) => p.role === Role.Lord)!;
-  await room.damagePlayer(lord.id, 1, null); // wound the lord by exactly 1 before their own turn
+  await room.damagePlayer(lord.id, 1); // wound the lord by exactly 1 before their own turn
   strict.ok(lord.isWounded(), "test setup: the lord must actually be wounded before their turn starts");
   const woundedHp = lord.hp;
   const deck = buildStandardDeck();
@@ -889,6 +915,7 @@ async function testGeneralSkillsAppearInPlay(): Promise<void> {
     ["mingshiReduce", "(mingshi)"],
     ["sijian", "(sijian)"],
     ["suishiDraw", "(suishi)"],
+    ["guanxing", "Quan Tinh:"],
   ];
   const seen = new Set<string>();
 
@@ -1177,6 +1204,9 @@ function makeTestContext(alivePlayers: GamePlayer[], log: string[], drawTop: () 
     askUseAxe: async () => true,
     askUseDoubleSword: async () => true,
     askDiscardForDoubleSword: async () => true,
+    peekTop: () => [],
+    arrangeTop: () => {},
+    askGuanxingBottom: async () => new Set<number>(),
   };
 }
 
@@ -1303,24 +1333,24 @@ async function testWushuangRequiresTwoJinks(): Promise<void> {
 }
 
 /**
- * Milestone 3.9 proof: Kurou's `loseHp` path can kill (at 1 hp) and credits no side (`killerRole`
- * null) -- distinct from Slash/Duel damage, which always credits the attacker's role. Driven
- * directly through `loseHp` (pure, deterministic).
+ * Milestone 3.9 proof: Kurou's `loseHp` path can kill (at 1 hp) and credits no killer -- distinct
+ * from Slash/Duel damage, which always credits the attacking player. Driven directly through
+ * `loseHp` (pure, deterministic).
  */
 async function testKurouSelfInflictedDeathCreditsNoKiller(): Promise<void> {
   const player = new GamePlayer("K", 1); // maxHp 1: loseHp(1) drops it to 0 with no Peach to save it
-  let dyingKillerRole: string | null | undefined;
+  let dyingKiller: GamePlayer | undefined = new GamePlayer("SENTINEL"); // distinct from "never assigned"
   const ctx = makeTestContext([player], []);
-  ctx.onDying = (p, killerRole) => {
+  ctx.onDying = (p, killer) => {
     p.alive = false;
-    dyingKillerRole = killerRole;
+    dyingKiller = killer;
   };
 
   await loseHp(ctx, player, 1);
 
   strict.equal(player.alive, false, "loseHp must be able to kill when it drops hp to 0 with no rescue");
-  strict.equal(dyingKillerRole, null, "a self-inflicted loseHp death must credit no side (killerRole null)");
-  console.log("PASS testKurouSelfInflictedDeathCreditsNoKiller: loseHp killed with a null credited killer");
+  strict.equal(dyingKiller, undefined, "a self-inflicted loseHp death must credit no killer");
+  console.log("PASS testKurouSelfInflictedDeathCreditsNoKiller: loseHp killed with no credited killer");
 }
 
 /**
@@ -1572,6 +1602,7 @@ await testRoleDistribution();
 await testPhaseCyclingConservesCards();
 await testRebelKillsLord();
 await testLordAndLoyalistWin();
+await testRenegadeAloneWinsAsSoleSurvivor();
 await testCascadingDeathDoesNotOverwriteGameOver();
 await testGameOverRevealsAllSurvivingRoles();
 await testFreeformPlayLetsHumanChooseCardsAndPlayDuplicates();
