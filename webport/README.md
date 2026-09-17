@@ -267,6 +267,24 @@ asks share). 30 generals ported across all 4 kingdoms:
   Guanxing/Duoshi/Guicai/Fanjian (from the first 14 generals) remain deferred for the same
   reasons noted when they were first documented above.
 
+**Correction found later (checked directly against the real upstream C++ source during
+Milestone 23's Hegemony work) -- the "46 investigated" total above was itself stale/wrong.**
+Parsing every actual `new General(this, "name", "kingdom", ...)` constructor call across all 4
+`standard-{shu,wei,wu,qun}-generals.cpp` files gives exactly **60** Standard generals (15 per
+kingdom, not ~11.5), not 46 -- 14 were apparently never even looked at during the original
+per-kingdom survey. Diffing that real 60-name list against this repo's actual `GENERALS` array
+(44 entries) finds the SAME 15 already named above, plus **1 more that fell through the cracks
+of this milestone's own bookkeeping and was never even added to the "unported" list: Liu Bei
+(`liubei`, SHU 001, kingdom Shu)** -- his 1 real skill, Rende (仁德: give away any number of hand
+cards to another player on your turn; having given away 2+ by the end of your turn draws you a
+card), needs a genuine new "give cards away as a non-damage action, arbitrary count, player-
+chosen recipient" card-effect type this engine doesn't have yet (closest existing shape is
+Dismantlement/Snatch's single-target take, not a give with no card-count cap) -- a real
+subsystem gap, not an oversight in classification, just an oversight in TRACKING. **Corrected
+total: 44 of 60 real Standard generals ported (not 44 of 46); 16 genuinely unported: Liubei,
+Pangtong, Wolong, Xiahouyuan, Zhanghe, Xuhuang, Caoren, Sunquan, Xiaoqiao, Taishici, Zhoutai,
+Dingfeng, Yuanshao, Jiling, Panfeng, Zoushi.**
+
 ## Milestone 3 — DONE (spectator server, all-bot)
 
 Proves the actual "web" part of the request end to end: the Node game engine now runs behind a
