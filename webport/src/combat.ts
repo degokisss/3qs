@@ -368,6 +368,10 @@ export interface EngineContext {
    *  `pickLeastImportantCards` on an invalid response, same defensive behavior as the Discard
    *  phase itself. Returns fewer than `count` only if `player` doesn't hold that many. */
   askChooseDiscards: (player: GamePlayer, count: number) => Promise<Card[]>;
+  /** Generic "freely pick [min, max] of your own hand cards" ask (e.g. Liu Bei's Rende, Sun
+   *  Quan's Zhiheng, Yuan Shao's Luanji) -- see `Controller.chooseAnyHandCards`'s doc comment.
+   *  Returns `[]` for any declined/invalid response, never a forced fallback substitution. */
+  askAnyHandCards: (player: GamePlayer, min: number, max: number) => Promise<Card[]>;
   /** Zhijian (Erzhang): equips `card` (already detached from its owner's hand by the caller)
    *  onto `target`'s matching slot (weapon, or the appropriate horse by `horseDelta`) --
    *  identical mechanics to a player equipping their own card (discards whatever was there,
@@ -409,6 +413,12 @@ export const SUIT_LABEL_VI: Record<Suit, string> = {
 export async function judge(ctx: EngineContext, judgeOwner: GamePlayer, reason: string): Promise<Card | null> {
   let effective = ctx.drawTop();
   if (!effective) return null;
+  // Self-only suit reinterpretation (e.g. Xiao Qiao's Hongyan: her own Spade judgment card may
+  // become a Heart) -- consulted BEFORE the broadcast onJudgment retrial loop below, since a
+  // retrial replaces the card outright while this only reinterprets the same physical one.
+  for (const skill of judgeOwner.skills) {
+    if (skill.filtersOwnJudgment) await skill.filtersOwnJudgment(ctx, judgeOwner, effective);
+  }
   for (const p of ctx.alivePlayers) {
     for (const skill of p.skills) {
       if (!skill.onJudgment || p.hand.length === 0) continue;
@@ -677,6 +687,17 @@ async function resolveDying(ctx: EngineContext, player: GamePlayer, killer?: Gam
       ctx.log.push(`${player.id} dùng ${vnLabel} để hồi phục (máu ${player.hp}/${player.maxHp})`);
       continue;
     }
+
+    // Niepan-style "cheat death" skills (once-per-game, e.g. Pang Tong): checked right
+    // alongside the normal self-rescue card above -- same "player's own choice" precedent.
+    let cheatedDeath = false;
+    for (const skill of player.skills) {
+      if (skill.cheatsDeath && (await skill.cheatsDeath(ctx, player))) {
+        cheatedDeath = true;
+        break;
+      }
+    }
+    if (cheatedDeath) continue;
 
     // Wansha (Jiaxu): locked skill -- while it's Jiaxu's own turn, every OTHER alive player is
     // barred from playing Peach to rescue whoever's dying (self-rescue above is unaffected).

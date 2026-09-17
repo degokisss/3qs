@@ -1841,6 +1841,166 @@ qun}-generals.cpp`, `src/server/room.cpp`, `src/server/gamerule.cpp` directly. F
   `{type:"response", choice:"recover"}` shape the real UI sends, and the server accepted it --
   confirming the exact network contract the new prompt UI depends on, end to end.
 
+## Milestone 24 — DONE (5 more generals against the REAL upstream roster: Liu Bei/Pang Tong/Sun Quan/Xiao Qiao/Yuan Shao, 44→49 of 60)
+
+User asked "are generals actually complete against the real upstream data" (`Tướng đã đầy đủ so
+với data gốc chưa?`), then, once shown the answer was no, asked to port ALL 16 real gaps found.
+Investigated all 16 by fetching and reading their exact skill implementations directly from
+`standard-{shu,wei,wu,qun}-generals.cpp` (not guessed): **every one of the 16 needs at least one
+genuinely new subsystem** this engine doesn't have -- Nullification (无懈可击, the anti-trick
+counter-play card), Iron Chain (连环), Fire Attack (火攻), an Armor equip CATEGORY (a 3rd equip
+slot beyond Weapon/Horse), a private hidden-pile dying-immunity mechanic (不屈/Buqu), the ability
+to RE-HIDE an already-revealed general (Hegemony's own reveal-timing, Milestone 23, only ever
+goes hidden->shown, never back), a "discard to skip a phase, then use a card outside the normal
+flow" mechanic, a per-player distance-override mechanic distinct from the existing flat
+attack-distance-delta hook, and a reactive (not player-initiated) equip-move-or-discard trigger.
+Given that reality, shipped the 5 that needed EITHER an existing subsystem or nothing new at
+all, as a first batch; the other 11 are analyzed and documented below, not silently dropped.
+
+- **Liu Bei (Nhân Đức/Rende, shu, 4hp).** New "give-away-cards" subsystem: `Controller`/
+  `EngineContext` gained `chooseAnyHandCards(player, min, max)` (`controller.ts`/`room.ts`'s
+  `askAnyHandCards`) -- a generic "freely pick [min,max] of your own hand cards" ask, distinct
+  from the existing fixed-count `chooseDiscards` (also reused below by Zhiheng and Luanji).
+  During Play phase, give any number of hand cards to a chosen player; **verified exactly
+  against `RendeCard::use` in the real upstream source** (not the ambiguous localized flavor
+  text, which reads like "draw a card" but isn't): a per-turn cumulative mark crossing from <3
+  to >=3 given this turn, while wounded, recovers 1 hp -- collapsed to "this single invocation
+  gave 3+" (same "once per Play phase" simplification as every other proactive `selfAction` in
+  this file).
+- **Pang Tong (Niết Bàn/Niepan, shu, 3hp).** New `Skill.cheatsDeath` hook, checked inside
+  `resolveDying` (combat.ts) right alongside the normal Peach-family self-rescue check: once per
+  GAME (`player.usedLimitSkills`, an existing once-per-game marker Set already used by
+  Luanwu/Xiongyi -- no new marker system needed), while dying, may discard hand+equip+judge
+  area, recover to `min(3, maxHp)`, and draw 3. Real rule's "clear chained status, force
+  face-up" clause dropped -- neither chains nor a per-turn face state exist in this engine's
+  scope. Pang Tong's other skill, Lianhuan, needs the Iron Chain trick card (still not ported,
+  see below).
+- **Sun Quan (Chế Hành/Zhiheng, wu, 4hp).** Needed NO new subsystem at all once
+  `askAnyHandCards` existed: once per Play phase, discard up to `maxHp` freely-chosen hand
+  cards, draw that many back. Real rule's "may also spend your Treasure equip once you've
+  discarded `maxHp` hand cards" clause dropped -- this engine only models Weapon/Horse equips,
+  no Treasure slot (see card.ts's header).
+- **Xiao Qiao (Hồng Nhan/Hongyan, wu, 3hp).** New `Skill.filtersOwnJudgment` hook (self-only,
+  distinct from the existing broadcast `onJudgment` retrial hook Guicai/Guidao use): wired into
+  `judge()` (combat.ts) right after the fresh draw -- her own judgment card, if a Spade, may be
+  reinterpreted as a Heart by mutating the freshly-drawn `Card` object's suit in place (safe,
+  since it's never shared/aliased). Confirmed against the real upstream `Hongyan` class
+  (`FinishRetrial` event, `judge->card->getSuit()==Spade` check) -- the localized text describes
+  a DIFFERENT/newer revision (a 2nd clause about +1 max hand size with a Heart equipped) this
+  repo's `dev`-branch class doesn't implement, same "port the real behavior, not the newer
+  localized text" precedent as Longdan/Kongcheng/Tieqi/Kurou etc. Her other skill, Tianxiang
+  (damage transfer), needs a redirect-incoming-damage-to-another-player mechanic, not ported.
+- **Yuan Shao (Loạn Kích/Luanji, qun, 4hp).** Reused `askAnyHandCards` (min=2,max=2) +
+  `SKILLS`'s new self-action pattern: any 2 SAME-SUIT hand cards may be discarded together as
+  Archery Attack (the AOE trick this engine already has, `resolveArcheryAttack`) -- same "no
+  dedicated multi-card viewAs UI, folded into a self-action ask" precedent as Spear's existing
+  2-card-as-Slash. Real upstream text's 2 extra clauses (can't reuse a suit already spent this
+  turn this way; an ally who Jinks it may draw 1) aren't in the actual `Luanji` C++ class read
+  from source -- not ported, same newer-localized-text-vs-real-class mismatch pattern as Hongyan
+  above.
+- **Test:** `testNiepanCheatsDeathOnce` and `testHongyanFiltersOwnSpadeJudgmentToHeart` (both
+  pure, dedicated -- these 2 are genuinely too rare to reliably log-mine, matching the existing
+  Kongcheng/Qianxun/Wushuang/Tiandu precedent); `testGeneralSkillsAppearInPlay` expanded to 49
+  generals + 3 new markers (`rende`/`zhiheng`/`luanji`, all 3 fired naturally across the
+  existing 150-seed range). A real pre-existing test-fragility bug was exposed (not caused) by
+  the roster growing from 44->49: `testFreeformPlayAOECardIsOfferedAndResolves` assumed a flat 1
+  damage per Savage-Assault-hit player, but the seeded draft can now land Kong Rong (Mingshi,
+  -1 flat reduction) on any seat -- fixed to compute the SAME `reduceDamage` chain `applyDamage`
+  itself runs, instead of assuming a flat 1. A 2nd fragility: `testExpandedControllerHooksRespected`
+  flagged Luanji's `resolveArcheryAttack`-sourced log line as a "P1 sourced a trick despite
+  declining every trick" violation, since Luanji bypasses `wantsToPlayTrick` (it's gated by
+  `wantsToUseSelfAction`, which that test's `declineAll` controller never overrides) -- fixed by
+  extending the test's existing "compelled" exception (already there for Lijian's forced Duel)
+  to also cover Luanji's self-action-sourced Archery Attack.
+- **Verification, three layers:** (1) `npx tsc --noEmit` clean; `npm run sim` 79/79 passing (77
+  pre-existing, 2 fixed for roster-size fragility, 2 new dedicated tests). (2) Live `ws` server:
+  repeated real Identity-mode games found and confirmed 4 of the 5 new skills' log lines firing
+  for real (`"P8 giao 5 lá bài cho P6 (rende)"`, `"P3 phát động Niết Bàn: ..."`, `"P3 bỏ 4 lá
+  rồi rút lại 4 lá (zhiheng)"`, `"P7 dùng 2 lá cùng chất như Vạn Tiễn Tề Phát (luanji)"`);
+  Hongyan never fired live in ~35 games (expected -- needs Xiao Qiao specifically to own one of
+  the 5 judgment-producing skills' judgment AND draw a Spade, the same rarity class as Tiandu),
+  covered instead by its dedicated pure test. (3) Real headless-browser run: avatar assets
+  confirmed present on disk for all 5 (`image/generals/avatar/{liubei,pangtong,sunquan,
+  xiaoqiao,yuanshao}.png`, no synthesis needed unlike Erzhang/Yanliangwenchou back in Milestone
+  2.6); claimed a seat, added bots, started a real game, drove the general-pick screen through 2
+  full flip-reveal-flip cycles (didn't land one of the 5 new generals this particular random
+  draft, but confirmed the pick UI renders arbitrary `GeneralDef` entries generically with no
+  per-general special-casing, so the same code path that correctly renders Kong Rong/Guo Jia/
+  Cai Wenji renders the 5 new ones identically) with no broken images or layout, all the way
+  through picking a general and entering the table.
+
+**Remaining 11 of the 16 real gaps, each genuinely blocked on a specific new subsystem (checked
+directly against the real upstream C++ source, not guessed):**
+
+- **Wolong (Khổng Minh, shu, 3hp; Zhuge Liang's alternate persona card, `wolong` != `zhugeliang`
+  -- a real, distinct Standard-package general with 3 different skills).** Huoji needs the Fire
+  Attack trick card; Kanpo needs Nullification (无懈可击) PLUS the reactive counter-play stack
+  every trick resolution would need to thread through (declare-a-trick -> give everyone a window
+  to Nullify it, chainable); Bazhen needs an Armor equip CATEGORY (Eight Diagram specifically) --
+  a 3rd equip slot this engine's `player.ts` doesn't have (only `weapon`/`defenseHorse`/
+  `offenseHorse`). All 3 of his skills independently need a different unbuilt subsystem.
+- **Xiahouyuan (wei, 4hp).** Shensu: discard cards during Judge OR Play phase to skip that phase
+  (plus the next, for Judge) and immediately use a Slash with no distance limit at up to 2
+  targets -- needs both a "discard to skip a phase, then act outside the normal flow" mechanic
+  AND multi-target Slash resolution (this engine's `resolveSlash` is strictly 1 attacker : 1
+  target).
+- **Zhang He (wei, 4hp).** Duanliang (a black card viewAs SupplyShortage, a delayed trick +
+  distance-limit reduction) is the MOST tractable of the 11 -- SupplyShortage could reuse the
+  judge-area/delayed-trick system Indulgence already proved out (Milestone 20ish), and a new
+  distance-LIMIT hook (distinct from the existing flat distance-delta) is a small addition -- but
+  his OTHER skill, Qiaobian (discard 1 card during ANY phase to skip it, then use an extra card
+  outside the normal Draw/Play flow), needs the same "act outside the normal flow" mechanic
+  Xiahouyuan's Shensu needs. Deferred as a unit rather than porting only 1 of 2 skills this time,
+  since Duanliang alone still needs a real (if small) new subsystem, unlike this milestone's 5.
+- **Xu Huang / Cao Ren (wei).** Neither skill is portable at all without a genuinely new
+  concept: Xu Huang's only skill needs the same discard-to-skip-phase mechanic above; Cao Ren's
+  only skill, Jushou (draw 3, then "turn face down" -- skip future turns until choosing to flip
+  back up), needs the ability to RE-HIDE an already-revealed general/persona, which Milestone
+  23's reveal-timing system doesn't support (`mainRevealed`/`deputyRevealed` only ever go
+  false->true) and Identity mode has no 2nd-general concept to hide in the first place.
+- **Taishici / Jiling (wu/qun).** Both need Pindian -- which, unlike the other 11, THIS ENGINE
+  ALREADY HAS (`skill.ts`'s shared `pindian()` helper, built for Lieren/Quhu back in Milestone
+  2.6/2.9) -- but both skills' WIN effects need mechanics this engine doesn't have yet either:
+  Taishici's Tianyi grants a temporary "+1 extra Slash target, ignore distance limit" buff (needs
+  the same multi-target-Slash extension Xiahouyuan/Dingfeng need); Jiling's Shuangren grants a
+  completely FREE bonus Slash with no backing card (`Slash(Card::NoSuit, 0)` in the real source --
+  a virtual card object this engine has no precedent for fabricating outside a player's actual
+  hand). Closest of the remaining 11 to being portable, but each still needs one more piece.
+- **Zhou Tai (wu).** Buqu -- a private hidden card-pile "secretly survive at <=0 hp" mechanic
+  (draw N cards face-down into a pile; if no 2 share a rank, silently treat as not-dying; the
+  pile clears on recovery or gets checked again after a failed rescue) -- among the most
+  structurally involved individual skills in the entire real ruleset, genuinely its own
+  subsystem, not a small hook.
+- **Ding Feng (wu).** Duanbing is a real no-op STUB even in the upstream C++ itself (confirmed
+  back in Milestone 2.6's correction -- its actual "Slash within distance 1 can't be dodged,
+  designate 1 more target" effect lives in `Slash`'s own card logic elsewhere, needing
+  multi-target Slash); Fenxun (discard a card to set distance -1 to a chosen target until turn
+  end) needs a genuinely per-TARGET temporary distance override, distinct from this engine's
+  existing flat `attackDistanceDelta` hook (Mashu/offense-horse -- same delta to EVERY player,
+  not one specific target).
+- **Yuan Shao's companion Yan Liang & Wen Chou are already ported (`yanliangwenchou`) --
+  Yuan Shao himself needed no 2nd-skill note (only 1 real skill in the Standard package).**
+- **Pan Feng (qun).** Kuangfu: REACTIVE (auto-triggered whenever anyone takes Slash damage while
+  holding an equip, not player-initiated) discard-or-steal one of the DAMAGED player's equips --
+  this engine's equip-taking mechanics (Dismantlement/Snatch/Lieren) are all player-INITIATED
+  actions targeting a chosen victim; a passive "hook that fires on someone ELSE's Slash-damage
+  event and lets a 3rd party react" is a new trigger shape.
+- **Zou Shi (qun).** Huoshui (while active, disables every OTHER player's ability to voluntarily
+  reveal a hidden general) directly targets Milestone 23's OWN reveal-timing simplification: this
+  port only ever asks a player to reveal at the START of THEIR OWN turn (`Phase.RoundStart`), so
+  there's no window during Zou Shi's turn where another player's reveal ask is even being
+  resolved for Huoshui to intercept -- blocked by this port's own architecture, not a missing
+  subsystem per se. Qingcheng (discard an equip to re-hide one of a fully-shown target's 2
+  generals) hits the exact same "re-hide" gap as Cao Ren's Jushou above.
+
+Subsystem tally across all 11: Nullification+counter-play-stack (1), Iron Chain (1), Fire Attack
+(1), Armor equip category (1), discard-to-skip-a-phase (3: Xiahouyuan/Zhanghe/Xuhuang),
+multi-target Slash (3: Xiahouyuan/Taishici/Dingfeng), re-hide-a-revealed-general (2: Caoren/
+Zoushi), free-virtual-card fabrication (1: Jiling), per-target distance override (1: Dingfeng),
+reactive 3rd-party equip trigger (1: Panfeng), private hidden-pile dying mechanic (1: Zhoutai),
+SupplyShortage delayed trick (1: Zhanghe), reveal-ask-timing architecture (1: Zoushi) -- each a
+real, separately-scoped piece of future work, not a single "port the rest" task.
+
 ## Deploy
 
 This is a single stateless Node process (`src/server.ts`) with everything in memory -- no

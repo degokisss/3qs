@@ -576,6 +576,15 @@ export class Room {
         const distinctHeld = [...new Set(chosen)].filter((c) => player.hand.includes(c));
         return distinctHeld.length === n ? distinctHeld : pickLeastImportantCards(player.hand, n);
       },
+      // Unlike askChooseDiscards (fixed count, forced fallback if declined/invalid), this is a
+      // free player choice within [min, max] -- an invalid/declined response returns [], never
+      // a substituted fallback, matching chooseSpearCards' own "never forced" precedent.
+      askAnyHandCards: async (player, min, max) => {
+        if (player.hand.length < min) return [];
+        const chosen = await this.controllers.get(player.id)!.chooseAnyHandCards(player, min, max);
+        const distinctHeld = [...new Set(chosen)].filter((c) => player.hand.includes(c));
+        return distinctHeld.length >= min && distinctHeld.length <= max ? distinctHeld : [];
+      },
       equipPlayer: (target, card) => this.equip(target, card),
     };
   }

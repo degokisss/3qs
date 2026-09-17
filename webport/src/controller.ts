@@ -15,7 +15,7 @@
 // define it and keep using the original fixed-order automatic pass (room.ts's `runPlayPhase`
 // fallback branch).
 
-import { Card, CardKind } from "./card.js";
+import { Card, CardKind, Suit } from "./card.js";
 import { GamePlayer } from "./player.js";
 import { GeneralDef } from "./skill.js";
 import { effectiveAttackRange, effectiveDistance, isImmuneToSlashAndDuel } from "./combat.js";
@@ -179,6 +179,15 @@ export interface Controller {
    *  else (empty array, wrong count, cards not actually held) is treated as declining --
    *  UNLIKE `chooseDiscards`, this is never forced, so there's no fallback substitution. */
   chooseSpearCards(player: GamePlayer): Promise<Card[]>;
+  /** Generic "freely pick between `min` and `max` (inclusive) of your OWN hand cards" ask --
+   *  for skills whose real cost is a player-chosen SUBSET, not a fixed count (e.g. Liu Bei's
+   *  Rende: give away any number >=1; Sun Quan's Zhiheng: discard up to maxHp; Yuan Shao's
+   *  Luanji: exactly 2 same-suit). Returns a `length` in `[min, max]` to proceed, or anything
+   *  outside that range (including empty, when `min > 0`) to decline -- UNLIKE `chooseDiscards`,
+   *  never forced, no fallback substitution, same "player's free choice" precedent as
+   *  `chooseSpearCards`. Callers that need an extra constraint beyond count (e.g. Luanji's
+   *  same-suit requirement) validate it themselves afterward and treat a mismatch as a decline. */
+  chooseAnyHandCards(player: GamePlayer, min: number, max: number): Promise<Card[]>;
   /** Generic single-target picker with no built-in filter -- `candidates` is pre-filtered by
    *  the caller. Return null to decline. */
   chooseAnyPlayerTarget(player: GamePlayer, candidates: GamePlayer[]): Promise<GamePlayer | null>;
@@ -290,6 +299,23 @@ export function makeBotController(rng: () => number): Controller {
       // Sacrifice the 2 least valuable cards (see pickLeastImportantCards) -- matches the
       // greedy policy's other "known/valuable resource" preferences.
       return pickLeastImportantCards(player.hand, 2);
+    },
+    async chooseAnyHandCards(player, min, max) {
+      if (player.hand.length < min) return [];
+      const take = Math.min(max, player.hand.length);
+      if (take < min) return [];
+      // A fixed exact count (min === max) might carry an unstated same-suit requirement the
+      // caller validates afterward (e.g. Luanji's exactly-2-same-suit) -- try a same-suit group
+      // first so that case doesn't always spuriously fail; falls back to the plain
+      // least-valuable-overall pick (matches chooseSpearCards' policy) otherwise.
+      if (min === max) {
+        const bySuit = new Map<Suit, Card[]>();
+        for (const c of player.hand) bySuit.set(c.suit, [...(bySuit.get(c.suit) ?? []), c]);
+        for (const group of bySuit.values()) {
+          if (group.length >= take) return pickLeastImportantCards(group, take);
+        }
+      }
+      return pickLeastImportantCards(player.hand, take);
     },
     async wantsToUseSelfAction() {
       return true;

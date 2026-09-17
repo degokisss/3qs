@@ -7,7 +7,7 @@ import strict from "node:assert/strict";
 import { Card, CardKind, Suit, buildStandardDeck } from "./card.js";
 import { Room } from "./room.js";
 import { GamePlayer } from "./player.js";
-import { EngineContext, allIndulgenceLikeCards, allSlashLikeCards, effectiveAttackRange, effectiveDistance, findIndulgenceLikeCard, findJinkLikeCard, findSlashLikeCard, loseHp, resolveSlash } from "./combat.js";
+import { EngineContext, allIndulgenceLikeCards, allSlashLikeCards, effectiveAttackRange, effectiveDistance, findIndulgenceLikeCard, findJinkLikeCard, findSlashLikeCard, judge, loseHp, resolveSlash } from "./combat.js";
 import { GENERALS, SKILLS } from "./skill.js";
 import { pickLeastImportantCards, slashCandidates } from "./controller.js";
 import { attachIndulgence, duelCandidates, resolveArcheryAttack, resolveDismantlement, resolveDuel, resolveIndulgenceJudgment, resolveSavageAssault, resolveSnatch, snatchCandidates } from "./trick.js";
@@ -402,11 +402,21 @@ async function testFreeformPlayAOECardIsOfferedAndResolves(): Promise<void> {
   for (const before of othersBefore) {
     const after = room.players.find((p) => p.id === before.id)!;
     const immune = after.skills.some((s) => s.immuneToSavageAssault?.(after));
-    const expected = before.hp - (immune ? 0 : 1);
+    // Partial reducers (e.g. Kong Rong's Mingshi: -1 flat) can also land on any seat depending
+    // on the seeded draft's random general assignment -- compute the SAME reduction
+    // `applyDamage` itself would apply, rather than assuming a flat 1 for everyone. Both this
+    // and `immuneToSavageAssault` are checked (not just one or the other) since either kind of
+    // skill can independently end up on any seat here.
+    let reduced = 1;
+    for (const skill of after.skills) {
+      if (skill.reduceDamage) reduced = skill.reduceDamage({ log: [] as string[] } as EngineContext, after, lord, reduced);
+    }
+    const takes = immune ? 0 : Math.max(0, reduced);
+    const expected = before.hp - takes;
     strict.equal(
       after.hp,
       expected,
-      `${before.id} (empty-handed, no slash to discard${immune ? ", savageAssaultAvoid" : ""}) must take exactly ${immune ? 0 : 1} savage assault damage`,
+      `${before.id} (empty-handed, no slash to discard${immune ? ", savageAssaultAvoid" : reduced !== 1 ? ", damage-reducing skill" : ""}) must take exactly ${takes} savage assault damage`,
     );
   }
   console.log(
@@ -876,14 +886,17 @@ async function testEquipAndTricksAppearInPlay(): Promise<void> {
 }
 
 /**
- * Milestone 2/2.6 proof: confirms all 44 ported generals get assigned and as many of their
+ * Milestone 2/2.6/24 proof: confirms all 49 ported generals get assigned and as many of their
  * skills as can reliably be log-mined actually fire through real play. Kongcheng/Qianxun/
- * Liegong/Qicai/Mashu/Wushuang/SavageAssaultAvoid/Zhijian/Wansha/Tiandu are proven separately
- * (dedicated tests below) since they're either passive filters with no log line, or gated
- * behind a rare/never-reached-by-the-bot precondition (e.g. Wushuang needs 2 held Jinks at
- * once; Zhijian needs an equip card to survive in hand past the bot's own always-equip pass;
- * Tiandu needs Guojia specifically to both be dealt an Indulgence AND accept the claim ask,
- * far too rare an intersection to reliably log-mine in a fixed seed range).
+ * Liegong/Qicai/Mashu/Wushuang/SavageAssaultAvoid/Zhijian/Wansha/Tiandu/Niepan/Hongyan are
+ * proven separately (dedicated tests below) since they're either passive filters with no log
+ * line, or gated behind a rare/never-reached-by-the-bot precondition (e.g. Wushuang needs 2
+ * held Jinks at once; Zhijian needs an equip card to survive in hand past the bot's own
+ * always-equip pass; Tiandu needs Guojia specifically to both be dealt an Indulgence AND accept
+ * the claim ask; Niepan needs Pang Tong to reach dying specifically without already holding a
+ * Peach-family card; Hongyan needs Xiao Qiao specifically to be the OWNER of one of the 5
+ * judgment-producing skills' judgment AND draw a Spade -- all far too rare an intersection to
+ * reliably log-mine in a fixed seed range).
  */
 async function testGeneralSkillsAppearInPlay(): Promise<void> {
   const generalsSeen = new Set<string>();
@@ -947,6 +960,9 @@ async function testGeneralSkillsAppearInPlay(): Promise<void> {
     ["duoshi", "(duoshi)"],
     ["fangquan", "(fangquan)"],
     ["indulgence", "phán Lạc Bất Tư Thục"],
+    ["rende", "(rende)"],
+    ["zhiheng", "(zhiheng)"],
+    ["luanji", "(luanji)"],
   ];
   const seen = new Set<string>();
 
@@ -972,12 +988,13 @@ async function testGeneralSkillsAppearInPlay(): Promise<void> {
     [
       "caiwenji", "caocao", "caopi", "daqiao", "dianwei", "diaochan", "erzhang", "ganfuren",
       "ganning", "guanyu", "guojia", "huanggai", "huangyueying", "huangzhong", "huatuo", "jiaxu",
-      "kongrong", "liushan", "lusu", "luxun", "lvbu", "lvmeng", "machao", "mateng", "menghuo",
-      "pangde", "simayi", "sunjian", "sunshangxiang", "tianfeng", "weiyan", "xiahoudun", "xuchu",
-      "xunyu", "yanliangwenchou", "yuejin", "zhangfei", "zhangjiao", "zhangliao", "zhaoyun",
-      "zhenji", "zhouyu", "zhugeliang", "zhurong",
+      "kongrong", "liubei", "liushan", "lusu", "luxun", "lvbu", "lvmeng", "machao", "mateng",
+      "menghuo", "pangde", "pangtong", "simayi", "sunjian", "sunquan", "sunshangxiang",
+      "tianfeng", "weiyan", "xiahoudun", "xiaoqiao", "xuchu", "xunyu", "yanliangwenchou",
+      "yuanshao", "yuejin", "zhangfei", "zhangjiao", "zhangliao", "zhaoyun", "zhenji", "zhouyu",
+      "zhugeliang", "zhurong",
     ],
-    "all 44 ported generals must appear across 150 seeds of 8-player games",
+    "all 49 ported generals must appear across 150 seeds of 8-player games",
   );
   strict.ok(sawMultiSlashTurn, "paoxiao (zhangfei) never allowed >1 slash in a single turn");
   const missing = markers.map(([name]) => name).filter((name) => !seen.has(name));
@@ -1102,6 +1119,115 @@ async function testSavageAssaultAvoidImmunity(): Promise<void> {
   strict.equal(immune.hp, immune.maxHp, "savageAssaultAvoid must take no damage from savage assault");
   strict.equal(normal.hp, normal.maxHp - 1, "a non-immune empty-handed player must still take savage assault damage");
   console.log("PASS testSavageAssaultAvoidImmunity: immune player untouched, normal player took the expected damage");
+}
+
+/**
+ * Niepan (Pang Tong) proof: while dying with no Peach-family rescue card held, may cheat death
+ * ONCE per game -- discards hand/equip/judge area, recovers to min(3, maxHp), draws 3. A 2nd
+ * dying episode in the same game must NOT be able to invoke it again (`usedLimitSkills`).
+ * Driven directly through `resolveSlash` (pure, deterministic, same "no Room needed" precedent
+ * as the other dying tests elsewhere in this file).
+ */
+async function testNiepanCheatsDeathOnce(): Promise<void> {
+  const deck = buildStandardDeck();
+  const slashCard = deck.find((c) => c.kind === CardKind.Slash)!;
+  const filler = deck.find((c) => c.kind === CardKind.Slash && c.id !== slashCard.id)!;
+  const weapon = deck.find((c) => c.kind === CardKind.Weapon)!;
+  const used = new Set([slashCard.id, filler.id, weapon.id]);
+  const freshCards = deck.filter((c) => !used.has(c.id));
+
+  const attacker = new GamePlayer("ATK");
+  const pangtong = new GamePlayer("PT", 3); // maxHp 3
+  pangtong.skills = [SKILLS.niepan];
+  pangtong.hand = [filler]; // no Peach/Analeptic held -- niepan is the only way out
+  pangtong.weapon = weapon;
+  pangtong.hp = 1; // wounded before the hit lands, so the incoming slash drops him to 0
+
+  const log: string[] = [];
+  const ctx = makeTestContext([pangtong, attacker], log);
+  ctx.onDying = (p) => {
+    p.alive = false;
+  };
+  let drawIdx = 0;
+  ctx.draw = (player, n) => {
+    for (let i = 0; i < n; i++) player.hand.push(freshCards[drawIdx++]);
+  };
+
+  await resolveSlash(ctx, attacker, pangtong, slashCard);
+
+  strict.equal(pangtong.alive, true, "niepan must have saved pangtong from dying");
+  strict.equal(pangtong.hp, 3, "must recover to min(3, maxHp) -- exactly 3 here since maxHp is 3");
+  strict.ok(!pangtong.hand.includes(filler), "the old hand card must have been discarded, not kept");
+  strict.equal(pangtong.handcardNum, 3, "must draw exactly 3 fresh cards");
+  strict.equal(pangtong.weapon, null, "the equipped weapon must also be discarded");
+  strict.ok(ctx.discardPile.includes(filler) && ctx.discardPile.includes(weapon), "discarded hand/equip cards must land in the discard pile");
+  strict.ok(pangtong.usedLimitSkills.has("niepan"), "niepan must be marked used (once per game)");
+  strict.ok(log.some((l) => l.includes("Niết Bàn")), "the cheat-death must be logged");
+
+  // A 2nd dying episode in the same game must NOT be able to invoke niepan again.
+  pangtong.hp = 1;
+  pangtong.hand = [];
+  await resolveSlash(ctx, attacker, pangtong, slashCard);
+  strict.equal(pangtong.alive, false, "niepan already used this game -- a 2nd dying episode must not be saved by it again");
+
+  console.log(
+    "PASS testNiepanCheatsDeathOnce: cheated death once (discarded all/recovered to 3/drew 3), a 2nd dying episode was not saved again",
+  );
+}
+
+/**
+ * Hongyan (Xiao Qiao) proof: her own judgment card, if a Spade, may be reinterpreted as a Heart
+ * -- mutating the SAME drawn `Card` object in place, not replaced (unlike a retrial). Accepting
+ * flips the suit; declining leaves it untouched; a non-Spade draw never even asks. Driven
+ * directly through `judge()` (pure, deterministic, no Room needed).
+ */
+async function testHongyanFiltersOwnSpadeJudgmentToHeart(): Promise<void> {
+  const deck = buildStandardDeck();
+  const spadeCard = deck.find((c) => c.suit === Suit.Spade)!;
+  const heartCard = deck.find((c) => c.suit === Suit.Heart)!;
+
+  // Accepting: a Spade judgment becomes Heart, on the SAME card object.
+  {
+    spadeCard.suit = Suit.Spade; // ensure a clean starting suit regardless of test run order
+    const xiaoqiao = new GamePlayer("XQ");
+    xiaoqiao.skills = [SKILLS.hongyan];
+    const log: string[] = [];
+    const ctx = makeTestContext([xiaoqiao], log, () => spadeCard);
+    const result = await judge(ctx, xiaoqiao, "test");
+    strict.equal(result, spadeCard, "the SAME card object must be returned (reinterpreted, not replaced by a retrial)");
+    strict.equal(result!.suit, Suit.Heart, "accepting hongyan must flip the drawn Spade to Heart");
+    strict.ok(log.some((l) => l.includes("hongyan")), "the reinterpretation must be logged");
+  }
+
+  // Declining: leave a Spade judgment untouched.
+  {
+    spadeCard.suit = Suit.Spade; // reset from the prior sub-test's in-place mutation
+    const xiaoqiao = new GamePlayer("XQ");
+    xiaoqiao.skills = [SKILLS.hongyan];
+    const ctx = makeTestContext([xiaoqiao], [], () => spadeCard);
+    ctx.askUseSelfAction = async () => false;
+    const result = await judge(ctx, xiaoqiao, "test");
+    strict.equal(result!.suit, Suit.Spade, "declining hongyan must leave the judgment as Spade");
+  }
+
+  // A non-Spade draw never even asks.
+  {
+    const xiaoqiao = new GamePlayer("XQ");
+    xiaoqiao.skills = [SKILLS.hongyan];
+    let asked = false;
+    const ctx = makeTestContext([xiaoqiao], [], () => heartCard);
+    ctx.askUseSelfAction = async () => {
+      asked = true;
+      return true;
+    };
+    const result = await judge(ctx, xiaoqiao, "test");
+    strict.equal(result!.suit, Suit.Heart, "a non-Spade judgment stays untouched");
+    strict.equal(asked, false, "hongyan must never even ask when the drawn card isn't a Spade");
+  }
+
+  console.log(
+    "PASS testHongyanFiltersOwnSpadeJudgmentToHeart: accepting flips Spade->Heart in place, declining/non-Spade leave it untouched",
+  );
 }
 
 /**
@@ -1241,6 +1367,7 @@ function makeTestContext(alivePlayers: GamePlayer[], log: string[], drawTop: () 
     askGuanxingBottom: async () => new Set<number>(),
     askGuicaiRetrial: async () => null,
     askChooseDiscards: async (player, count) => player.hand.slice(0, count),
+    askAnyHandCards: async (player, min, max) => player.hand.slice(0, Math.max(min, Math.min(max, player.hand.length))),
     equipPlayer: async (target, card) => {
       if (card.kind === CardKind.Weapon) target.weapon = card;
       else if (card.horseDelta === 1) target.defenseHorse = card;
@@ -1490,11 +1617,15 @@ async function testExpandedControllerHooksRespected(): Promise<void> {
     await room.runUntilGameOver(300);
     for (let i = 0; i < room.log.length; i++) {
       const line = room.log[i];
-      // Lijian (Diao Chan, new since this test was written) compels its 2nd-chosen player to
-      // use Duel via resolveDuel directly, bypassing wantsToPlayTrick/chooseTrickTarget
-      // entirely -- its own log line always immediately precedes the compelled "X dùng Quyết
-      // Đấu với Y" line, so skip that specific occurrence when checking self-sourcing.
-      const compelled = /dùng Ly Gián:.*xem như dùng Quyết Đấu với/.test(room.log[i - 1] ?? "");
+      // Lijian (Diao Chan) compels its 2nd-chosen player to use Duel via resolveDuel directly,
+      // bypassing wantsToPlayTrick/chooseTrickTarget entirely; Luanji (Yuan Shao, Milestone 24)
+      // similarly invokes resolveArcheryAttack directly from a `selfAction` (gated by
+      // `wantsToUseSelfAction`, which `declineAll` does NOT override here -- same "not a
+      // wantsToPlayTrick-gated path" precedent as Spear's 2-card-as-Slash) -- both skills' own
+      // log lines always immediately precede the resulting compelled/self-sourced trick line,
+      // so skip those specific occurrences when checking self-SOURCING via wantsToPlayTrick.
+      const compelled =
+        /dùng Ly Gián:.*xem như dùng Quyết Đấu với/.test(room.log[i - 1] ?? "") || /\(luanji\)$/.test(room.log[i - 1] ?? "");
       if (/^P1 trang bị/.test(line)) p1Equipped = true;
       if (!compelled && /^P1 (bốc 2 lá \(Vô Trung Sinh Hữu\)|dùng Quyết Đấu|dùng Nam Man Nhập Xâm|dùng Vạn Tiễn Tề Phát)/.test(line))
         p1SelfTrickSourced = true;
@@ -1715,6 +1846,8 @@ testQianxunImmunity();
 testQicaiIgnoresSnatchDistance();
 testMashuReducesDistance();
 await testSavageAssaultAvoidImmunity();
+await testNiepanCheatsDeathOnce();
+await testHongyanFiltersOwnSpadeJudgmentToHeart();
 await testDismantlementSnatchCanTargetEquipmentAndRespectChoice();
 await testSavageAssaultAndArcheryAttackAreAChoice();
 await testGuicaiRetrialsAnotherPlayersJudgment();

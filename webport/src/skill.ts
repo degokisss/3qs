@@ -88,7 +88,7 @@ import { GamePlayer } from "./player.js";
 import { Phase, Role } from "./types.js";
 import { alliesOf, isAlly } from "./gamerule.js";
 import { EngineContext, SUIT_LABEL_VI, applyDamage, detachCardFrom, effectiveAttackRange, effectiveDistance, findSlashLikeCard, heal, judge, loseHp, resolveSlash } from "./combat.js";
-import { resolveDuel } from "./trick.js";
+import { resolveArcheryAttack, resolveDuel } from "./trick.js";
 
 export interface Skill {
   name: string;
@@ -264,6 +264,19 @@ export interface Skill {
    *  Indulgence targeting him, on top of his existing Snatch immunity). Locked/compulsory: no
    *  ask. Consulted only for Indulgence right now (the only delayed trick implemented). */
   blocksIndulgenceEntry?(player: GamePlayer): boolean;
+  /** Once-per-game (tracked via `player.usedLimitSkills`) alternative to a Peach-family
+   *  self-rescue while dying (e.g. Pang Tong's Niepan): if it fires and returns true, the whole
+   *  skill resolved its own recovery/effects internally (the caller just re-checks `player.hp`
+   *  afterward, same as a successful Peach loop iteration); returning false means it declined
+   *  or wasn't eligible, dying resolution proceeds to the normal ally-rescue round. Consulted
+   *  by `resolveDying` right alongside the normal self-rescue-card check. */
+  cheatsDeath?(ctx: EngineContext, player: GamePlayer): Promise<boolean>;
+  /** Fired once, self-only (only ever consulted for `judgeOwner`'s own skills, unlike the
+   *  broadcast `onJudgment` retrial hook above), right after `judge()` draws `judgeOwner`'s own
+   *  fresh judgment card -- may mutate `currentCard.suit` in place to reinterpret it for every
+   *  downstream consumer (e.g. Xiao Qiao's Hongyan: her own Spade judgment may become a Heart).
+   *  A fresh per-judgment `Card` object is always safe to mutate (never shared/aliased). */
+  filtersOwnJudgment?(ctx: EngineContext, self: GamePlayer, currentCard: Card): Promise<void>;
 }
 
 function isRed(card: Card): boolean {
@@ -1032,6 +1045,107 @@ async function fangquanGrantsExtraTurn(ctx: EngineContext, player: GamePlayer): 
   return target;
 }
 
+/** Rende (Liu Bei): once per Play phase, give any number (>=1) of freely-chosen hand cards to a
+ *  chosen other player; if 3+ were given AND Liu Bei is currently wounded, he recovers 1 hp.
+ *  Verified exactly against the real upstream source (`RendeCard::use` in
+ *  `standard-shu-generals.cpp`, not just the localized flavor text, which is ambiguous/
+ *  outdated on this point): `source->getMark("rende") += subcards.length(); if (old < 3 &&
+ *  new >= 3 && isWounded()) recover(1)` -- a per-TURN cumulative threshold across possibly
+ *  MULTIPLE Rende uses (different target each time), not "2+ in one use -> draw a card" as a
+ *  shallower read of the Vietnamese text might suggest. Collapsed to a single invocation per
+ *  Play phase (same "once per Play phase" simplification this port already applies to every
+ *  other proactive `selfAction` -- Kurou, Dimeng, Lijian, Jieyin, etc.), so the threshold is
+ *  just "this one invocation gave away 3+ cards" -- equivalent to the real cumulative rule for
+ *  the overwhelmingly common single-target case, at the cost of the rarer split-across-targets
+ *  case no longer being able to accumulate toward the threshold. */
+async function rendeSelfAction(ctx: EngineContext, player: GamePlayer): Promise<void> {
+  if (player.handcardNum === 0 || !(await ctx.askUseSelfAction(player, "rende"))) return;
+  const candidates = ctx.alivePlayers.filter((p) => p !== player);
+  if (candidates.length === 0) return;
+  const to = await ctx.askChooseAnyPlayer(player, candidates);
+  if (!to) return;
+  const given = await ctx.askAnyHandCards(player, 1, player.handcardNum);
+  if (given.length === 0) return;
+  for (const c of given) player.hand.splice(player.hand.indexOf(c), 1);
+  to.hand.push(...given);
+  ctx.log.push(`${player.id} giao ${given.length} lá bài cho ${to.id} (rende)`);
+  if (given.length >= 3 && player.isWounded()) {
+    await heal(ctx, player, 1);
+    ctx.log.push(`${player.id} hồi 1 máu (rende: giao từ 3 lá trở lên)`);
+  }
+}
+
+/** Niepan (Pang Tong): once per GAME, while dying (hp<=0), may discard everything (hand +
+ *  equip + judge area), recover to min(3, maxHp), and draw 3 -- an alternative to a Peach-family
+ *  self-rescue, consulted by `resolveDying` (combat.ts) via the `cheatsDeath` hook. Real rule
+ *  also clears "chained" status and forces face-up if face-down; neither chains nor a per-turn
+ *  face state exist in this engine's scope (Hegemony's own reveal-timing is a DIFFERENT
+ *  mechanic, see gamerule.ts's header) -- not modeled, same "faithful behavior, simplified
+ *  interaction" precedent as every other skill here that drops a clause this engine has no
+ *  concept for. */
+async function niepanCheatsDeath(ctx: EngineContext, player: GamePlayer): Promise<boolean> {
+  if (player.usedLimitSkills.has("niepan") || !(await ctx.askUseSelfAction(player, "niepan"))) return false;
+  player.usedLimitSkills.add("niepan");
+  ctx.discardPile.push(...player.hand.splice(0));
+  const equipsLost = [player.weapon, player.defenseHorse, player.offenseHorse].filter((c): c is Card => c !== null);
+  player.weapon = null;
+  player.defenseHorse = null;
+  player.offenseHorse = null;
+  ctx.discardPile.push(...equipsLost, ...player.judgeArea.splice(0));
+  ctx.log.push(`${player.id} phát động Niết Bàn: bỏ hết bài trên tay/trang bị/phán quyết`);
+  await heal(ctx, player, Math.min(3, player.maxHp) - player.hp);
+  ctx.draw(player, 3);
+  ctx.log.push(`${player.id} hồi lên ${player.hp}/${player.maxHp} máu, rút 3 lá (niepan)`);
+  for (let i = 0; i < equipsLost.length; i++) {
+    for (const skill of player.skills) await skill.onEquipLost?.(ctx, player);
+  }
+  return true;
+}
+
+/** Zhiheng (Sun Quan): once per Play phase, discard up to maxHp freely-chosen hand cards, then
+ *  draw that many back -- real upstream's "may also include your Treasure equip once you've
+ *  discarded maxHp hand cards" clause needs a Treasure equip slot this engine doesn't have
+ *  (only Weapon/Horse are modeled, see card.ts's header); not ported, hand-only. */
+async function zhihengSelfAction(ctx: EngineContext, player: GamePlayer): Promise<void> {
+  if (player.handcardNum === 0 || !(await ctx.askUseSelfAction(player, "zhiheng"))) return;
+  const discarded = await ctx.askAnyHandCards(player, 1, Math.min(player.handcardNum, player.maxHp));
+  if (discarded.length === 0) return;
+  for (const c of discarded) player.hand.splice(player.hand.indexOf(c), 1);
+  ctx.discardPile.push(...discarded);
+  ctx.draw(player, discarded.length);
+  ctx.log.push(`${player.id} bỏ ${discarded.length} lá rồi rút lại ${discarded.length} lá (zhiheng)`);
+}
+
+/** Hongyan (Xiao Qiao): once, self-only -- her own judgment card, if a Spade, may be
+ *  reinterpreted as a Heart (mutating the freshly-drawn `Card` object in place, safe since it's
+ *  never shared -- see `filtersOwnJudgment`'s own doc comment). Automatic-ask simplification:
+ *  a real choice via `askUseSelfAction`, same as every other skill here with a genuine but
+ *  situational cost-free decision. Real upstream also gates on "not already shown this skill
+ *  this game" (`hasShownSkill`) -- this port has no reveal-state concept for Identity-mode
+ *  generals to gate on (that's Hegemony-only, see gamerule.ts's header), so it's simply
+ *  available every time her own judgment resolves. */
+async function hongyanFiltersOwnJudgment(ctx: EngineContext, self: GamePlayer, currentCard: Card): Promise<void> {
+  if (currentCard.suit !== Suit.Spade) return;
+  if (!(await ctx.askUseSelfAction(self, "hongyan"))) return;
+  currentCard.suit = Suit.Heart;
+  ctx.log.push(`${self.id} biến phán quyết thành Cơ (hongyan)`);
+}
+
+/** Luanji (Yuan Shao): any 2 hand cards of the SAME suit may be played/discarded together as
+ *  Archery Attack. Modeled as a dedicated proactive self-action (this engine's `canViewAs*`
+ *  hooks are all single-card, see this file's earlier "multi-card viewAs" scope notes) rather
+ *  than a true viewAs -- same "no dedicated multi-card-combo UI, folded into a self-action ask"
+ *  precedent as Spear's 2-card-as-Slash (room.ts's `trySpearSlash`). */
+async function luanjiSelfAction(ctx: EngineContext, player: GamePlayer): Promise<void> {
+  if (player.handcardNum < 2 || !(await ctx.askUseSelfAction(player, "luanji"))) return;
+  const chosen = await ctx.askAnyHandCards(player, 2, 2);
+  if (chosen.length !== 2 || chosen[0].suit !== chosen[1].suit) return; // declined, or not a same-suit pair -- never forced
+  for (const c of chosen) player.hand.splice(player.hand.indexOf(c), 1);
+  ctx.discardPile.push(...chosen);
+  ctx.log.push(`${player.id} dùng 2 lá cùng chất như Vạn Tiễn Tề Phát (luanji)`);
+  await resolveArcheryAttack(ctx, player);
+}
+
 export const SKILLS: Record<string, Skill> = {
   paoxiao: {
     name: "paoxiao",
@@ -1453,6 +1567,36 @@ export const SKILLS: Record<string, Skill> = {
     canSkipPlayPhase: () => true,
     grantsExtraTurn: fangquanGrantsExtraTurn,
   },
+  rende: {
+    name: "rende",
+    displayName: "Nhân Đức",
+    description: "Một lần trong giai đoạn ra bài: giao tùy ý số lá trên tay cho 1 người khác; nếu giao từ 3 lá trở lên và bạn đang bị thương, hồi 1 máu.",
+    selfAction: rendeSelfAction,
+  },
+  niepan: {
+    name: "niepan",
+    displayName: "Niết Bàn",
+    description: "Hạn định kỹ: khi đang hấp hối, có thể bỏ hết bài trên tay/trang bị/phán quyết, hồi máu lên 3 (hoặc giới hạn máu nếu thấp hơn) rồi rút 3 lá.",
+    cheatsDeath: niepanCheatsDeath,
+  },
+  zhiheng: {
+    name: "zhiheng",
+    displayName: "Chế Hành",
+    description: "Một lần trong giai đoạn ra bài: bỏ tối đa X lá trên tay (X = giới hạn máu của bạn), rút lại số lá tương ứng.",
+    selfAction: zhihengSelfAction,
+  },
+  hongyan: {
+    name: "hongyan",
+    displayName: "Hồng Nhan",
+    description: "Phán quyết của chính bạn, nếu là chất BÍCH, có thể xem như chất CƠ.",
+    filtersOwnJudgment: hongyanFiltersOwnJudgment,
+  },
+  luanji: {
+    name: "luanji",
+    displayName: "Loạn Kích",
+    description: "Giai đoạn ra bài, có thể chuyển hóa 2 lá trên tay CÙNG CHẤT thành [Vạn Tiễn Tề Phát].",
+    selfAction: luanjiSelfAction,
+  },
 };
 
 export interface GeneralDef {
@@ -1515,4 +1659,14 @@ export const GENERALS: GeneralDef[] = [
   { name: "mateng", displayName: "Mã Đằng", kingdom: "qun", maxHp: 4, skillNames: ["mashu", "xiongyi"] },
   { name: "kongrong", displayName: "Khổng Dung", kingdom: "qun", maxHp: 3, skillNames: ["mingshi", "lirang"] },
   { name: "tianfeng", displayName: "Điền Phong", kingdom: "qun", maxHp: 3, skillNames: ["sijian", "suishi"] },
+  // Milestone 24 (5 more generals, 44->49 of the real ~60-general roster): user asked to check
+  // the real upstream repo directly (github.com/Mogara/QSanguosha-For-Hegemony), which found the
+  // "~60" figure itself (not the stale "46" this file's comment above used to say) -- see
+  // webport/README.md's Milestone 24 section for the full research + why these 5 (of the 16
+  // real gaps found) were the tractable first batch.
+  { name: "liubei", displayName: "Lưu Bị", kingdom: "shu", maxHp: 4, skillNames: ["rende"] },
+  { name: "pangtong", displayName: "Bàng Thống", kingdom: "shu", maxHp: 3, skillNames: ["niepan"] }, // Lianhuan still deferred, needs the Iron Chain trick card (not ported, see card.ts's header)
+  { name: "sunquan", displayName: "Tôn Quyền", kingdom: "wu", maxHp: 4, skillNames: ["zhiheng"] },
+  { name: "xiaoqiao", displayName: "Tiểu Kiều", kingdom: "wu", maxHp: 3, skillNames: ["hongyan"], gender: "female" }, // Tianxiang still deferred, needs a damage-transfer mechanic (redirect incoming damage to another player)
+  { name: "yuanshao", displayName: "Viên Thiệu", kingdom: "qun", maxHp: 4, skillNames: ["luanji"] },
 ];
