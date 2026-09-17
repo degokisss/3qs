@@ -1929,8 +1929,9 @@ all, as a first batch; the other 11 are analyzed and documented below, not silen
   Cai Wenji renders the 5 new ones identically) with no broken images or layout, all the way
   through picking a general and entering the table.
 
-**Remaining 11 of the 16 real gaps, each genuinely blocked on a specific new subsystem (checked
-directly against the real upstream C++ source, not guessed):**
+**Remaining 6 of the 16 real gaps (after Milestone 25 ported 5 more below), each genuinely
+blocked on a specific new subsystem (checked directly against the real upstream C++ source, not
+guessed):**
 
 - **Wolong (Khổng Minh, shu, 3hp; Zhuge Liang's alternate persona card, `wolong` != `zhugeliang`
   -- a real, distinct Standard-package general with 3 different skills).** Huoji needs the Fire
@@ -1944,62 +1945,145 @@ directly against the real upstream C++ source, not guessed):**
   targets -- needs both a "discard to skip a phase, then act outside the normal flow" mechanic
   AND multi-target Slash resolution (this engine's `resolveSlash` is strictly 1 attacker : 1
   target).
-- **Zhang He (wei, 4hp).** Duanliang (a black card viewAs SupplyShortage, a delayed trick +
-  distance-limit reduction) is the MOST tractable of the 11 -- SupplyShortage could reuse the
-  judge-area/delayed-trick system Indulgence already proved out (Milestone 20ish), and a new
-  distance-LIMIT hook (distinct from the existing flat distance-delta) is a small addition -- but
-  his OTHER skill, Qiaobian (discard 1 card during ANY phase to skip it, then use an extra card
-  outside the normal Draw/Play flow), needs the same "act outside the normal flow" mechanic
-  Xiahouyuan's Shensu needs. Deferred as a unit rather than porting only 1 of 2 skills this time,
-  since Duanliang alone still needs a real (if small) new subsystem, unlike this milestone's 5.
-- **Xu Huang / Cao Ren (wei).** Neither skill is portable at all without a genuinely new
-  concept: Xu Huang's only skill needs the same discard-to-skip-phase mechanic above; Cao Ren's
-  only skill, Jushou (draw 3, then "turn face down" -- skip future turns until choosing to flip
-  back up), needs the ability to RE-HIDE an already-revealed general/persona, which Milestone
-  23's reveal-timing system doesn't support (`mainRevealed`/`deputyRevealed` only ever go
-  false->true) and Identity mode has no 2nd-general concept to hide in the first place.
-- **Taishici / Jiling (wu/qun).** Both need Pindian -- which, unlike the other 11, THIS ENGINE
-  ALREADY HAS (`skill.ts`'s shared `pindian()` helper, built for Lieren/Quhu back in Milestone
-  2.6/2.9) -- but both skills' WIN effects need mechanics this engine doesn't have yet either:
-  Taishici's Tianyi grants a temporary "+1 extra Slash target, ignore distance limit" buff (needs
-  the same multi-target-Slash extension Xiahouyuan/Dingfeng need); Jiling's Shuangren grants a
-  completely FREE bonus Slash with no backing card (`Slash(Card::NoSuit, 0)` in the real source --
-  a virtual card object this engine has no precedent for fabricating outside a player's actual
-  hand). Closest of the remaining 11 to being portable, but each still needs one more piece.
+- **Zhang He (wei, 4hp).** Qiaobian, his only Standard skill: discard 1 card during ANY phase to
+  skip it, then (for Draw/Play specifically) use an extra card outside the normal flow -- needs
+  the same "act outside the normal flow" mechanic Xiahouyuan's Shensu needs. **Correction: an
+  earlier draft of this section swapped Zhang He and Xu Huang's skills -- Duanliang (the
+  tractable SupplyShortage-viewAs one) is actually XU HUANG's, not Zhang He's; Xu Huang is now
+  ported below, Zhang He (Qiaobian) genuinely still needs the harder mechanic.**
+- **Taishici (wu, 4hp).** Tianyi needs Pindian -- which, unlike every other gap here, THIS
+  ENGINE ALREADY HAS (`skill.ts`'s shared `pindian()` helper, built for Lieren/Quhu back in
+  Milestone 2.6/2.9) -- but its WIN effect grants a temporary "+1 extra Slash target, ignore
+  distance limit" buff, needing the same multi-target-Slash extension Xiahouyuan needs. Jiling's
+  own Shuangren (the other Pindian-gated skill) turned out to need a DIFFERENT, more tractable
+  missing piece (a free virtual bonus Slash, not multi-target) -- see Milestone 25 below, now
+  ported.
 - **Zhou Tai (wu).** Buqu -- a private hidden card-pile "secretly survive at <=0 hp" mechanic
   (draw N cards face-down into a pile; if no 2 share a rank, silently treat as not-dying; the
   pile clears on recovery or gets checked again after a failed rescue) -- among the most
   structurally involved individual skills in the entire real ruleset, genuinely its own
   subsystem, not a small hook.
-- **Ding Feng (wu).** Duanbing is a real no-op STUB even in the upstream C++ itself (confirmed
-  back in Milestone 2.6's correction -- its actual "Slash within distance 1 can't be dodged,
-  designate 1 more target" effect lives in `Slash`'s own card logic elsewhere, needing
-  multi-target Slash); Fenxun (discard a card to set distance -1 to a chosen target until turn
-  end) needs a genuinely per-TARGET temporary distance override, distinct from this engine's
-  existing flat `attackDistanceDelta` hook (Mashu/offense-horse -- same delta to EVERY player,
-  not one specific target).
-- **Yuan Shao's companion Yan Liang & Wen Chou are already ported (`yanliangwenchou`) --
-  Yuan Shao himself needed no 2nd-skill note (only 1 real skill in the Standard package).**
-- **Pan Feng (qun).** Kuangfu: REACTIVE (auto-triggered whenever anyone takes Slash damage while
-  holding an equip, not player-initiated) discard-or-steal one of the DAMAGED player's equips --
-  this engine's equip-taking mechanics (Dismantlement/Snatch/Lieren) are all player-INITIATED
-  actions targeting a chosen victim; a passive "hook that fires on someone ELSE's Slash-damage
-  event and lets a 3rd party react" is a new trigger shape.
 - **Zou Shi (qun).** Huoshui (while active, disables every OTHER player's ability to voluntarily
   reveal a hidden general) directly targets Milestone 23's OWN reveal-timing simplification: this
   port only ever asks a player to reveal at the START of THEIR OWN turn (`Phase.RoundStart`), so
   there's no window during Zou Shi's turn where another player's reveal ask is even being
   resolved for Huoshui to intercept -- blocked by this port's own architecture, not a missing
   subsystem per se. Qingcheng (discard an equip to re-hide one of a fully-shown target's 2
-  generals) hits the exact same "re-hide" gap as Cao Ren's Jushou above.
+  generals) needs the ability to RE-HIDE an already-revealed general, which Milestone 23's
+  reveal-timing system doesn't support (`mainRevealed`/`deputyRevealed` only ever go
+  false->true) -- a genuinely different gap than Cao Ren's Jushou (below) turned out to need,
+  once Jushou's real effect was traced precisely (a simple single-turn auto-skip, not an
+  indefinite re-hide at all).
 
-Subsystem tally across all 11: Nullification+counter-play-stack (1), Iron Chain (1), Fire Attack
-(1), Armor equip category (1), discard-to-skip-a-phase (3: Xiahouyuan/Zhanghe/Xuhuang),
-multi-target Slash (3: Xiahouyuan/Taishici/Dingfeng), re-hide-a-revealed-general (2: Caoren/
-Zoushi), free-virtual-card fabrication (1: Jiling), per-target distance override (1: Dingfeng),
-reactive 3rd-party equip trigger (1: Panfeng), private hidden-pile dying mechanic (1: Zhoutai),
-SupplyShortage delayed trick (1: Zhanghe), reveal-ask-timing architecture (1: Zoushi) -- each a
-real, separately-scoped piece of future work, not a single "port the rest" task.
+Subsystem tally across these final 6: Nullification+counter-play-stack (1: Wolong), Iron Chain
+(1: Wolong's companion Pang Tong still needs it for Lianhuan), Fire Attack (1: Wolong),
+Armor equip category (1: Wolong), discard-to-skip-a-phase (2: Xiahouyuan/Zhanghe), multi-target
+Slash (2: Xiahouyuan/Taishici), private hidden-pile dying mechanic (1: Zhoutai),
+re-hide-a-revealed-general (1: Zoushi's Qingcheng), reveal-ask-timing architecture (1: Zoushi's
+Huoshui) -- each a real, separately-scoped piece of future work, not a single "port the rest"
+task.
+
+## Milestone 25 — DONE (5 more generals: Ding Feng/Cao Ren/Pan Feng/Jiling/Xu Huang, 49→54 of 60)
+
+User asked to port more of the 16 real gaps toward full completeness. Investigated the
+remaining 11's exact skill implementations (having already done 5 easy ones in Milestone 24) and
+found 5 more that needed either an existing subsystem or one genuinely small new one:
+
+- **Ding Feng (Phấn Tấn/Fenxun, wu, 4hp).** New `player.fixedDistanceTo` map + `effectiveDistance`
+  short-circuit (combat.ts) -- verified exactly against the real upstream `Player::
+  setFixedDistance`/`fixed_distance` map (an ABSOLUTE override, not an additive delta like the
+  existing `attackDistanceDelta` hook): discard 1 card, pick another player -- your distance TO
+  them becomes fixed at 1 until end of turn (cleared in `Room.playTurn`). His other skill,
+  Duanbing, stays unported -- confirmed a real no-op STUB even in the upstream `dev`-branch C++
+  itself (Milestone 2.6's own correction already found this), needing multi-target Slash.
+- **Cao Ren (Chiếm Thủ/Jushou, wei, 4hp).** New `player.faceDown` flag, checked at the very top
+  of `Room.playTurn`: at Finish phase, may draw 3 and become face-down; the ENTIRE next turn is
+  auto-skipped (verified exactly against the real upstream `gamerule.cpp`'s RoundStart handler:
+  `if (!player->faceUp()) { player->turnOver(); /* skip play() entirely */ }` -- a single-turn
+  auto-skip with NO player choice in flipping back, not an indefinite "stay hidden" state as
+  initially assumed in Milestone 24's addendum). lang/vi_VN describes a different/newer revision
+  (draw X=living-faction-count, use/discard a card, conditionally toggle dual-general shown
+  state) -- ported the real `dev`-branch class's simpler effect instead, same mismatch pattern
+  as Longdan/Kongcheng/Tieqi/Kurou/Hongyan/Luanji.
+- **Pan Feng (Cuồng Phủ/Kuangfu, qun, 4hp).** New broadcast hook `Skill.onSomeoneSlashDamaged`
+  (combat.ts's `resolveSlash`, alongside the existing attacker-only `onSlashDamageDealt`) --
+  REACTIVE, not player-initiated: whenever ANY Slash damages someone holding an equip, may pick
+  one of their equips and either discard it or move it onto his own matching (empty) equip slot.
+  Verified against the real upstream `Kuangfu : public TriggerSkill` class (`events << Damage`)
+  -- lang/vi_VN describes a completely different skill (triggers on PAN FENG'S OWN Slash
+  targeting instead), same mismatch pattern as above; ported the real reactive class.
+- **Jiling (Song Nhận/Shuangren, qun, 4hp).** New `makeVirtualSlash()` factory (card.ts) -- a
+  free bonus Slash with no backing physical card, matching the real upstream `Slash(Card::
+  NoSuit, 0)` exactly; gets a fresh id from the same counter every card uses (so it discards/
+  logs identically) but is marked `virtual: true` so card-conservation invariants
+  (`simulate.ts`'s `totalCardsInPlay`) correctly exclude it. During Play phase, pindian
+  (reusing the EXISTING `pindian()` helper -- Pindian was never actually the blocker for Jiling,
+  see Milestone 24's addendum correction above) with a chosen victim; on a win, designate any
+  player within his own Slash range who is the victim or an ally of the victim to receive the
+  free bonus Slash.
+- **Xu Huang (Đoạn Lương/Duanliang, wei, 4hp).** New SupplyShortage (Binh Lương Thốn Đoạn)
+  delayed trick -- a 2nd judge-area/delayed-trick kind alongside Indulgence, reusing the exact
+  same `judgeArea`/`runJudgePhase` system Indulgence proved out: `card.ts` gained
+  `CardKind.SupplyShortage` + the 2 real dealt copies (Spade 10, Club 10, verified exactly
+  against the real upstream `trickCards()`); `player.ts` gained `forcedSkipDrawPhase` (mirrors
+  `forcedSkipPlayPhase`); `trick.ts` gained `supplyShortageCandidates`/`attachSupplyShortage`/
+  `resolveSupplyShortageJudgment` (mirroring the Indulgence trio exactly); new `Skill.
+  extraTrickDistance` hook (additive extension to a trick's own target-distance LIMIT, distinct
+  from the existing all-or-nothing `ignoresTrickDistanceLimit`) for Duanliang's real +1 reach
+  extension, verified against the real upstream `SupplyShortage::targetFilter`'s base distance-1
+  cap + `DuanliangTargetMod::getDistanceLimit`'s +1. Any black hand card may be played/discarded
+  as SupplyShortage. lang/vi_VN describes a different/newer revision (unlimited distance unless
+  real distance >2) -- ported the real `dev`-branch class's flat +1 instead, same mismatch
+  pattern as above.
+
+**2 real, pre-existing bugs found and fixed while chasing a card-conservation test failure this
+milestone's larger roster exposed (neither caused by this milestone's own new code -- both
+predate it, confirmed by reproducing them in isolation):**
+
+1. **Leiji (Zhang Jiao) credited the wrong player.** `resolveSlash` broadcasts `onSlashDodged`
+   to BOTH the attacker's and the (dodging) target's skill lists with the identical
+   `(attacker, target)` argument pair; `leijiOnSlashDodged`'s 3rd parameter (misleadingly named
+   `zhangjiao`) was bound to `target`, not `attacker` -- so whenever Zhang Jiao's own Slash got
+   dodged, the code asked/credited the DODGER (who doesn't even hold the skill) instead of Zhang
+   Jiao himself. `ctx.askUseSelfAction`/`judge()` have no skill-ownership check (generic asks),
+   so this silently "worked" without ever crashing -- it just silently misattributed the
+   judgment (log said the wrong player's name) every single time. Fixed by binding to the
+   correct (2nd) parameter. Caught because this milestone's roster change shifted a seeded
+   draft's random picks onto a seed where Zhang Jiao (leiji+guidao) attacked a Jink-holding
+   defender -- the resulting log line (`"P3 phán Lôi Kích"` for a defender that doesn't own
+   leiji) looked wrong on inspection.
+2. **`attachIndulgence` didn't rewrite a viewAs card's `.kind`.** A card played AS Indulgence via
+   a skill (e.g. Daqiao's Guose: any Diamond card) keeps its ORIGINAL `.kind` (e.g. `Slash`)
+   when `attachIndulgence` pushes it into `judgeArea` -- but `Room.runJudgePhase`'s dispatch
+   keys off `card.kind === CardKind.Indulgence` to decide which resolver to call. A non-
+   Indulgence-kind card matches NEITHER branch (Indulgence's nor, now, SupplyShortage's): it
+   gets `.shift()`'d out of `judgeArea` (removed) but is never resolved and never reaches
+   `discardPile` -- it simply vanishes, permanently, with no trace. Caught directly by
+   `testPhaseCyclingConservesCards` (a real Guose-viewed Diamond Slash disappeared from every
+   pile/hand/judgeArea after its owner's Judge phase ran) while validating THIS milestone's new,
+   structurally-identical `attachSupplyShortage` (which already force-rewrote `.kind` correctly
+   from the start, since the bug was fresh in mind while writing it -- prompting a closer look
+   at its Indulgence sibling, which revealed it had been missing the same rewrite all along).
+   Fixed by applying the same rewrite to `attachIndulgence`.
+
+- **Test:** `testLeijiCreditsTheActualAttackerNotTheDodger` and
+  `testAttachIndulgenceRewritesViewAsCardKindSoItActuallyResolves` (both pure, dedicated
+  regressions for the 2 bugs above); `testGeneralSkillsAppearInPlay` expanded to 54 generals +
+  5 new markers (`fenxun`/`jushou`/`kuangfu`/`shuangren`/`duanliang`, all 5 fired naturally
+  across the existing 150-seed range -- no rarity issues this batch, unlike Niepan/Hongyan).
+- **Verification, three layers:** (1) `npx tsc --noEmit` clean; `npm run sim` 81/81 passing (79
+  pre-existing + 2 new regression tests; the roster-size-triggered card-conservation failure was
+  root-caused to the 2 real bugs above, not a new-code issue, and both are now fixed AND
+  regression-tested). (2) Live `ws` server: repeated real Identity-mode games found and
+  confirmed all 5 new skills' log lines firing for real (`"P6 bỏ 1 lá, khoảng cách đến P9 cố
+  định còn 1 đến hết lượt (fenxun)"`, `"P10 rút 3 lá rồi úp mặt, sẽ tự động bỏ qua lượt kế tiếp
+  (jushou)"` followed later by a confirmed `"P3 đang úp mặt, tự động lật lên và bỏ qua lượt này
+  (jushou)"` full round-trip, `"P5 bỏ QinggangSword của P9 (kuangfu)"`, `"P7 đấu điểm với P1: 5
+  vs 7 (shuangren) -- P1 thắng"`, `"P4 phán Binh Lương Thốn Đoạn: Bích 9"`). (3) Real headless-
+  browser run: avatar assets confirmed present on disk for all 5 (no synthesis needed); page
+  loads with zero JS errors (this milestone needed no new client UI at all -- every new skill
+  reuses existing ask types: `activeAction`/`selfAction`/`otherPhaseAction`/the new
+  broadcast-only `onSomeoneSlashDamaged`, none of which need a dedicated prompt component).
 
 ## Deploy
 

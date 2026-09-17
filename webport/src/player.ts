@@ -85,6 +85,22 @@ export class GamePlayer {
   /** Set by a delayed trick's failed Judge-phase judgment (e.g. Indulgence) -- consumed and
    *  cleared the instant this player's own Play phase is reached (Room.runPhase). */
   forcedSkipPlayPhase = false;
+  /** Set by SupplyShortage's failed Judge-phase judgment (Xu Huang's Duanliang) -- consumed and
+   *  cleared the instant this player's own Draw phase is reached (Room.runPhase), same
+   *  "forced, no ask" precedent as `forcedSkipPlayPhase` (Indulgence). */
+  forcedSkipDrawPhase = false;
+  /** Ding Feng's Fenxun: while `to` is a key, this player's distance TO `to` is fixed at the
+   *  mapped value (overriding the normal seat-circle calc entirely, matching the real engine's
+   *  `Player::setFixedDistance`/`fixed_distance` map) -- one-directional (only affects THIS
+   *  player's outgoing distance, not `to`'s distance back), cleared at the start of this
+   *  player's next turn (Room.playTurn) or implicitly on death (never read once `!alive`). */
+  fixedDistanceTo = new Map<GamePlayer, number>();
+  /** Cao Ren's Jushou (据守): while true, this player's ENTIRE next turn is skipped (matches the
+   *  real engine's generic face-down/`turnOver()` state -- `Room.playTurn` clears this and
+   *  skips straight to the next player instead of running any phase, then this player's turn
+   *  after that resumes completely normally, matching the real "auto-flip back up, no player
+   *  choice involved" rule confirmed against gamerule.cpp's RoundStart handling). */
+  faceDown = false;
 
   constructor(id: string, maxHp = 4) {
     this.id = id;

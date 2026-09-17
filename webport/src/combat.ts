@@ -19,12 +19,15 @@ import { GamePlayer } from "./player.js";
 import { isAlly } from "./gamerule.js";
 
 /**
- * Player::distanceTo: shortest seat-circle hop count among currently ALIVE players, adjusted by
- * equipped horses -- `to`'s defense horse (+1) and `from`'s offense horse (-1) -- and by
- * `from`'s skills (e.g. Mashu's `attackDistanceDelta`, same -1-per-point shape as an offense
- * horse) -- floored at 1.
+ * Player::distanceTo: `from.fixedDistanceTo` (Ding Feng's Fenxun) short-circuits everything
+ * below with an absolute override the instant it's set for this specific `to`, matching the
+ * real engine's own `fixed_distance.contains(other)` early-return. Otherwise: shortest
+ * seat-circle hop count among currently ALIVE players, adjusted by equipped horses (`to`'s
+ * defense horse +1, `from`'s offense horse -1) and by `from`'s skills (e.g. Mashu's
+ * `attackDistanceDelta`, same -1-per-point shape as an offense horse) -- floored at 1.
  */
 export function effectiveDistance(alive: GamePlayer[], from: GamePlayer, to: GamePlayer): number {
+  if (from.fixedDistanceTo.has(to)) return from.fixedDistanceTo.get(to)!;
   const i = alive.indexOf(from);
   const j = alive.indexOf(to);
   const n = alive.length;
@@ -240,6 +243,33 @@ export function allIndulgenceLikeCards(player: GamePlayer): Card[] {
     if (!skill.canViewAsIndulgence) continue;
     for (const c of player.hand) {
       if (c.kind !== CardKind.Indulgence && skill.canViewAsIndulgence(c, player) && !cards.includes(c)) cards.push(c);
+    }
+  }
+  return cards;
+}
+
+/** A real SupplyShortage card, or (e.g. Xu Huang's Duanliang) the first card some skill allows
+ *  viewing as one. */
+export function findSupplyShortageLikeCard(player: GamePlayer): Card | null {
+  const real = player.hand.find((c) => c.kind === CardKind.SupplyShortage);
+  if (real) return real;
+  for (const skill of player.skills) {
+    if (!skill.canViewAsSupplyShortage) continue;
+    const viewed = player.hand.find((c) => skill.canViewAsSupplyShortage!(c, player));
+    if (viewed) return viewed;
+  }
+  return null;
+}
+
+/** Every real SupplyShortage card plus every card a skill allows viewing as one (e.g.
+ *  Duanliang) -- see `allSlashLikeCards`'s header for why this exists alongside
+ *  `findSupplyShortageLikeCard`. */
+export function allSupplyShortageLikeCards(player: GamePlayer): Card[] {
+  const cards = player.hand.filter((c) => c.kind === CardKind.SupplyShortage);
+  for (const skill of player.skills) {
+    if (!skill.canViewAsSupplyShortage) continue;
+    for (const c of player.hand) {
+      if (c.kind !== CardKind.SupplyShortage && skill.canViewAsSupplyShortage(c, player) && !cards.includes(c)) cards.push(c);
     }
   }
   return cards;
@@ -562,6 +592,11 @@ export async function resolveSlash(
   // KylinBow/DoubleSword/Triblade below are resolved here instead of as onDamageDealt hooks.
   if (damageDealt) {
     for (const skill of attacker.skills) await skill.onSlashDamageDealt?.(ctx, attacker, effectiveTarget);
+    // Kuangfu (Pan Feng): broadcast to EVERY alive player, not just the attacker -- see
+    // Skill.onSomeoneSlashDamaged's own doc comment for why this is separate from the line above.
+    for (const p of ctx.alivePlayers) {
+      for (const skill of p.skills) await skill.onSomeoneSlashDamaged?.(ctx, p, effectiveTarget);
+    }
   }
 
   // Kylin Bow (weapon): resolved here (Slash-specific), not as a generic onDamageDealt hook,

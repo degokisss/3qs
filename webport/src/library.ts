@@ -93,6 +93,11 @@ const KIND_INFO: Record<BasicOrTrickKind, { label: string; description: string }
     description:
       "Bài công cụ thời gian: đặt vào vùng phán xét của 1 người khác. Giai đoạn phán xét của họ, họ phán 1 lá; nếu không phải chất Cơ, họ bỏ qua giai đoạn ra bài lượt đó.",
   },
+  [CardKind.SupplyShortage]: {
+    label: "Binh Lương Thốn Đoạn",
+    description:
+      "Bài công cụ thời gian, chỉ nhắm được người ở khoảng cách 1: đặt vào vùng phán xét của họ. Giai đoạn phán xét của họ, họ phán 1 lá; nếu không phải chất Chuồn, họ bỏ qua giai đoạn rút bài lượt đó.",
+  },
 };
 
 const WEAPON_DESCRIPTION: Record<string, string> = {

@@ -24,10 +24,12 @@ import {
   allDuelLikeCards,
   allIndulgenceLikeCards,
   allSlashLikeCards,
+  allSupplyShortageLikeCards,
   findDismantlementLikeCard,
   findDuelLikeCard,
   findIndulgenceLikeCard,
   findSlashLikeCard,
+  findSupplyShortageLikeCard,
   heal,
   resolveSlash,
 } from "./combat.js";
@@ -35,6 +37,7 @@ import { GENERALS, GeneralDef, SKILLS, routeDiscard } from "./skill.js";
 import { Controller, FreeAction, makeBotController, pickLeastImportantCards, slashCandidates } from "./controller.js";
 import {
   attachIndulgence,
+  attachSupplyShortage,
   dismantlementCandidates,
   duelCandidates,
   indulgenceCandidates,
@@ -49,7 +52,9 @@ import {
   resolvePeachSelfHeal,
   resolveSavageAssault,
   resolveSnatch,
+  resolveSupplyShortageJudgment,
   snatchCandidates,
+  supplyShortageCandidates,
 } from "./trick.js";
 
 // Vietnamese labels for the trick kinds tryPlayTargeted's viewAs/weimu-immune log lines embed --
@@ -61,6 +66,7 @@ const TRICK_LABEL_VI: Partial<Record<CardKind, string>> = {
   [CardKind.Snatch]: "Thuận Thủ Khiên Dương",
   [CardKind.Duel]: "Quyết Đấu",
   [CardKind.Indulgence]: "Lạc Bất Tư Thục",
+  [CardKind.SupplyShortage]: "Binh Lương Thốn Đoạn",
 };
 
 export class Room {
@@ -926,6 +932,13 @@ export class Room {
       (card, target) => attachIndulgence(this.makeContext(this.players.filter((p) => p.alive)), target, card),
       (p) => findIndulgenceLikeCard(p),
     );
+    await this.tryPlayDelayedTrick(
+      player,
+      CardKind.SupplyShortage,
+      (alive) => supplyShortageCandidates(player, alive),
+      (card, target) => attachSupplyShortage(this.makeContext(this.players.filter((p) => p.alive)), target, card),
+      (p) => findSupplyShortageLikeCard(p),
+    );
     await this.tryPlayOnce(
       player,
       CardKind.SavageAssault,
@@ -994,6 +1007,9 @@ export class Room {
     }
     if (indulgenceCandidates(player, alive).length > 0) {
       addPlayCard(allIndulgenceLikeCards(player), CardKind.Indulgence);
+    }
+    if (supplyShortageCandidates(player, alive).length > 0) {
+      addPlayCard(allSupplyShortageLikeCards(player), CardKind.SupplyShortage);
     }
     addPlayCard(player.hand.filter((c) => c.kind === CardKind.ExNihilo), CardKind.ExNihilo);
     addPlayCard(player.hand.filter((c) => c.kind === CardKind.SavageAssault), CardKind.SavageAssault);
@@ -1124,6 +1140,15 @@ export class Room {
           () => card,
         );
         return false;
+      case CardKind.SupplyShortage:
+        await this.tryPlayDelayedTrick(
+          player,
+          CardKind.SupplyShortage,
+          (alive) => supplyShortageCandidates(player, alive),
+          (c, target) => attachSupplyShortage(this.makeContext(this.players.filter((p) => p.alive)), target, c),
+          () => card,
+        );
+        return false;
       case CardKind.ExNihilo:
         await this.tryPlayOnce(player, CardKind.ExNihilo, (alive) => alive, (_c, alive) => resolveExNihilo(this.makeContext(alive), player), card);
         return false;
@@ -1208,6 +1233,7 @@ export class Room {
     while (player.judgeArea.length > 0 && player.alive && !this.gameOver) {
       const card = player.judgeArea.shift()!;
       if (card.kind === CardKind.Indulgence) await resolveIndulgenceJudgment(ctx, player, card);
+      else if (card.kind === CardKind.SupplyShortage) await resolveSupplyShortageJudgment(ctx, player, card);
       this.onLiveUpdate?.();
     }
   }
@@ -1225,6 +1251,13 @@ export class Room {
       case Phase.Start:
         break;
       case Phase.Draw: {
+        if (player.forcedSkipDrawPhase) {
+          // SupplyShortage (Xu Huang's Duanliang): a failed Judge-phase judgment already armed
+          // this -- always skips, no ask, same precedent as Indulgence's forcedSkipPlayPhase.
+          player.forcedSkipDrawPhase = false;
+          this.log.push(`${player.id} bỏ qua giai đoạn rút bài (supply_shortage)`);
+          break;
+        }
         // Draw phase card count: 2 by default, raised/lowered by e.g. Yingzi/Luoyi (skill.ts).
         const drawBonus = player.skills.reduce((sum, skill) => sum + (skill.drawPhaseBonus?.(player) ?? 0), 0);
         const drawCount = Math.max(0, 2 + drawBonus);
@@ -1290,9 +1323,20 @@ export class Room {
     }
     this.turnNumber++;
     this.log.push(`--- Lượt ${this.turnNumber}: ${player.id} (${factionLabelVI(this.mode, player)}) ---`);
+    // Jushou (Cao Ren): the REAL upstream RoundStart handler checks this before `player->play()`
+    // even runs -- a face-down player just auto-flips back up and skips the ENTIRE turn (no
+    // phases at all, not even a reveal ask), confirmed against gamerule.cpp's own EventPhaseStart
+    // handling. `advanceToNextAlivePlayer` still runs below so the next seat's turn isn't skipped.
+    if (player.faceDown) {
+      player.faceDown = false;
+      this.log.push(`${player.id} đang úp mặt, tự động lật lên và bỏ qua lượt này (jushou)`);
+      if (!fromQueue) this.advanceToNextAlivePlayer();
+      return;
+    }
     player.playedSlashThisTurn = false;
     player.luoyiArmedThisTurn = false;
     player.duelViewAsBlackAllowed = null;
+    player.fixedDistanceTo.clear(); // Fenxun (Ding Feng): any distance override from a PRIOR turn expires
     for (const phase of PHASE_ORDER) {
       if (this.gameOver) return;
       await this.runPhase(player, phase);

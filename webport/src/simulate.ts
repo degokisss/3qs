@@ -7,13 +7,13 @@ import strict from "node:assert/strict";
 import { Card, CardKind, Suit, buildStandardDeck } from "./card.js";
 import { Room } from "./room.js";
 import { GamePlayer } from "./player.js";
-import { EngineContext, allIndulgenceLikeCards, allSlashLikeCards, effectiveAttackRange, effectiveDistance, findIndulgenceLikeCard, findJinkLikeCard, findSlashLikeCard, judge, loseHp, resolveSlash } from "./combat.js";
+import { EngineContext, SUIT_LABEL_VI, allIndulgenceLikeCards, allSlashLikeCards, effectiveAttackRange, effectiveDistance, findIndulgenceLikeCard, findJinkLikeCard, findSlashLikeCard, judge, loseHp, resolveSlash } from "./combat.js";
 import { GENERALS, SKILLS } from "./skill.js";
 import { pickLeastImportantCards, slashCandidates } from "./controller.js";
 import { attachIndulgence, duelCandidates, resolveArcheryAttack, resolveDismantlement, resolveDuel, resolveIndulgenceJudgment, resolveSavageAssault, resolveSnatch, snatchCandidates } from "./trick.js";
 import { GameMode, Phase, Role } from "./types.js";
 import { KINGDOMS, assignHegemonyFaction, checkHegemonyWinCondition, combineHegemonyHp, isAlly, isCompanionPair } from "./gamerule.js";
-const DECK_SIZE = 54 + 17 + 16; // basics(Slash-family 29+Jink 14+Peach 8+Analeptic 3) + implemented tricks(17, incl. 2 Indulgence) + equips(10 weapons+6 horses), see card.ts
+const DECK_SIZE = 54 + 19 + 16; // basics(Slash-family 29+Jink 14+Peach 8+Analeptic 3) + implemented tricks(19, incl. 2 Indulgence + 2 SupplyShortage) + equips(10 weapons+6 horses), see card.ts
 
 function playerIds(n: number): string[] {
   return Array.from({ length: n }, (_, i) => `P${i + 1}`);
@@ -38,7 +38,12 @@ function totalCardsInPlay(room: Room): number {
     0,
   );
   const judged = room.players.reduce((sum, p) => sum + p.judgeArea.length, 0);
-  return inHands + equipped + judged + room.drawPile.length + room.discardPile.length;
+  // Jiling's Shuangren (Milestone 25) can synthesize a free virtual Slash with no backing
+  // physical card (see card.ts's `makeVirtualSlash`) -- it lands in the discard pile like any
+  // other played card, but was never part of the dealt deck, so it's excluded here rather than
+  // drifting the expected DECK_SIZE total upward every time the skill actually fires.
+  const realDiscarded = room.discardPile.filter((c) => !c.virtual).length;
+  return inHands + equipped + judged + room.drawPile.length + realDiscarded;
 }
 
 async function testRoleDistribution(): Promise<void> {
@@ -963,6 +968,11 @@ async function testGeneralSkillsAppearInPlay(): Promise<void> {
     ["rende", "(rende)"],
     ["zhiheng", "(zhiheng)"],
     ["luanji", "(luanji)"],
+    ["fenxun", "(fenxun)"],
+    ["jushou", "(jushou)"],
+    ["kuangfu", "(kuangfu)"],
+    ["shuangren", "(shuangren)"],
+    ["duanliang", "phán Binh Lương Thốn Đoạn"],
   ];
   const seen = new Set<string>();
 
@@ -986,15 +996,15 @@ async function testGeneralSkillsAppearInPlay(): Promise<void> {
   strict.deepEqual(
     [...generalsSeen].sort(),
     [
-      "caiwenji", "caocao", "caopi", "daqiao", "dianwei", "diaochan", "erzhang", "ganfuren",
-      "ganning", "guanyu", "guojia", "huanggai", "huangyueying", "huangzhong", "huatuo", "jiaxu",
-      "kongrong", "liubei", "liushan", "lusu", "luxun", "lvbu", "lvmeng", "machao", "mateng",
-      "menghuo", "pangde", "pangtong", "simayi", "sunjian", "sunquan", "sunshangxiang",
-      "tianfeng", "weiyan", "xiahoudun", "xiaoqiao", "xuchu", "xunyu", "yanliangwenchou",
-      "yuanshao", "yuejin", "zhangfei", "zhangjiao", "zhangliao", "zhaoyun", "zhenji", "zhouyu",
-      "zhugeliang", "zhurong",
+      "caiwenji", "caocao", "caopi", "caoren", "daqiao", "dianwei", "diaochan", "dingfeng",
+      "erzhang", "ganfuren", "ganning", "guanyu", "guojia", "huanggai", "huangyueying",
+      "huangzhong", "huatuo", "jiaxu", "jiling", "kongrong", "liubei", "liushan", "lusu", "luxun",
+      "lvbu", "lvmeng", "machao", "mateng", "menghuo", "panfeng", "pangde", "pangtong", "simayi",
+      "sunjian", "sunquan", "sunshangxiang", "tianfeng", "weiyan", "xiahoudun", "xiaoqiao",
+      "xuchu", "xuhuang", "xunyu", "yanliangwenchou", "yuanshao", "yuejin", "zhangfei",
+      "zhangjiao", "zhangliao", "zhaoyun", "zhenji", "zhouyu", "zhugeliang", "zhurong",
     ],
-    "all 49 ported generals must appear across 150 seeds of 8-player games",
+    "all 54 ported generals must appear across 150 seeds of 8-player games",
   );
   strict.ok(sawMultiSlashTurn, "paoxiao (zhangfei) never allowed >1 slash in a single turn");
   const missing = markers.map(([name]) => name).filter((name) => !seen.has(name));
@@ -1409,6 +1419,78 @@ async function testGuicaiRetrialsAnotherPlayersJudgment(): Promise<void> {
   strict.ok(ctx.discardPile.includes(badJudgeCard), "the original overridden judgment card must be voided to the discard pile");
   strict.ok(ctx.discardPile.includes(retrialCard), "the retrial card itself must also end up in the discard pile");
   console.log("PASS testGuicaiRetrialsAnotherPlayersJudgment: sima yi's retrial overrode xiahoudun's ganglie judgment, cancelling its punishment");
+}
+
+/**
+ * Regression proof (Milestone 25): Leiji (Zhang Jiao) must credit its judgment/damage-choice to
+ * the ACTUAL attacker whose Slash was dodged (the skill owner), not the dodging defender --
+ * `resolveSlash` broadcasts `onSlashDodged` to BOTH sides' skill lists with the same
+ * `(attacker, target)` pair, and a real pre-existing bug had `leijiOnSlashDodged` bound to the
+ * wrong positional parameter, asking/crediting whoever DODGED instead of whoever's Slash got
+ * dodged. Found while chasing a card-conservation failure Milestone 25's roster change exposed
+ * (a real seed landed Zhang Jiao as attacker against a Jink-holding defender) -- driven
+ * directly through `resolveSlash` (pure, deterministic).
+ */
+async function testLeijiCreditsTheActualAttackerNotTheDodger(): Promise<void> {
+  const deck = buildStandardDeck();
+  const slashCard = deck.find((c) => c.kind === CardKind.Slash)!;
+  const jinkCard = deck.find((c) => c.kind === CardKind.Jink)!;
+  const judgeSpade = deck.find((c) => c.suit === Suit.Spade && c.id !== slashCard.id)!;
+
+  const zhangjiao = new GamePlayer("ZJ");
+  zhangjiao.skills = [SKILLS.leiji];
+  const dodger = new GamePlayer("DODGER");
+  dodger.hand = [jinkCard];
+  const bystander = new GamePlayer("BY"); // listed first so the bot's candidates[0] default picks it as leiji's damage target
+
+  const log: string[] = [];
+  const ctx = makeTestContext([bystander, zhangjiao, dodger], log, () => judgeSpade);
+
+  await resolveSlash(ctx, zhangjiao, dodger, slashCard);
+
+  strict.ok(
+    log.includes(`${zhangjiao.id} phán Lôi Kích: ${SUIT_LABEL_VI[judgeSpade.suit]} ${judgeSpade.point}`),
+    "leiji's judgment must be credited to ZJ (the actual attacker/skill owner), not DODGER",
+  );
+  strict.ok(
+    !log.some((l) => l.includes(`${dodger.id} phán Lôi Kích`)),
+    "leiji must never credit the dodging target as if THEY owned the skill -- the real bug this test guards against",
+  );
+  strict.equal(bystander.hp, bystander.maxHp - 2, "the Spade judgment must still deal 2 damage to the chosen target");
+  console.log("PASS testLeijiCreditsTheActualAttackerNotTheDodger: leiji's judgment/damage-choice correctly credited to the attacker, not the dodger");
+}
+
+/**
+ * Regression proof (Milestone 25): `attachIndulgence` must rewrite a viewAs card's `.kind` to
+ * `CardKind.Indulgence` when attaching it -- a real pre-existing bug let a Guose-viewed
+ * non-Indulgence-kind card sit in `judgeArea` forever unresolved: `Room.runJudgePhase`'s
+ * `card.kind === CardKind.Indulgence` dispatch silently failed for it, so the card was
+ * `.shift()`'d out of `judgeArea` (removed) but matched no resolution branch -- it vanished
+ * with no trace, never reaching the discard pile. Caught via `testPhaseCyclingConservesCards`
+ * (a real Diamond card disappeared entirely after its owner's Judge phase ran). Proves both the
+ * in-place rewrite AND the full round-trip (attach -> Judge phase -> discard pile, not vanish).
+ */
+async function testAttachIndulgenceRewritesViewAsCardKindSoItActuallyResolves(): Promise<void> {
+  const deck = buildStandardDeck();
+  const diamondCard = deck.find((c) => c.kind === CardKind.Peach && c.suit === Suit.Diamond)!; // a real Guose viewAs candidate: Diamond, not already Indulgence-kind
+  strict.notEqual(diamondCard.kind, CardKind.Indulgence, "test setup: must start as a non-Indulgence card, mimicking a real Guose viewAs pick");
+
+  const target = new GamePlayer("TARGET");
+  const log: string[] = [];
+  const ctx = makeTestContext([target], log);
+
+  attachIndulgence(ctx, target, diamondCard);
+
+  strict.equal(diamondCard.kind, CardKind.Indulgence, "attachIndulgence must rewrite a viewAs card's kind so Room.runJudgePhase's dispatch recognizes it");
+  strict.ok(target.judgeArea.includes(diamondCard), "the card must actually be attached to the judge area");
+
+  const judged = deck.find((c) => c.suit === Suit.Heart && c.id !== diamondCard.id)!;
+  const ctx2 = makeTestContext([target], [], () => judged);
+  const attachedCard = target.judgeArea.shift()!;
+  await resolveIndulgenceJudgment(ctx2, target, attachedCard);
+
+  strict.ok(ctx2.discardPile.includes(diamondCard), "the (formerly viewAs) card must end up in the discard pile after resolving -- never vanish");
+  console.log("PASS testAttachIndulgenceRewritesViewAsCardKindSoItActuallyResolves: a viewAs-attached card's kind is rewritten and it correctly resolves, not vanishes");
 }
 
 /**
@@ -1851,6 +1933,8 @@ await testHongyanFiltersOwnSpadeJudgmentToHeart();
 await testDismantlementSnatchCanTargetEquipmentAndRespectChoice();
 await testSavageAssaultAndArcheryAttackAreAChoice();
 await testGuicaiRetrialsAnotherPlayersJudgment();
+await testLeijiCreditsTheActualAttackerNotTheDodger();
+await testAttachIndulgenceRewritesViewAsCardKindSoItActuallyResolves();
 await testTieqiBlocksDodge();
 await testViewAsJinkDodges();
 await testLiegongBlocksJink();

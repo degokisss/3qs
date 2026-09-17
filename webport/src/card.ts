@@ -9,13 +9,15 @@
 // Room. Kinds present in the real source but NOT YET resolvable are explicitly excluded here
 // rather than silently dropped:
 //   Trick: IronChain(x3), FireAttack(x2), Collateral(x1), Nullification(x1), HegNullification(x2),
-//     AwaitExhausted(x2), KnownBoth(x2), BefriendAttacking(x1), SupplyShortage(x2), Lightning(x1)
-//     -- all need the delayed-trick/judge-area system or a reactive counter-play stack
-//     (respond-with-Nullification-to-a-trick-in-flight), neither of which exists yet.
+//     AwaitExhausted(x2), KnownBoth(x2), BefriendAttacking(x1), Lightning(x1) -- all need the
+//     delayed-trick/judge-area system or a reactive counter-play stack (respond-with-
+//     Nullification-to-a-trick-in-flight), neither of which exists yet.
 //     Indulgence WAS in this list too -- now implemented (Guojia's Tiandu needed at least 1
 //     delayed trick to ever have anything to claim); see room.ts's judgeArea/runJudgePhase and
-//     trick.ts's resolveIndulgenceJudgment. Still no Nullification counter-play window (same
-//     precedent already accepted for every other targeted trick in this engine).
+//     trick.ts's resolveIndulgenceJudgment. SupplyShortage (Milestone 25, Xu Huang's Duanliang)
+//     WAS in this list too -- same judge-area system, a 2nd delayed trick attached alongside it
+//     -- see trick.ts's resolveSupplyShortageJudgment. Still no Nullification counter-play
+//     window for either (same precedent already accepted for every other targeted trick here).
 //   Equip: EightDiagram/RenwangShield/Vine/SilverLion (all 4 Standard armors) -- need the
 //     trigger/skill system (judgment-based dodge, locked damage immunity, etc.)
 // AmazingGrace/GodSalvation/ArcheryAttack are constructed with no suit/point in the source
@@ -45,6 +47,7 @@ export enum CardKind {
   Snatch = "snatch",
   Dismantlement = "dismantlement",
   Indulgence = "indulgence",
+  SupplyShortage = "supply_shortage",
   Weapon = "weapon",
   Horse = "horse",
 }
@@ -59,11 +62,25 @@ export interface Card {
   weaponRange?: number; // Weapon only, src/package/standard-equips.cpp Weapon(suit, number, range)
   horseName?: string;
   horseDelta?: number; // Horse only: +1 defensive, -1 offensive
+  /** True only for `makeVirtualSlash()`'s output -- a card that was never part of the dealt
+   *  deck (see its own doc comment). Lets card-count invariants (e.g. simulate.ts's
+   *  `totalCardsInPlay`) exclude it instead of drifting the expected total. */
+  virtual?: boolean;
 }
 
 let nextId = 0;
 function card(kind: CardKind, suit: Suit, point: number, extra: Partial<Card> = {}): Card {
   return { id: nextId++, kind, suit, point, ...extra };
+}
+
+/** A free bonus Slash with no backing physical card (e.g. Jiling's Shuangren: `Slash(Card::
+ *  NoSuit, 0)` in the real upstream source) -- gets a fresh unique id from the same counter
+ *  every other card uses, so it discards/logs like a normal card, just never actually sat in
+ *  anyone's hand or the draw pile. Suit/point are cosmetic placeholders (no game logic reads a
+ *  Slash's own suit/point once played), matching this file's existing "no implemented suit/
+ *  point source" precedent for AmazingGrace/GodSalvation/ArcheryAttack's own placeholders. */
+export function makeVirtualSlash(): Card {
+  return card(CardKind.Slash, Suit.Spade, 0, { virtual: true });
 }
 
 function basicCards(): Card[] {
@@ -120,6 +137,10 @@ function implementedTrickCards(): Card[] {
     // real suit/point combos (suit has no functional effect either way -- only the freshly
     // drawn judgment card's suit matters, never the Indulgence card's own).
     card(CardKind.Indulgence, C, 6), card(CardKind.Indulgence, S, 6),
+    // Real Sanguosha ships 2: Spade 10, Club 10 (verified exactly against this repo's actual
+    // `dev`-branch source, `trickCards()`'s `new SupplyShortage(Card::Spade, 10) << new
+    // SupplyShortage(Card::Club, 10)`).
+    card(CardKind.SupplyShortage, S, 10), card(CardKind.SupplyShortage, C, 10),
   ];
 }
 

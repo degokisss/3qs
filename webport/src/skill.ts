@@ -83,7 +83,7 @@
 // humans get a real card-pick-or-decline ask. See EngineContext.askGuicaiRetrial (combat.ts),
 // the `judge()` helper right below, and Controller.wantsToUseGuicai (controller.ts).
 
-import { Card, CardKind, Suit } from "./card.js";
+import { Card, CardKind, Suit, makeVirtualSlash } from "./card.js";
 import { GamePlayer } from "./player.js";
 import { Phase, Role } from "./types.js";
 import { alliesOf, isAlly } from "./gamerule.js";
@@ -117,6 +117,9 @@ export interface Skill {
   canViewAsDuel?(card: Card, player: GamePlayer): boolean;
   /** ViewAs: can `card` be played as if it were Indulgence (e.g. Daqiao's Guose, any Diamond)? */
   canViewAsIndulgence?(card: Card, player: GamePlayer): boolean;
+  /** ViewAs: can `card` be played as if it were SupplyShortage (e.g. Xu Huang's Duanliang, any
+   *  black card)? */
+  canViewAsSupplyShortage?(card: Card, player: GamePlayer): boolean;
   /** True while `player` should be immune to being targeted by Slash/Duel (e.g. Kongcheng). */
   immuneToSlashAndDuel?(player: GamePlayer): boolean;
   /** True while `player` should be immune to being targeted by Snatch (e.g. Qianxun). */
@@ -168,6 +171,11 @@ export interface Skill {
   drawPhaseBonus?(player: GamePlayer): number;
   /** True if `player`'s trick-card plays of `kind` ignore Snatch's distance-1 limit (e.g. Qicai). */
   ignoresTrickDistanceLimit?(kind: CardKind): boolean;
+  /** Additive extension to `kind`'s own target-distance LIMIT (distinct from
+   *  `ignoresTrickDistanceLimit`'s all-or-nothing removal) -- e.g. Xu Huang's Duanliang: +1 to
+   *  SupplyShortage's real base-1 target-distance cap. Consulted by `supplyShortageCandidates`
+   *  (trick.ts); defaults to 0 for every skill that doesn't define it. */
+  extraTrickDistance?(kind: CardKind): number;
   /** Fired after ANY trick card `player` plays resolves (e.g. Huangyueying's Jizhi: draw 1). */
   onTrickPlayed?(ctx: EngineContext, player: GamePlayer, kind: CardKind): Promise<void> | void;
   /** True if the played Savage Assault card should go to `player`'s hand instead of the discard
@@ -277,6 +285,14 @@ export interface Skill {
    *  downstream consumer (e.g. Xiao Qiao's Hongyan: her own Spade judgment may become a Heart).
    *  A fresh per-judgment `Card` object is always safe to mutate (never shared/aliased). */
   filtersOwnJudgment?(ctx: EngineContext, self: GamePlayer, currentCard: Card): Promise<void>;
+  /** Broadcast to EVERY alive player's skills (not just attacker/defender) right after a SLASH
+   *  deals real damage to `target` -- `self` is the reacting player, may equal the attacker,
+   *  the target, or neither (e.g. Pan Feng's Kuangfu: a 3rd party reacting to someone else's
+   *  hit). Distinct from `onSlashDamageDealt` (attacker-only) and the generic `onDamageDealt`
+   *  (every damage source, attacker-only) -- this is the only broadcast-to-everyone Slash-damage
+   *  hook, since Kuangfu's real trigger condition depends on the TARGET's equip, not either
+   *  combatant's own skill. */
+  onSomeoneSlashDamaged?(ctx: EngineContext, self: GamePlayer, target: GamePlayer): Promise<void>;
 }
 
 function isRed(card: Card): boolean {
@@ -659,7 +675,17 @@ async function mengjinOnSlashDodged(ctx: EngineContext, attacker: GamePlayer, ta
   void attacker;
 }
 
-async function leijiOnSlashDodged(ctx: EngineContext, _attacker: GamePlayer, zhangjiao: GamePlayer): Promise<void> {
+/** Leiji (Zhang Jiao): fired on `attacker`'s own skills after THEIR Slash is dodged (the real
+ *  rule: "after your Slash is dodged, you may judge and hit someone") -- must bind to the
+ *  ATTACKER (2nd param), not the dodging defender (3rd param, `_target`): `resolveSlash`
+ *  broadcasts `onSlashDodged` to BOTH sides' skill lists with the same `(attacker, target)`
+ *  pair, so a handler that (incorrectly) reads the 3rd param instead asks/acts on whoever
+ *  dodged, not the actual Zhang Jiao holding the skill -- a real pre-existing bug, caught while
+ *  chasing a card-conservation test failure exposed by Milestone 25's roster-size change (the
+ *  bug itself predates this milestone; the wrong-seed's judge() call still balanced its own
+ *  card flow, so this fix is about correctness -- asking/crediting the right player -- not a
+ *  card leak in this exact function). */
+async function leijiOnSlashDodged(ctx: EngineContext, zhangjiao: GamePlayer, _target: GamePlayer): Promise<void> {
   if (!(await ctx.askUseSelfAction(zhangjiao, "leiji"))) return;
   const to = await ctx.askChooseAnyPlayer(zhangjiao, ctx.alivePlayers);
   if (!to) return;
@@ -1146,6 +1172,92 @@ async function luanjiSelfAction(ctx: EngineContext, player: GamePlayer): Promise
   await resolveArcheryAttack(ctx, player);
 }
 
+/** Fenxun (Ding Feng): once per Play phase, discard 1 freely-chosen hand card and pick another
+ *  player -- this player's OWN distance TO them becomes fixed at 1 (always in Slash range,
+ *  regardless of real seating) until end of turn or death. Verified exactly against the real
+ *  upstream source (`FenxunCard::onEffect`): `room->setFixedDistance(from, to, 1)` -- a genuine
+ *  absolute override this engine's existing `attackDistanceDelta` hook (a flat per-skill delta
+ *  to EVERY player, e.g. Mashu) can't express, so `player.fixedDistanceTo` was added instead
+ *  (see combat.ts's `effectiveDistance`, and `Room.playTurn`'s per-turn clear). */
+const fenxunAction = {
+  candidatesFor(alive: GamePlayer[], player: GamePlayer): GamePlayer[] {
+    if (player.handcardNum === 0) return [];
+    return alive.filter((p) => p !== player);
+  },
+  async run(ctx: EngineContext, player: GamePlayer, target: GamePlayer): Promise<void> {
+    const [discarded] = await ctx.askAnyHandCards(player, 1, 1);
+    if (!discarded) return; // declined -- never forced
+    player.hand.splice(player.hand.indexOf(discarded), 1);
+    ctx.discardPile.push(discarded);
+    player.fixedDistanceTo.set(target, 1);
+    ctx.log.push(`${player.id} bỏ 1 lá, khoảng cách đến ${target.id} cố định còn 1 đến hết lượt (fenxun)`);
+  },
+};
+
+/** Jushou (Cao Ren): at Finish phase, may draw 3 then become face-down -- the ENTIRE next turn
+ *  is auto-skipped (see `Room.playTurn`'s `faceDown` check, and player.ts's field doc comment
+ *  for the exact upstream `gamerule.cpp` citation confirming this is a single-turn skip with no
+ *  player choice involved in flipping back up, not an indefinite "stay hidden" state). */
+const jushouAction = {
+  phase: Phase.Finish,
+  async run(ctx: EngineContext, player: GamePlayer): Promise<void> {
+    if (!(await ctx.askUseSelfAction(player, "jushou"))) return;
+    ctx.draw(player, 3);
+    player.faceDown = true;
+    ctx.log.push(`${player.id} rút 3 lá rồi úp mặt, sẽ tự động bỏ qua lượt kế tiếp (jushou)`);
+  },
+};
+
+/** Kuangfu (Pan Feng): whenever ANY player's Slash damages someone (not himself) who holds
+ *  >=1 equip card, may pick one of the damaged player's equips and either discard it or move
+ *  it onto his own matching equip slot (only offered if that slot of his own is currently
+ *  empty -- verified against the real upstream `Kuangfu::effect`'s own `equiplist`/`choicelist`
+ *  construction). New broadcast hook (`Skill.onSomeoneSlashDamaged`) since this is a REACTIVE
+ *  3rd-party trigger, not something the attacker or the damaged player's own skills decide. */
+async function kuangfuOnSomeoneSlashDamaged(ctx: EngineContext, panfeng: GamePlayer, target: GamePlayer): Promise<void> {
+  if (panfeng === target) return; // the real rule's own equip-slot-conflict logic implies a 3rd party reacting, not self-targeting
+  const candidates = [target.weapon, target.defenseHorse, target.offenseHorse].filter((c): c is Card => c !== null);
+  if (candidates.length === 0 || !(await ctx.askUseSelfAction(panfeng, "kuangfu"))) return;
+  const chosen = await ctx.askPickPlayerCard(panfeng, target, candidates);
+  const ownSlotEmpty =
+    (chosen.kind === CardKind.Weapon && !panfeng.weapon) ||
+    (chosen.horseDelta === 1 && !panfeng.defenseHorse) ||
+    (chosen.horseDelta === -1 && !panfeng.offenseHorse);
+  const move = ownSlotEmpty && (await ctx.askUseSelfAction(panfeng, "kuangfu-move"));
+  await detachCardFrom(ctx, target, chosen);
+  if (move) {
+    await ctx.equipPlayer(panfeng, chosen);
+    ctx.log.push(`${panfeng.id} chuyển ${chosen.weaponName ?? chosen.horseName} của ${target.id} về mình (kuangfu)`);
+  } else {
+    ctx.discardPile.push(chosen);
+    ctx.log.push(`${panfeng.id} bỏ ${chosen.weaponName ?? chosen.horseName} của ${target.id} (kuangfu)`);
+  }
+}
+
+/** Shuangren (Jiling): during Play phase, if neither he nor some other player is empty-handed,
+ *  may pindian (reusing the existing shared `pindian()` helper -- Pindian itself was never the
+ *  blocker here, see webport/README.md) with a chosen victim; on a win, designate any player he
+ *  can legally Slash who is the victim or an ally of the victim to receive one FREE bonus Slash
+ *  with no backing card (`makeVirtualSlash`, matching the real upstream `Slash(Card::NoSuit,
+ *  0)`); a loss does nothing extra to him. */
+async function shuangrenSelfAction(ctx: EngineContext, jiling: GamePlayer): Promise<void> {
+  if (jiling.handcardNum === 0) return;
+  const victimCandidates = ctx.alivePlayers.filter((p) => p !== jiling && p.handcardNum > 0);
+  if (victimCandidates.length === 0 || !(await ctx.askUseSelfAction(jiling, "shuangren"))) return;
+  const victim = await ctx.askChooseAnyPlayer(jiling, victimCandidates);
+  if (!victim) return;
+  const won = await pindian(ctx, jiling, victim, "shuangren");
+  if (!won) return;
+  const slashTargets = ctx.alivePlayers.filter(
+    (p) => (p === victim || isAlly(p, victim)) && effectiveDistance(ctx.alivePlayers, jiling, p) <= effectiveAttackRange(ctx.alivePlayers, jiling),
+  );
+  if (slashTargets.length === 0) return;
+  const target = await ctx.askChooseAnyPlayer(jiling, slashTargets);
+  if (!target) return;
+  ctx.log.push(`${jiling.id} thắng đấu điểm, tặng 1 Sát miễn phí cho ${target.id} (shuangren)`);
+  await resolveSlash(ctx, jiling, target, makeVirtualSlash());
+}
+
 export const SKILLS: Record<string, Skill> = {
   paoxiao: {
     name: "paoxiao",
@@ -1597,6 +1709,50 @@ export const SKILLS: Record<string, Skill> = {
     description: "Giai đoạn ra bài, có thể chuyển hóa 2 lá trên tay CÙNG CHẤT thành [Vạn Tiễn Tề Phát].",
     selfAction: luanjiSelfAction,
   },
+  fenxun: {
+    name: "fenxun",
+    displayName: "Phấn Tấn",
+    description: "Một lần trong giai đoạn ra bài: bỏ 1 lá, chọn 1 người khác -- khoảng cách từ bạn đến họ cố định là 1 đến hết lượt.",
+    activeAction: fenxunAction,
+  },
+  jushou: {
+    name: "jushou",
+    displayName: "Chiếm Thủ",
+    // lang/vi_VN describes a different/newer revision (draw X=số thế lực sống, use/discard a
+    // card, conditionally toggle dual-general shown state) -- this repo's actual `dev`-branch
+    // C++ class (`Jushou : public PhaseChangeSkill`) is the simpler "draw 3, turn face down"
+    // effect below; ported as-is, same mismatch pattern as Longdan/Kongcheng/Tieqi/Kurou.
+    description: "Đầu giai đoạn kết thúc: có thể rút 3 lá rồi úp mặt (bỏ qua toàn bộ lượt kế tiếp).",
+    otherPhaseAction: jushouAction,
+  },
+  kuangfu: {
+    name: "kuangfu",
+    displayName: "Cuồng Phủ",
+    // lang/vi_VN describes a different/newer revision (triggers on PAN FENG'S OWN Slash
+    // targeting, plus a "no damage dealt -> discard 2" clause) -- this repo's actual `dev`-
+    // branch C++ class (`Kuangfu : public TriggerSkill`, `events << Damage`) is a genuinely
+    // different, REACTIVE trigger: fires whenever ANYONE's Slash damages someone with an
+    // equip. Ported as the real class implements it, same mismatch pattern as above.
+    description: "Khi Sát của bất kỳ ai gây sát thương cho người đang có trang bị, có thể thu lấy hoặc bỏ 1 trang bị của người đó.",
+    onSomeoneSlashDamaged: kuangfuOnSomeoneSlashDamaged,
+  },
+  shuangren: {
+    name: "shuangren",
+    displayName: "Song Nhận",
+    description: "Giai đoạn ra bài: đấu điểm với 1 người còn bài; nếu thắng, tặng 1 Sát miễn phí cho họ hoặc đồng minh của họ trong tầm đánh của bạn.",
+    selfAction: shuangrenSelfAction,
+  },
+  duanliang: {
+    name: "duanliang",
+    displayName: "Đoạn Lương",
+    // lang/vi_VN describes a different/newer revision ("unlimited distance unless real
+    // distance >2, then can't invoke this phase") -- this repo's actual `dev`-branch C++ class
+    // (`Duanliang`/`DuanliangTargetMod`) is the simpler flat "+1 to SupplyShortage's own base-1
+    // target-distance limit" below, ported as-is, same mismatch pattern as Hongyan/Luanji/Jushou/Kuangfu.
+    description: "Có thể chuyển hóa bất kỳ lá bài chất Đen nào thành [Binh Lương Thốn Đoạn]; khoảng cách nhắm mục tiêu của lá này +1 khi bạn dùng.",
+    canViewAsSupplyShortage: (card) => card.kind !== CardKind.SupplyShortage && isBlack(card),
+    extraTrickDistance: (kind) => (kind === CardKind.SupplyShortage ? 1 : 0),
+  },
 };
 
 export interface GeneralDef {
@@ -1669,4 +1825,13 @@ export const GENERALS: GeneralDef[] = [
   { name: "sunquan", displayName: "Tôn Quyền", kingdom: "wu", maxHp: 4, skillNames: ["zhiheng"] },
   { name: "xiaoqiao", displayName: "Tiểu Kiều", kingdom: "wu", maxHp: 3, skillNames: ["hongyan"], gender: "female" }, // Tianxiang still deferred, needs a damage-transfer mechanic (redirect incoming damage to another player)
   { name: "yuanshao", displayName: "Viên Thiệu", kingdom: "qun", maxHp: 4, skillNames: ["luanji"] },
+  // Milestone 25 (4 more generals, 49->53 of the real ~60-general roster): user asked to port
+  // more toward full completeness -- see webport/README.md's Milestone 25 section for the
+  // subsystems needed per general (fixed-distance override, reactive equip trigger, a virtual
+  // bonus-Slash card, a face-down turn-skip state) and why the remaining 7 stay deferred.
+  { name: "dingfeng", displayName: "Đinh Phụng", kingdom: "wu", maxHp: 4, skillNames: ["fenxun"] }, // Duanbing still deferred -- a real no-op stub even in this repo's `dev`-branch upstream C++ itself, needs multi-target Slash resolution (see card.ts's/README's header)
+  { name: "caoren", displayName: "Tào Nhân", kingdom: "wei", maxHp: 4, skillNames: ["jushou"] },
+  { name: "panfeng", displayName: "Phan Phụng", kingdom: "qun", maxHp: 4, skillNames: ["kuangfu"] },
+  { name: "jiling", displayName: "Kỷ Linh", kingdom: "qun", maxHp: 4, skillNames: ["shuangren"] },
+  { name: "xuhuang", displayName: "Từ Hoảng", kingdom: "wei", maxHp: 4, skillNames: ["duanliang"] },
 ];

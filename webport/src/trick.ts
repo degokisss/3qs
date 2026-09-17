@@ -241,8 +241,20 @@ export function indulgenceCandidates(actor: GamePlayer, alive: GamePlayer[]): Ga
 
 /** Attaches `card` (Indulgence, already detached from the player's hand by the caller) to
  *  `target`'s judge area -- unless Qianxun's `blocksIndulgenceEntry` auto-discards it on
- *  entry instead (his skill's 2nd clause: it never actually gets to sit in his judge area). */
+ *  entry instead (his skill's 2nd clause: it never actually gets to sit in his judge area).
+ *  `card.kind` is force-set to `CardKind.Indulgence` here -- a no-op for a real Indulgence
+ *  card, but REQUIRED for a Guose-viewed card (whose `.kind` is still whatever Diamond card it
+ *  originally was). **Real bug found and fixed while building Milestone 25's SupplyShortage**
+ *  (a structurally identical 2nd delayed trick): without this rewrite, `Room.runJudgePhase`'s
+ *  `card.kind === CardKind.Indulgence` dispatch check silently fails for a Guose-viewed card --
+ *  it gets `.shift()`'d out of `judgeArea` (removed) but matches neither judge-phase branch, so
+ *  it's never resolved AND never reaches `discardPile` -- the card just vanishes, permanently,
+ *  with no trace. Caught via `testPhaseCyclingConservesCards` (a real card, id 20, a Diamond
+ *  Slash Daqiao had viewed as Indulgence via Guose, disappeared from every pile/hand/judgeArea
+ *  after its owner's Judge phase ran) -- same "safe to mutate a card once it's committed to a
+ *  new role" precedent `attachSupplyShortage` below already uses. */
 export function attachIndulgence(ctx: EngineContext, target: GamePlayer, card: Card): void {
+  card.kind = CardKind.Indulgence;
   if (target.skills.some((s) => s.blocksIndulgenceEntry?.(target))) {
     ctx.discardPile.push(card);
     ctx.log.push(`${target.id} miễn nhiễm, Lạc Bất Tư Thục vào thẳng chồng bài bỏ (qianxun)`);
@@ -266,6 +278,49 @@ export async function resolveIndulgenceJudgment(ctx: EngineContext, target: Game
     if (judgeCard.suit !== Suit.Heart) {
       target.forcedSkipPlayPhase = true;
       ctx.log.push(`${target.id} sẽ bỏ qua giai đoạn ra bài lượt này (indulgence)`);
+    }
+    await disposeJudgmentCard(ctx, target, judgeCard);
+  }
+  ctx.discardPile.push(card);
+}
+
+/** Alive players `actor` could legally target with SupplyShortage: not self, no existing
+ *  SupplyShortage already attached, and within the card's real base distance-1 limit
+ *  (extended by `extraTrickDistance`, e.g. Xu Huang's Duanliang: +1) -- verified exactly
+ *  against the real upstream `SupplyShortage::targetFilter`'s own `distance_limit`. */
+export function supplyShortageCandidates(actor: GamePlayer, alive: GamePlayer[]): GamePlayer[] {
+  const extra = Math.max(0, ...actor.skills.map((s) => s.extraTrickDistance?.(CardKind.SupplyShortage) ?? 0), 0);
+  const limit = 1 + extra;
+  return alive.filter(
+    (p) => p !== actor && !p.judgeArea.some((c) => c.kind === CardKind.SupplyShortage) && effectiveDistance(alive, actor, p) <= limit,
+  );
+}
+
+/** Attaches `card` (SupplyShortage, already detached from the player's hand by the caller) to
+ *  `target`'s judge area. `card.kind` is force-set to `CardKind.SupplyShortage` here -- a no-op
+ *  for a real SupplyShortage card, but REQUIRED for a Duanliang-viewed card (whose `.kind` is
+ *  still whatever black card it originally was): `Room.runJudgePhase`'s dispatch keys off
+ *  `.kind`, and the card is leaving the hand permanently at this point, so rewriting it here is
+ *  safe (same "safe to mutate a card once it's committed to a new role" precedent as Hongyan's
+ *  in-place `.suit` rewrite). */
+export function attachSupplyShortage(ctx: EngineContext, target: GamePlayer, card: Card): void {
+  card.kind = CardKind.SupplyShortage;
+  target.judgeArea.push(card);
+  ctx.log.push(`${target.id} nhận Binh Lương Thốn Đoạn vào vùng phán xét`);
+}
+
+/** SupplyShortage's Judge-phase resolution (Room.runJudgePhase, called once `target`'s turn
+ *  reaches its own Judge phase): judges a card; if the result is NOT Club, `target` skips their
+ *  own Draw phase this turn (verified exactly against the real upstream `SupplyShortage`'s
+ *  `judge.pattern = ".|club"` + `takeEffect`'s `target->skip(Player::Draw)`). Mirrors
+ *  `resolveIndulgenceJudgment`'s exact shape (shared `judge()`/`disposeJudgmentCard` helpers). */
+export async function resolveSupplyShortageJudgment(ctx: EngineContext, target: GamePlayer, card: Card): Promise<void> {
+  const judgeCard = await judge(ctx, target, "supply_shortage");
+  if (judgeCard) {
+    ctx.log.push(`${target.id} phán Binh Lương Thốn Đoạn: ${SUIT_LABEL_VI[judgeCard.suit]} ${judgeCard.point}`);
+    if (judgeCard.suit !== Suit.Club) {
+      target.forcedSkipDrawPhase = true;
+      ctx.log.push(`${target.id} sẽ bỏ qua giai đoạn rút bài lượt này (supply_shortage)`);
     }
     await disposeJudgmentCard(ctx, target, judgeCard);
   }
