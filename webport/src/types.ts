@@ -47,6 +47,16 @@ export enum Role {
   Renegade = "renegade",
 }
 
+// Milestone 23: which of the two supported game modes a Room is running. Identity (身份场) is
+// the classic Lord/Loyalist/Rebel/Renegade mode this whole engine originally targeted (see the
+// Role enum above). Hegemony (国战 -- Vietnamese "Quốc Chiến") replaces individual roles with
+// kingdom-based teams; see gamerule.ts's Hegemony section for the real ported ruleset and what
+// was deliberately simplified.
+export enum GameMode {
+  Identity = "identity",
+  Hegemony = "hegemony",
+}
+
 export enum DamageNature {
   Normal = "Normal",
   Fire = "Fire",

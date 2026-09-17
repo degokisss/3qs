@@ -91,7 +91,7 @@ export async function resolveDuel(ctx: EngineContext, source: GamePlayer, target
   let other = source;
   while (true) {
     const required = Math.max(1, ...responder.skills.map((s) => s.responseCountRequired?.("duel", responder) ?? 1));
-    const firstSlash = findSlashLikeCard(responder);
+    const firstSlash = findSlashLikeCard(responder, ctx.aoChienActive);
     if (!firstSlash || !(await ctx.askDuelSlash(responder))) {
       await applyDamage(ctx, responder, 1, other);
       return;
@@ -100,7 +100,7 @@ export async function resolveDuel(ctx: EngineContext, source: GamePlayer, target
     responder.hand.splice(responder.hand.indexOf(firstSlash), 1);
     let allFound = true;
     for (let i = 1; i < required; i++) {
-      const next = findSlashLikeCard(responder);
+      const next = findSlashLikeCard(responder, ctx.aoChienActive);
       if (!next) {
         allFound = false;
         break;
@@ -143,7 +143,7 @@ export async function resolveSavageAssault(ctx: EngineContext, source: GamePlaye
   }
   for (const p of ctx.alivePlayers.filter((p) => p !== source && p.alive)) {
     if (p.skills.some((s) => s.immuneToSavageAssault?.(p))) continue;
-    const slash = findSlashLikeCard(p);
+    const slash = findSlashLikeCard(p, ctx.aoChienActive);
     if (slash && (await ctx.askSavageAssaultSlash(p))) {
       p.hand.splice(p.hand.indexOf(slash), 1);
       ctx.discardPile.push(slash);
@@ -159,7 +159,7 @@ export async function resolveSavageAssault(ctx: EngineContext, source: GamePlaye
 export async function resolveArcheryAttack(ctx: EngineContext, source: GamePlayer): Promise<void> {
   ctx.log.push(`${source.id} dùng Vạn Tiễn Tề Phát`);
   for (const p of ctx.alivePlayers.filter((p) => p !== source && p.alive)) {
-    const jink = findJinkLikeCard(p);
+    const jink = findJinkLikeCard(p, ctx.aoChienActive);
     if (jink && (await ctx.askArcheryAttackJink(p))) {
       p.hand.splice(p.hand.indexOf(jink), 1);
       ctx.discardPile.push(jink);

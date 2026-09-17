@@ -19,6 +19,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Room } from "./room.js";
+import { GameMode } from "./types.js";
 import { Controller, pickLeastImportantCards } from "./controller.js";
 import { SKILLS } from "./skill.js";
 import { CARD_CATALOG, GENERAL_CATALOG } from "./library.js";
@@ -103,6 +104,9 @@ interface GameRoom {
   /** The socket that created this room -- the only one allowed to send `startGame`/`toggleBot`.
    *  Promoted to another remaining watcher if the creator leaves before starting (see `leaveRoom`). */
   creatorWs: WebSocket;
+  /** Fixed at room creation (see "createRoom") -- which of the two Room modes this room plays.
+   *  Never changes for the lifetime of a room (a mode switch would need a whole new room). */
+  mode: GameMode;
 }
 
 const rooms = new Map<string, GameRoom>();
@@ -149,8 +153,11 @@ function scheduleLoop(gr: GameRoom, room: Room): void {
  *  starting, which ones actually play: claim a seat themselves, let others claim seats, and
  *  toggle bots onto whichever remaining slots they want filled (see "toggleBot"/"startGame").
  *  Anything left neither claimed nor bot-toggled is simply excluded from the real Room
- *  `startGame` builds, not silently defaulted to a bot like before. */
-function createRoom(creatorWs: WebSocket): GameRoom {
+ *  `startGame` builds, not silently defaulted to a bot like before. `mode` is fixed for the
+ *  room's whole lifetime (see the GameRoom field doc comment) -- the placeholder Room built here
+ *  is Identity-only regardless (its role/kingdom assignments are thrown away at `startGame`
+ *  anyway; only the 10 P1..P10 seat slots it provides for the pre-start picker matter). */
+function createRoom(creatorWs: WebSocket, mode: GameMode): GameRoom {
   const gr: GameRoom = {
     id: generateRoomId(),
     room: new Room(newPlayerIds(MAX_PLAYERS)),
@@ -162,6 +169,7 @@ function createRoom(creatorWs: WebSocket): GameRoom {
     loopTimer: null,
     started: false,
     creatorWs,
+    mode,
   };
   rooms.set(gr.id, gr);
   // Weapon/Horse equips otherwise wouldn't show up for any watching client until the whole turn
@@ -180,6 +188,7 @@ function destroyRoom(gr: GameRoom): void {
 function roomSummary(gr: GameRoom) {
   return {
     id: gr.id,
+    mode: gr.mode,
     seatsClaimed: gr.claimedSeats.size,
     botCount: gr.botEnabledSlots.size,
     watchers: gr.clients.size,
@@ -355,13 +364,14 @@ function makeHumanController(gr: GameRoom, playerId: string): Partial<Controller
         true, // matches the bot default (a resource trade the greedy policy always takes)
       );
     },
-    chooseGeneral: (candidates) =>
+    chooseGeneral: (candidates, role) =>
       askClient(
         gr,
         playerId,
         {
           type: "pickGeneral",
           actorId: playerId,
+          role: role ?? null, // "main"/"deputy" (Hegemony only) or null (Identity's single pick)
           candidates: candidates.map((g) => ({
             name: g.name,
             displayName: g.displayName,
@@ -376,6 +386,43 @@ function makeHumanController(gr: GameRoom, playerId: string): Partial<Controller
         (msg) => candidates.find((g) => g.name === msg.generalName) ?? candidates[0],
         candidates[0], // fallback on timeout/disconnect: auto-pick the first candidate so the game always proceeds
         30000, // longer than the other asks -- this is a deliberate one-time pick with skill text to read
+      ),
+    chooseReveal: (player, mainHidden, deputyHidden) =>
+      askClient(
+        gr,
+        playerId,
+        {
+          type: "chooseReveal",
+          actorId: playerId,
+          mainHidden,
+          deputyHidden,
+          mainGeneralName: player.generalName,
+          deputyGeneralName: player.deputyGeneralName,
+        },
+        (msg) => ({ main: msg.main === true, deputy: msg.deputy === true }),
+        { main: false, deputy: false }, // fallback on timeout/disconnect: stay hidden -- a legitimate real choice, never forced
+      ),
+    chooseCompanionBonus: (player, canRecover) =>
+      askClient(
+        gr,
+        playerId,
+        {
+          type: "chooseCompanionBonus",
+          actorId: playerId,
+          canRecover,
+          mainGeneralName: player.generalName,
+          deputyGeneralName: player.deputyGeneralName,
+        },
+        (msg) => (msg.choice === "recover" || msg.choice === "draw" ? msg.choice : "cancel"),
+        canRecover ? "recover" : "draw", // fallback on timeout/disconnect: matches the bot default
+      ),
+    wantsHalfMaxHpBonusDraw: (player) =>
+      askClient(
+        gr,
+        playerId,
+        { type: "confirmHalfMaxHpDraw", actorId: playerId },
+        (msg) => msg.value !== false,
+        true, // fallback on timeout/disconnect: matches the bot default (always accept)
       ),
     chooseDiscards: (player, count) =>
       askClient(
@@ -508,12 +555,13 @@ function snapshot(gr: GameRoom) {
   return {
     type: "state",
     roomId: gr.id,
+    mode: gr.mode,
     started: gr.started,
     // Milestone 6: true from `startGame` until every player has a general -- the client shows a
     // dedicated pick-a-general screen instead of the normal table while this holds.
     pickingGenerals: gr.started && gr.room.players.some((p) => !p.general),
-    pickTurnPlayerId: gr.room.pickTurnPlayerId,
     turnNumber: gr.room.turnNumber,
+    aoChienActive: gr.room.aoChienActive,
     // Room's constructor sets currentIndex to the lord's seat the INSTANT it's created (well
     // before anyone picks generals or the creator starts the match) -- exposing it while the
     // room still sits in the lobby/waiting-room would leak who the lord is via the client's
@@ -521,44 +569,62 @@ function snapshot(gr: GameRoom) {
     // matching roleShown's own "public knowledge once the match begins" rule right below.
     currentPlayerId: gr.started ? gr.room.players[gr.room.currentIndex]?.id ?? null : null,
     gameOver: gr.room.gameOver,
-    players: gr.room.players.map((p) => ({
-      id: p.id,
-      general: p.general,
-      generalName: p.generalName,
-      kingdom: p.kingdom,
-      alive: p.alive,
-      hp: p.hp,
-      maxHp: p.maxHp,
-      // Role is only revealed to spectators once the player has shown it in-game (dead, or lord
-      // from the start) -- mirrors Player::hasShownRole, so this is a legitimate "fog of war" view.
-      // (personalize() below additionally reveals a claiming socket's OWN role once started.)
-      role: p.roleShown ? p.role : null,
-      handcardNum: p.handcardNum,
-      weapon: p.weapon?.weaponName ?? null,
-      weaponRange: p.weapon?.weaponRange ?? null,
-      defenseHorse: p.defenseHorse?.horseName ?? null,
-      defenseHorseDelta: p.defenseHorse?.horseDelta ?? null,
-      offenseHorse: p.offenseHorse?.horseName ?? null,
-      offenseHorseDelta: p.offenseHorse?.horseDelta ?? null,
-      claimed: gr.claimedSeats.has(p.id),
-      // Whatever name the claiming socket set via "setName", if any -- null for bot/empty
-      // seats or a claimed-but-nameless human (client falls back to showing just the P1..P10
-      // id, exactly like before this feature existed).
-      playerName: (() => {
-        const holder = gr.claimedSeats.get(p.id);
-        return holder ? (displayNames.get(holder) ?? null) : null;
-      })(),
-      botEnabled: gr.botEnabledSlots.has(p.id),
-      skills: p.skills.map((s) => ({
-        name: s.displayName,
-        description: s.description,
-        skillName: s.name, // internal key -- matches FreeAction's `skillName` so the client can
-        // find the matching legalActions entry for a hero-panel skill button click
-        isActive: !!(s.selfAction || s.activeAction), // Play-phase active skill (offered via
-        // chooseFreeAction's legalActions) vs a purely passive/reactive one (auto-fires on its
-        // own hook, e.g. onDamaged/onIncomingSlash -- no player choice, no button)
-      })),
-    })),
+    players: gr.room.players.map((p) => {
+      // Hegemony fog-of-war: kingdom (and therefore faction/isAmbitionist/skills) becomes known
+      // to OTHER clients the instant EITHER general reveals (real rule: they share one kingdom,
+      // so either reveal exposes it); each general's own SPECIFIC identity stays gated by its
+      // own `mainRevealed`/`deputyRevealed` flag independently. Identity mode is unaffected --
+      // `kingdomKnown` is always true there, so every field below behaves exactly as before.
+      const kingdomKnown = gr.mode !== GameMode.Hegemony || p.mainRevealed || p.deputyRevealed;
+      return {
+        id: p.id,
+        general: gr.mode === GameMode.Hegemony && !p.mainRevealed ? null : p.general,
+        generalName: gr.mode === GameMode.Hegemony && !p.mainRevealed ? null : p.generalName,
+        deputyGeneral: gr.mode === GameMode.Hegemony && !p.deputyRevealed ? null : p.deputyGeneral,
+        deputyGeneralName: gr.mode === GameMode.Hegemony && !p.deputyRevealed ? null : p.deputyGeneralName,
+        mainRevealed: p.mainRevealed,
+        deputyRevealed: p.deputyRevealed,
+        kingdom: kingdomKnown ? p.kingdom : null,
+        alive: p.alive,
+        hp: p.hp,
+        maxHp: p.maxHp,
+        // Role is only revealed to spectators once the player has shown it in-game (dead, or lord
+        // from the start) -- mirrors Player::hasShownRole, so this is a legitimate "fog of war" view
+        // (personalize() below additionally reveals a claiming socket's OWN role once started).
+        // Identity mode only -- Hegemony mode has no hidden role, it uses faction/isAmbitionist
+        // below instead (both visible from the start, see gamerule.ts's Hegemony section header).
+        role: gr.mode === GameMode.Identity ? (p.roleShown ? p.role : null) : null,
+        faction: kingdomKnown ? p.faction : "",
+        isAmbitionist: kingdomKnown ? p.isAmbitionist : false,
+        handcardNum: p.handcardNum,
+        weapon: p.weapon?.weaponName ?? null,
+        weaponRange: p.weapon?.weaponRange ?? null,
+        defenseHorse: p.defenseHorse?.horseName ?? null,
+        defenseHorseDelta: p.defenseHorse?.horseDelta ?? null,
+        offenseHorse: p.offenseHorse?.horseName ?? null,
+        offenseHorseDelta: p.offenseHorse?.horseDelta ?? null,
+        claimed: gr.claimedSeats.has(p.id),
+        // Whatever name the claiming socket set via "setName", if any -- null for bot/empty
+        // seats or a claimed-but-nameless human (client falls back to showing just the P1..P10
+        // id, exactly like before this feature existed).
+        playerName: (() => {
+          const holder = gr.claimedSeats.get(p.id);
+          return holder ? (displayNames.get(holder) ?? null) : null;
+        })(),
+        botEnabled: gr.botEnabledSlots.has(p.id),
+        // `p.skills` is itself reveal-gated now (see player.ts's getter) -- precisely only the
+        // REVEALED general's skills, no separate kingdomKnown check needed here any more.
+        skills: p.skills.map((s) => ({
+          name: s.displayName,
+          description: s.description,
+          skillName: s.name, // internal key -- matches FreeAction's `skillName` so the client can
+          // find the matching legalActions entry for a hero-panel skill button click
+          isActive: !!(s.selfAction || s.activeAction), // Play-phase active skill (offered via
+          // chooseFreeAction's legalActions) vs a purely passive/reactive one (auto-fires on its
+          // own hook, e.g. onDamaged/onIncomingSlash -- no player choice, no button)
+        })),
+      };
+    }),
     log: gr.room.log.slice(-40),
   };
 }
@@ -580,15 +646,39 @@ function myHandFor(gr: GameRoom, ws: WebSocket): Card[] | null {
 }
 
 /** Personalizes a shared snapshot for one socket: isCreator/myHand as before, plus -- once the
- *  match has started -- reveals the claiming socket's OWN role. Every player always knows their
- *  own identity in real Sanguosha; only OTHER players' roles stay fogged per `p.roleShown`. */
+ *  match has started -- reveals the claiming socket's OWN role AND (Hegemony) own general/
+ *  kingdom/faction/skills, regardless of `p.roleShown`/reveal state. Every player always knows
+ *  their own identity in real Sanguosha; only OTHER players' stay fogged. */
 function personalize(gr: GameRoom, ws: WebSocket, shared: ReturnType<typeof snapshot>) {
   const myPlayerId = claimedPlayerIdFor(gr, ws);
   const players =
     gr.started && myPlayerId
-      ? shared.players.map((p) =>
-          p.id === myPlayerId ? { ...p, role: gr.room.players.find((rp) => rp.id === myPlayerId)!.role } : p,
-        )
+      ? shared.players.map((p) => {
+          if (p.id !== myPlayerId) return p;
+          const real = gr.room.players.find((rp) => rp.id === myPlayerId)!;
+          return {
+            ...p,
+            role: real.role,
+            general: real.general,
+            generalName: real.generalName,
+            deputyGeneral: real.deputyGeneral,
+            deputyGeneralName: real.deputyGeneralName,
+            kingdom: real.kingdom,
+            faction: real.faction,
+            isAmbitionist: real.isAmbitionist,
+            // allSkills (not the reveal-gated `skills`): the owner always knows what they
+            // drafted, even before choosing to reveal it to anyone else -- same "you always
+            // know your own stuff" precedent as general/kingdom above. Whether a still-hidden
+            // skill is actually USABLE is separately enforced by computeLegalActions (room.ts),
+            // which reads the gated `skills` and simply never offers one that isn't active yet.
+            skills: real.allSkills.map((s) => ({
+              name: s.displayName,
+              description: s.description,
+              skillName: s.name,
+              isActive: !!(s.selfAction || s.activeAction),
+            })),
+          };
+        })
       : shared.players;
   return { ...shared, players, isCreator: ws === gr.creatorWs, myHand: myHandFor(gr, ws) };
 }
@@ -689,7 +779,8 @@ wss.on("connection", (ws) => {
       }
       case "createRoom": {
         leaveRoom(ws); // in case this socket was already watching another room
-        const gr = createRoom(ws);
+        const mode = msg.mode === "hegemony" ? GameMode.Hegemony : GameMode.Identity;
+        const gr = createRoom(ws, mode);
         joinRoom(ws, gr);
         broadcastLobby();
         break;
@@ -731,7 +822,7 @@ wss.on("connection", (ws) => {
           );
           return;
         }
-        gr.room = new Room(activeIds); // rebuild with exactly the final roster -- role/win tables are sized per player count
+        gr.room = new Room(activeIds, undefined, gr.mode); // rebuild with exactly the final roster -- role/win tables are sized per player count
         gr.room.setLiveUpdateCallback(() => broadcast(gr));
         for (const playerId of gr.claimedSeats.keys()) {
           gr.room.setController(playerId, makeHumanController(gr, playerId)); // bot-toggled seats already default to makeBotController

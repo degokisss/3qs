@@ -1408,6 +1408,421 @@ was only ever labeled "P1".."P10", with no way to tell which real person was beh
   re-broadcast on rename (B receives `playerName: "MinhV2"` the instant A calls `setName` again,
   no reconnect needed).
 
+## Milestone 23 — DONE (Hegemony / Quốc Chiến mode: kingdom-team foundation)
+
+User asked to add Quốc Chiến (国战 / Hegemony) as a full second game mode. Real Hegemony is a
+substantially bigger ruleset than Identity mode took 22 milestones to reach: the modern official
+rules (confirmed against gltjk.com/sanguosha/rules, the 3.0 rulebook, and Mogara's own
+`QSanguosha-For-Hegemony` README) add a dual-general (主将/副将) system with face-down/face-up
+(暗置/明置) kingdom reveal, 珠联璧合 paired-general bonuses, 阵法技 formation skills, 围攻/队列
+pincer/formation positional mechanics, and a late-game "Ao Chiến" (鏖战) Peach restriction -- each
+a genuinely separate subsystem, several bigger than any single milestone this repo has shipped so
+far. This milestone ships the real, playable CORE of Hegemony end to end -- kingdom-team setup,
+the official Ambitionist overflow rule, faction-based ally/win-condition logic, full server+client
+wiring -- and explicitly defers the rest, same one-line-per-deferral convention used for every
+general/skill gap noted throughout this file.
+
+**Ported ruleset** (single-general, kingdom visible from the start -- see "Deferred" below for
+exactly what that simplifies away):
+- 4 real kingdoms (Wei/Shu/Wu/Qun), each a genuine team -- not "3 kingdoms + a no-team Qun".
+- A kingdom's team size is capped at `floor(playerCount/2)` (gltjk.com/sanguosha/rules/glossary/
+  guo.html's 明置 entry, independently cross-checked against the modern client's own published
+  6/7p-4th-same-kingdom and 8/9p-5th-same-kingdom examples). Whoever would overflow that quota for
+  their kingdom becomes an Ambitionist (Dã Tâm Gia) instead: a solo faction of exactly one, allied
+  with nobody (not even another Ambitionist), who must eliminate every other living player alone
+  to win.
+- Win condition: the instant every living player shares one faction, that faction wins -- the
+  whole team for Wei/Shu/Wu/Qun, the sole survivor for an Ambitionist. Both are the exact same
+  "only one faction left standing" check (`checkHegemonyWinCondition`), no special-case branch.
+
+**Engine (`src/types.ts`/`src/player.ts`/`src/gamerule.ts`/`src/room.ts`):**
+- `types.ts` -- new `GameMode` enum (`Identity`/`Hegemony`); `Role` untouched, Identity-only.
+- `player.ts` -- `GamePlayer` gained `faction` (team key: a kingdom string for a team player, a
+  per-player-unique `"ambitionist:<id>"` for an Ambitionist) and `isAmbitionist`.
+- `gamerule.ts` -- new Hegemony section: `KINGDOMS`, `KINGDOM_LABEL_VI`, `AMBITIONIST_LABEL_VI`,
+  `assignHegemonyFaction` (the quota/overflow decision for one player, called in pick order),
+  `checkHegemonyWinCondition`, `factionLabelVI` (mode-aware per-player log label). `isAlly` now
+  checks `faction` FIRST when either side has one set, falling through unchanged to the original
+  Role-based partition otherwise -- since Identity mode never sets `faction`, this is a strict
+  superset with zero behavior change for existing games (confirmed: all 69 pre-existing tests
+  still pass byte-for-byte unseeded). `WinResult.winners` widened from `Role[]` to `string[]`
+  (a real Role IS a string at runtime -- string enum -- so this is a pure widening, not a
+  behavior change; Identity mode's existing `checkWinCondition` is completely untouched).
+- `room.ts` -- `Room`'s constructor takes an optional `mode` (defaults `Identity`, so every
+  existing `new Room(...)` call site -- 60+ across simulate.ts -- needed zero changes). Hegemony
+  mode skips `assignRoles()` entirely (no Lord/Loyalist/Rebel/Renegade) and starts turn order at a
+  random seat instead of the lord's. `pickGenerals()` threads a running per-kingdom count +
+  `floor(n/2)` quota through its existing turn-order draft loop, calling `assignHegemonyFaction`
+  right after each player's general (and therefore kingdom) is chosen -- no separate "declare a
+  kingdom" step, since this port has no hidden-kingdom phase to declare it in (see "Deferred"). The
+  Rebel-kill-reward and Lord-kills-Loyalist-punishment blocks in `killPlayer` are explicitly gated
+  `this.mode === GameMode.Identity` (they were already inert for Hegemony players, whose `role`
+  never gets assigned and stays its harmless default -- but the explicit gate documents that
+  instead of relying on it). Every log line that used to embed a raw Role label (`killPlayer`'s
+  death line, the per-turn `--- Lượt N: ... ---` banner, `pickGenerals`'s post-draft summary, the
+  win-condition line) now goes through `factionLabelVI`/a small mode branch instead.
+
+**Server + client (`src/server.ts`/`public/index.html`):**
+- `server.ts` -- `GameRoom` gained a `mode` field, fixed at `createRoom` time from a new
+  `{type:"createRoom", mode:"hegemony"|"identity"}` field (defaults `identity` if omitted/
+  unrecognized, so old clients/messages keep working unchanged). `startGame` threads `gr.mode`
+  into the real `new Room(activeIds, undefined, gr.mode)` construction. `roomSummary()` (lobby
+  list) and `snapshot()` (in-room state) both now expose `mode`; `snapshot()`'s per-player payload
+  gained `faction`/`isAmbitionist`, and `role` is forced `null` for Hegemony players (they have no
+  hidden Role to fog -- Hegemony's own visibility model is kingdom-from-the-start instead).
+- `public/index.html` -- new mode toggle (`Vai trò` / `Quốc Chiến`) above "Tạo phòng mới", sent
+  with `createRoom`; each lobby room row shows a `.roomMode` badge. New shared `factionBadge(p,
+  masked)` helper (mirrors `factionLabelVI` -- same 2-call-site shape: the table player card and
+  the own-hero panel) renders Identity's existing Role badge OR Hegemony's kingdom badge (new
+  `.role-kingdom` CSS class, colored via the SAME `--kcolor` custom property the avatar ring
+  already used per-kingdom) / Ambitionist marker (reuses `.role-renegade`'s purple "solo outsider"
+  styling -- no new color needed, the visual metaphor already fit). The win banner now branches on
+  `state.mode`: Identity keeps its `Role[]` label join; Hegemony looks up the winning player(s)
+  and shows the kingdom label, or `Dã Tâm Gia (<name>)` for an Ambitionist win.
+
+**Tests (`src/simulate.ts`):** 4 new tests, all passing alongside the pre-existing 65 (zero
+regressions, confirmed by an unmodified full run before AND after): `testAssignHegemonyFaction
+RespectsQuota` (pure -- quota=2, 3rd same-kingdom pick becomes an Ambitionist, a different
+kingdom right after is unaffected), `testHegemonyWinCondition` (pure -- team win needs only that
+kingdom alive, Ambitionist win needs sole survivorship), `testHegemonyIsAllyUsesFactionNotRole`
+(pure -- same faction allies despite differing legacy `role`, 2 different Ambitionists never
+ally), `testEmergentHegemonyGameReachesWinCondition` (mirrors the Identity-mode emergent-combat
+proof: a REAL `pickGenerals()` draft + naive bot play alone, no scripted damage, across up to 20
+seeds of an 8-player table, asserting the quota invariant right after the draft and a real faction
+-consistent win by the end).
+- **Verification, three layers:** (1) `npx tsc --noEmit` clean; `npm run sim` 69/69 passing (65
+  pre-existing + these 4 new -- confirmed no regressions by an unmodified pre-Hegemony run first).
+  (2) Live `ws` client: a real 10-player Hegemony game (`{type:"createRoom", mode:"hegemony"}`)
+  ran to a genuine win (`Ngụy thắng`, one surviving Wei player crediting the whole assigned-then-
+  eliminated roster correctly) with every log line -- turn banners, deaths, the final result --
+  showing kingdom labels, not stale Role labels (a real bug caught and fixed live: the per-turn
+  `--- Lượt N ---` banner was still calling the raw `ROLE_LABEL_VI[player.role]` after the other 3
+  call sites were already fixed -- found because a live 10p game showed `P4 (Nội gián)` instead of
+  a kingdom, fixed by routing it through `factionLabelVI` too, re-verified clean afterward). A
+  second live run (6x 5-player games, tightest quota) reproduced a real Ambitionist: P4's 3rd
+  same-kingdom pick correctly became `faction: "ambitionist:P4"`, and the log showed P4 killing
+  every other player one by one before `Kết thúc ván: Dã Tâm Gia thắng`. (3) Real headless-browser
+  run: selected "Quốc Chiến" in the lobby (button highlight confirmed), created a 10-player room,
+  bot-filled every seat, started it -- the table rendered real per-kingdom badges (`THỤC`, `QUẦN`,
+  `NGỤY`, ...) in place of Role badges with no layout breakage, and the game ran to a real win with
+  the banner correctly reading `Quần chiến thắng` and the winning player's card gold-highlighted.
+  No console errors observed throughout.
+- 69 tests total, all passing.
+
+**Deliberately deferred** (each is a genuinely separate subsystem, consistent with this file's
+standing convention -- every one of these is a plausible FUTURE milestone, not a cut corner):
+- The face-down/face-up (暗置/明置) kingdom-reveal TIMING mechanic (see the dual-general addendum
+  right below, which closes the STAT-COMBINATION half of this gap but not the reveal-timing
+  half): both generals (and therefore the kingdom) are visible from the start in this port -- no
+  hidden-kingdom bluffing phase, no "reveal main or deputy now, or wait" decision.
+- 珠联璧合 (paired-general bonuses for specific named pairs) -- needs per-pair bonus data this
+  repo's ported general roster doesn't carry.
+- 阵法技 (formation skills), 围攻/队列 (pincer/formation positional mechanics).
+- "Ao Chiến" (鏖战, the late-game rule restricting Peach to Slash/Jink-only once ≤4 players remain
+  with no kingdom holding >1 survivor) -- not implemented; Peach still heals normally in every
+  Hegemony game this port runs, end to end.
+- Every general's skill text/hooks are unchanged from Identity mode (the same `skill.ts` roster,
+  same 44/46 ported coverage) -- none of the ~15 genuinely Hegemony-exclusive skill clauses this
+  file's earlier milestones noted as stripped (gated on `lord->hasLordSkill("shouyue")` etc. --
+  see `skill.ts`'s own header) are restored by this milestone; that's tracked separately from the
+  game-mode infrastructure this milestone actually ships.
+
+**Addendum -- dual-general (主将/副将) system.** User pointed out real Hegemony has each player
+draft 2 SAME-kingdom generals (main + deputy), not 1 -- correct, this was the single-general
+simplification the milestone above explicitly flagged as deferred. Closed without needing any
+new per-general data: the official rule states each general's OWN Hegemony-card HP is exactly
+half their solo/Identity-mode value, and the pair's total is the sum of those halves (confirmed
+via live web search against the current rule: "国战体力值是原来武将的一半...体力值计算方法：两名武将
+的体力值之和") -- so the combined total derives purely from this repo's EXISTING `GeneralDef.maxHp`
+with no lookup table needed: `combineHegemonyHp(hp1, hp2) = floor((hp1+hp2)/2)`, plus a bonus
+card draw (not a fractional HP point) when the sum is odd, mirroring the official "1 unpaired
+阴阳鱼 ⇒ draw 1" rule -- granted immediately at pick time rather than at a separate reveal moment,
+since this port has no reveal phase (see the deferred-list entry above).
+- `gamerule.ts` -- new `combineHegemonyHp` (pure, exported for testing). Hegemony header's
+  deferred-list entry rewritten (see above) to stop listing the stat-combination system as a gap.
+- `player.ts` -- `GamePlayer` gained `deputyGeneral`/`deputyGeneralName`, alongside the existing
+  `general`/`generalName` (which now hold the MAIN general of the pair in Hegemony mode).
+- `room.ts` -- `candidateGenerals` gained an optional `kingdom` filter (falls back to the full
+  remaining pool if that kingdom is exhausted -- a real possibility once several players have
+  each drafted 2 generals from a small kingdom, not just a theoretical edge case, so this
+  degrade-gracefully path is load-bearing, not defensive filler). `pickGenerals`'s Hegemony
+  branch now asks `chooseGeneral` TWICE per player (`role: "main"` then `role: "deputy"`, the
+  2nd call's candidates pre-filtered to the main's kingdom) before combining stats: skills are
+  the union of both generals' `skillNames`, gender follows the main general (real rule), HP via
+  `combineHegemonyHp`. `player.general`/`generalName` are only assigned once BOTH picks land, so
+  the room-wide `pickingGenerals` flag (driven by `!p.general`) stays accurate while a deputy
+  pick is still pending. Identity mode's single-pick path is untouched (separate `else` branch).
+- `controller.ts` -- `Controller.chooseGeneral` gained an optional `role?: "main"|"deputy"`
+  param (Hegemony only; bots ignore it, Identity mode never passes it) -- purely so a human ask
+  can show which slot is being picked.
+- `server.ts` -- `chooseGeneral`'s `pickGeneral` message gained a `role` field (passed straight
+  through); `snapshot()`'s per-player payload gained `deputyGeneral`/`deputyGeneralName`.
+- `public/index.html` -- the pick-a-general hint text now reads "chọn TƯỚNG CHÍNH"/"chọn TƯỚNG
+  PHÓ (cùng thế lực với tướng chính)" for Hegemony's 2 sub-picks (unchanged plain hint for
+  Identity's single pick). New shared `generalDisplayName(p)` helper (same 2-call-site pattern as
+  `factionBadge`) renders `"Main / Deputy"` in the table player card and the own-hero panel once
+  a deputy is assigned, falling back to the plain name otherwise.
+- `src/simulate.ts` -- `testCombineHegemonyHp` (pure, all 4 parity cases: even+even exact,
+  even+odd floors with a bonus draw, odd+odd re-pairs exact) and
+  `testHegemonyDraftPicksSameKingdomPairWithCombinedStats` (a REAL `pickGenerals()` draft across
+  8 seeds, asserting every player's pair is 2 distinct same-kingdom generals with skills = union,
+  HP = `combineHegemonyHp`, gender = main's).
+- **Verification:** (1) `npx tsc --noEmit` clean; `npm run sim` 71/71 passing (69 pre-existing +
+  these 2 new). (2) Live `ws` client: a real 10-player Hegemony draft showed every player with a
+  real `deputyGeneral` and a combined stat line matching the formula (e.g. `Hứa Chử(4hp) + Nhạc
+  Tiến(4hp) → 4hp`, `Hoàng Nguyệt Anh(3hp) + Mạnh Hoạch(4hp) → 3hp`), the log line format changed
+  to `"P8 chọn tướng Giả Hủ + Khổng Dung (Quần, 3 máu)"`, and the SAME game played through to a
+  real win (`Thục thắng`) with ally/faction logic unaffected. (3) Real headless-browser run:
+  claimed P1, the main pick auto-resolved (bot-speed default), the DEPUTY pick screen rendered
+  the correct "chọn TƯỚNG PHÓ (cùng thế lực với tướng chính)" hint with 3 face-down candidates;
+  flipping one showed a real Shu-kingdom card (matching the main's kingdom); picking it, the
+  table/hero panel correctly rendered `"Chúc Dung / Mạnh Hoạch · Thục"` with the union of both
+  generals' skills listed, and live play (a real Jink prompt) continued normally afterward.
+
+**Addendum -- Ao Chiến (鏖战) + the face-down/face-up (暗置/明置) reveal-TIMING mechanic.** User
+asked to close the remaining documented gaps. Investigated 珠联璧合 (paired-general bonuses) and
+阵法技/围攻/队列 (formation skills, pincer/queue positional mechanics) first: grepping this repo's
+entire ported `GENERALS`/`SKILLS` roster (44 generals) found zero references to either mechanic
+-- no currently-ported general needs them, so there is nothing to wire up without fabricating
+bonus-pair/formation data this repo doesn't have (not independently checked against the upstream
+C++ source, which isn't vendored here -- if a not-yet-ported general turns out to need one,
+that's a new gap to reassess then). The other 2 gaps were genuinely closeable:
+
+- **Ao Chiến (鏖战):** once ≤4 players remain and no faction has more than 1 living member, Peach
+  stops rescuing/healing anyone for the rest of the game (real rule: it becomes Slash/Jink-only --
+  this port disables the heal effect only, not the Slash/Jink conversion, see below for why).
+  - `combat.ts` -- `EngineContext` gained `aoChienActive: boolean`; `findRescueCard` (dying-rescue
+    card search, both self- and ally-rescue) takes it as a param -- when true, only Analeptic
+    rescues (the real rule targets Peach specifically, not Analeptic's separate rescue-via-heal).
+  - `room.ts` -- new `aoChienActive` field (latches true, never resets) + `checkAoChienTrigger()`
+    (≤4 alive, no shared faction -- a still-hidden player counts as their OWN distinct faction for
+    THIS check specifically, confirmed live: "暗置武将也算不同势力（暗置与暗置武将间也是如此）", unlike
+    the win condition which blocks entirely on any hidden player instead), checked after every
+    death that doesn't already end the game. Gates the proactive Play-phase Peach self-heal loop
+    and the freeform `computeLegalActions` Peach offering; `makeContext` threads `aoChienActive`
+    through to every `EngineContext`.
+  - **Deliberately not ported:** the "Peach playable as Slash/Jink instead" half -- wiring that
+    into `findSlashLikeCard`/`findJinkLikeCard`'s viewAs search (used bidirectionally across many
+    flows: bot fixed-pass, freeform legal actions, Duel's forced exchange, dodge search) is a
+    separate, riskier change than simply disabling the heal outcome; Peach just becomes inert
+    once Ao Chiến triggers, rather than converting into extra Slash/Jink ammo.
+  - **Tests:** `testAoChienBlocksPeachRescue` (pure, `loseHp`-driven, with a non-Ao-Chiến control
+    case proving it's a real gate, not just a declined ask) and
+    `testAoChienTriggersOnlyAtFourDistinctFactionSurvivors` (real `Room`, proves the exact
+    boundary: stays off at 4 survivors sharing a faction, triggers the instant they're distinct).
+
+- **暗置/明置 reveal-TIMING mechanic:** both generals now start face-down; a player's kingdom (and
+  therefore `faction`/`isAmbitionist`, only assigned the FIRST time either general reveals, using
+  the same `assignHegemonyFaction` quota logic -- now moved to Room-instance fields since reveal
+  can happen any time, not just during the draft) is unknown to other players until then.
+  - `player.ts` -- `GamePlayer` gained `mainRevealed`/`deputyRevealed` (both default false).
+  - `controller.ts` -- `Controller` gained `chooseReveal(player, mainHidden, deputyHidden)`; bots
+    always reveal everything remaining the instant it's asked (their own first turn) -- no
+    bluffing strategy to gain from staying hidden.
+  - `room.ts` -- `pickGenerals` no longer assigns `faction`/`isAmbitionist` at all (the draft log
+    line no longer names which generals or kingdom were picked, just `"P1 đã chọn xong 2 tướng
+    (ẩn cho đến khi lộ diện)"`). New `runHegemonyReveal` (wired into `Phase.RoundStart`): asks
+    `chooseReveal` while anything's hidden, assigns faction on the FIRST reveal, logs it, and
+    re-checks the win condition right there (a reveal -- not just a death -- can be what finally
+    lets an already-converged table conclude, since the win check blocks on any hidden player).
+    `killPlayer` now force-reveals + assigns a faction on death too (same "BuryVictim" principle
+    `roleShown` already used for Identity mode), BEFORE the win-check that follows in the same
+    call. Extracted `checkHegemonyGameEnd()` (win-check + Ao Chiến check) shared between
+    `killPlayer` and `runHegemonyReveal` instead of duplicating it.
+  - `gamerule.ts` -- `checkHegemonyWinCondition` now returns null while ANY living player has
+    `faction === ""` (real rule: "victory conditions can only be assessed once all characters
+    have determined their force"), EXCEPT a sole survivor wins immediately regardless of reveal
+    state (a deliberate simplification protecting against a real soft-lock: a human who never
+    reveals would otherwise block their own trivial win with nobody left to contest it).
+    `factionLabelVI` gained an "Ẩn" (hidden) label for the still-undetermined case.
+  - `server.ts` -- `snapshot()`'s per-player payload now redacts `general`/`generalName` (gated
+    on `mainRevealed`), `deputyGeneral`/`deputyGeneralName` (gated on `deputyRevealed`), and
+    `kingdom`/`faction`/`isAmbitionist`/`skills` (gated on EITHER reveal, since they share one
+    kingdom) to `null`/`""`/`[]` for every OTHER client -- real fog-of-war, not just a client-side
+    display toggle. `personalize()` always overrides the claiming socket's OWN entry with the
+    real underlying values regardless of reveal state (same pattern Identity mode's `role`
+    already used) -- every player always knows their own drafted generals, even before choosing
+    to reveal them to anyone else.
+  - **Deliberately not ported:** skill AVAILABILITY is NOT gated by which general is revealed --
+    both generals' skills are always active from the moment they're drafted. The real rule
+    requires revealing a general before using its abilities; gating that needs threading a reveal
+    check through the ~30 existing skill-hook call sites across `skill.ts`/`combat.ts`/`room.ts`,
+    a separate, much larger change than the reveal-TIMING/visibility layer actually shipped here.
+  - `public/index.html` -- new `.avatarHidden`/`.heroAvatarHidden` placeholder ("?" in a dark
+    circle) shown whenever `p.general`/`p.deputyGeneral` is null; `generalDisplayName` shows
+    "Ẩn" per still-hidden slot ("Ẩn / Ẩn", "Chân Cơ / Ẩn", etc.) -- checks the actual field
+    presence rather than the reveal flag directly, since `personalize()` always sends the
+    claiming socket's own true names regardless of reveal state (gating on the flag itself would
+    have wrongly shown "Ẩn" for your own not-yet-revealed-to-OTHERS pair too -- a real bug caught
+    live: the own-hero panel showed "Ẩn / Ẩn" for a player who had already drafted real generals,
+    fixed by switching the condition, re-verified clean afterward). New `showRevealPrompt`
+    (mirrors `showConfirm`'s style): one toggle button per still-hidden general plus a confirm/
+    "Giữ kín" (stay hidden) button, multiple may be toggled before confirming (real rule allows
+    revealing both at once).
+  - **Tests:** `testHegemonyRevealTiming` (real `Room`: a bot reveals everything on its own first
+    turn while every other untouched player stays hidden; a controller that always declines stays
+    hidden through its own turn; death force-reveals + assigns a faction even with no prior
+    turn), plus `testEmergentHegemonyGameReachesWinCondition` extended to assert every player is
+    fully hidden right after `pickGenerals` and fully revealed by game-over.
+  - **Verification, three layers:** (1) `npx tsc --noEmit` clean; `npm run sim` 74/74 passing
+    (71 pre-existing + these 3 new). (2) Live `ws` client: a real 10-player game's spectator view
+    showed every player's `general`/`kingdom`/`faction` as `null`/`null`/`""` right after the
+    draft, and fully revealed (`mainRevealed`/`deputyRevealed` both true, real kingdoms/winners)
+    by game-over -- confirming the win-condition gate actually forced full reveal before
+    concluding. (3) Real headless-browser run, claimed seat: drafted 2 real generals, the OWN
+    hero panel showed the true names immediately (pre-fix bug caught and fixed here, see above);
+    the RoundStart `chooseReveal` prompt rendered with per-general toggle buttons and the correct
+    hint text; declining (timeout) correctly left `mainRevealed: false`; every OTHER (bot) player
+    card rendered the `?` placeholder avatar + "Ẩn / Ẩn" + `?` kingdom badge; the battle log
+    showed zero name/kingdom leaks during the draft (`"P2 đã chọn xong 2 tướng (ẩn cho đến khi lộ
+    diện)"` for every player, `"Bắt đầu ván đấu: mọi tướng đều ẩn, sẽ lộ diện dần khi từng người
+    vào lượt của mình"` as the summary).
+
+**Addendum -- skill-availability gating + Peach-as-Slash/Jink (closing the last 2 documented
+gaps).** User asked to close everything still marked deferred. The 2 remaining real gaps
+(珠联璧合 paired bonuses, 阵法技/围攻/队列 formation skills) stayed blocked -- still zero references
+in the entire 44-general ported roster, still no fabricatable data. The other 2 were closeable:
+
+- **Skill availability gated by reveal state.** Real rule: a hidden general's abilities can't be
+  used until it's revealed. Closed without touching any of the ~40 existing mechanical call
+  sites across `skill.ts`/`combat.ts`/`trick.ts`/`room.ts` that iterate `player.skills` --
+  `player.ts`'s `skills` became a computed GETTER instead of a plain field: backed by a new
+  private `_skills` + `mainSkillCount` (which of the declared kit's entries belong to the main
+  general, set by `Room.pickGenerals`'s Hegemony branch right after assigning `skills`), it
+  returns only the revealed general(s)' slice once a real `deputyGeneral` is drafted, and falls
+  through to the full unfiltered list otherwise (Identity mode never sets `deputyGeneral`, so
+  it's a strict superset with zero behavior change there -- confirmed by the full existing suite
+  passing unmodified). New `allSkills` getter always returns the full declared kit regardless of
+  reveal state, for the one legitimate case that needs it: a player's own hero panel (`server.ts`
+  `personalize()`'s own-seat override now sends `real.allSkills`, not `real.skills` -- you always
+  know your own drafted kit, you just can't USE the hidden half yet, same asymmetry already built
+  for general names/kingdom). `snapshot()`'s per-OTHER-player skills field was simplified to just
+  `p.skills.map(...)` (no more separate `kingdomKnown` condition needed -- the getter is already
+  precisely gated per-general, strictly more accurate than the old all-or-nothing check).
+  - A real bug caught live during verification (see below) while testing this: none needed --
+    this one worked correctly on the first live pass, since the getter-based design meant every
+    consumer inherited correct behavior automatically with no call-site logic to get wrong.
+  - **Test:** `testHegemonySkillsGatedByReveal` (pure): empty while both hidden, exactly the
+    main's skills once main reveals, the full union once both do; `allSkills` always full;
+    a no-deputy player is never gated. `testHegemonyDraftPicksSameKingdomPairWithCombinedStats`
+    updated to assert `skills` is empty and `allSkills` holds the union right after the draft
+    (before this addendum it asserted `skills` held the union directly, since gating didn't
+    exist yet).
+
+- **Peach playable as Slash/Jink once Ao Chiến disables its heal.** `combat.ts`'s
+  `findSlashLikeCard`/`findJinkLikeCard`/`allSlashLikeCards` all gained an `aoChienActive`
+  parameter (default `false`) that makes a held Peach match, threaded through every real
+  gameplay call site: `resolveSlash`'s dodge search (both the first Jink and Wushuang-style
+  multi-Jink loop), `Room`'s bot fixed-pass Slash search (`tryPlaySlash`) and freeform legal-
+  action offering (`computeLegalActions`), `trick.ts`'s Duel forced-Slash exchange, Savage
+  Assault's discard-or-take-damage choice, Archery Attack's discard-Jink-or-take-damage choice,
+  and Jiaxu's Luanwu forced-Slash (`skill.ts`). Reused the exact same `EngineContext.aoChienActive`
+  field the heal-disable half (`findRescueCard`) already had; `Room` methods without a `ctx` in
+  scope read `this.aoChienActive` directly.
+  - **Bug found and fixed while implementing this:** a line-numbered edit targeting stale
+    (pre-shift) line numbers landed a duplicate `allSlashLikeCards` definition and orphaned the
+    back half of `findDismantlementLikeCard`/`allDismantlementLikeCards`, breaking the file's
+    syntax. Caught immediately by the very next `tsc --noEmit` (which is exactly why every edit
+    in this log is followed by one) before it ever reached a test run or live server; fixed by
+    re-reading the corrupted region fresh and reconstructing it in one clean replacement, then
+    re-verified with a full `tsc` + `npm run sim` pass before continuing.
+  - **Test:** `testAoChienLetsPeachSubstituteForSlashAndJink` (pure): a bare held Peach is never
+    Slash/Jink-like without Ao Chiến, and always found (both `find*` and `all*`) with it active.
+- **Verification, three layers:** (1) `npx tsc --noEmit` clean; `npm run sim` 76/76 passing (74
+  pre-existing + these 2 new). (2) Live `ws` server: a real 6-player game reached a genuine
+  `aoChienActive: true` state and the subsequent log showed the heal-block still holding (a
+  player reached 0 hp and died with no `dùng Đào để hồi phục`/rescue line despite the earlier
+  Ao-Chiến trigger); a separate full 10-player run completed with zero uncaught errors despite
+  the new threading across `combat.ts`/`room.ts`/`trick.ts`/`skill.ts`. (3) Real headless-browser
+  run: claimed a seat, drafted a real pair, confirmed via `lastState` that the OWN hero panel's
+  `skills` array held both generals' full skill list even with `mainRevealed`/`deputyRevealed`
+  both still `false` (proving `allSkills` -- not the gated `skills` -- drives the own-seat
+  display), and the panel rendered correctly on screen (both generals' names, all 3 skills'
+  descriptions, the RoundStart reveal prompt underneath) with no visual breakage.
+
+**Addendum -- checked against the REAL upstream source (`github.com/Mogara/QSanguosha-For-
+Hegemony`, `dev` branch), not just this repo's own ported subset.** User asked to check the
+actual upstream C++ repo directly rather than rely on secondary research. Fetched and grepped
+`src/core/general.{h,cpp}`, `src/package/formation.{h,cpp}`, `src/package/standard-{shu,wei,wu,
+qun}-generals.cpp`, `src/server/room.cpp`, `src/server/gamerule.cpp` directly. Findings:
+
+- **珠联璧合 (companion pairs) turned out to be REAL and extractable, overturning the prior
+  "no fabricatable data" conclusion.** `General::addCompanion()`/`isCompanionWith()` in
+  `core/general.h`/`.cpp` confirm the mechanic; grepping all 4 `standard-*-generals.cpp` files'
+  `addCompanion()` calls found 19 raw pairs, of which **9 have BOTH sides in this port's
+  44-general roster** (the rest pair a ported general with an unported one, e.g. Liu Bei/Sun
+  Quan/Pang Tong/Xiahou Yuan/Yuan Shao -- correctly excluded, since the bonus needs both halves
+  of your OWN drafted pair to be companions with each other): `zhugeliang↔huangyueying`,
+  `zhaoyun↔liushan`, `huangzhong↔weiyan`, `menghuo↔zhurong`, `caocao↔dianwei`, `caocao↔xuchu`,
+  `caopi↔zhenji`, `zhouyu↔huanggai`, `lvbu↔diaochan`. Ported as `gamerule.ts`'s
+  `COMPANION_PAIRS` + `isCompanionPair()`.
+- **The exact bonus mechanic and its exact TRIGGER MOMENT**, found in `gamerule.cpp`'s
+  `GeneralShown` case: the instant `player->hasShownAllGenerals()` (both main+deputy revealed),
+  (a) if `general1->isCompanionWith(general2)`, offer a one-time choice: recover 1 hp (only
+  while wounded) OR draw 2 cards OR decline; (b) if the pair's combined HP left an unpaired half
+  (`max_hp % 2`), separately offer a one-time optional draw-1 choice. This REVISES this port's
+  prior simplification (the odd-half bonus draw used to be automatic, granted silently at
+  draft/initial-hand time) -- now correctly moved to the real trigger moment and made a real
+  choice, and the companion bonus (previously entirely unimplemented) is now added.
+- **The HP formula (`combineHegemonyHp`) was independently CONFIRMED exact**, not just
+  plausible: `room.cpp`'s setup does `max_hp = general1->getMaxHpHead() +
+  general2->getMaxHpDeputy(); setMaxHp(max_hp / 2); setPlayerMark("HalfMaxHpLeft", max_hp % 2)`
+  -- both `getMaxHp{Head,Deputy}` resolve to the general's own plain printed HP at initial setup,
+  i.e. exactly this repo's existing `GeneralDef.maxHp`. No code change needed here, just
+  certainty the existing formula was always correct.
+- **Still out of scope, now confirmed via real source instead of just "not found in this repo's
+  own roster":** `src/package/formation.cpp` (53KB, genuinely real, substantial) covers 阵法技
+  (formation skills) for generals that are NOT any of the 44 already ported here -- porting them
+  means porting whole new generals from scratch, a different kind of gap than "wire up a
+  mechanic the existing roster already needs". Kingdom-wide LORD-SKILL bonuses (`shouyue` etc.,
+  gated on `lord->hasLordSkill(...) && lord->hasShownGeneral1()`) are a genuinely separate
+  Hegemony-only subsystem (a kingdom's "lord" general grants a team-wide passive once shown) --
+  confirmed real, still out of scope.
+
+**Implementation:**
+
+- `gamerule.ts` -- `COMPANION_PAIRS` (the 9 tuples above) + `isCompanionPair(mainGeneral,
+  deputyGeneral): boolean` (checks both orderings, matching upstream's own bidirectional
+  `getCompanions()` search). `combineHegemonyHp`'s doc comment updated with the exact upstream
+  citation; its formula itself was unchanged (already correct).
+- `controller.ts` -- 2 new `Controller` methods: `chooseCompanionBonus(player, canRecover):
+  Promise<"recover"|"draw"|"cancel">` and `wantsHalfMaxHpBonusDraw(player): Promise<boolean>`.
+  Bot defaults: recover if wounded and eligible else draw; always accept the half-hp draw.
+- `room.ts` -- removed the old automatic bonus-draw-at-draft-time mechanic (`bonusDrawPlayerIds`
+  set, +1 initial hand card) from `pickGenerals`'s Hegemony branch entirely. New private
+  `resolveHegemonyRevealBonuses(player)`, called from `runHegemonyReveal` exactly once, right
+  after a reveal completes `mainRevealed && deputyRevealed` (and only if the game didn't just
+  end from that same reveal) -- resolves the companion bonus via `isCompanionPair` + the ask,
+  then the half-hp bonus via `combineHegemonyHp(...).bonusDraw` + the ask, mirroring
+  `gamerule.cpp`'s `GeneralShown` handler's own order and conditions exactly.
+- `server.ts` -- 2 new human-controller ask handlers (`chooseCompanionBonus`,
+  `wantsHalfMaxHpBonusDraw`) following the exact same `askClient` pattern as every other ask;
+  fallback-on-timeout/disconnect matches the bot defaults.
+- `public/index.html` -- new `showCompanionBonusPrompt()` (3-button: recover-if-eligible/draw/
+  decline, mirrors `showRevealPrompt`'s structure) for `chooseCompanionBonus`; `confirmHalfMaxHpDraw`
+  reuses the existing generic `showConfirm()` (same as a dozen other yes/no prompts already
+  wired) with its own title/copy, added to the `isPromptType` dispatch list.
+- **Test:** new `testHegemonyRevealCompletionBonuses` (integration, via a real `Room`): forces a
+  specific companion pair (`zhaoyun`+`liushan`, chosen because it's BOTH a real companion pair
+  AND leaves a leftover half -- exercises both bonuses from one draft) by having the test
+  controller's `chooseGeneral` ignore the offered candidates and return the exact desired
+  `GeneralDef` (Room doesn't validate the returned general against what was offered, so this is
+  a legitimate way to pin down an otherwise-random draft for a test); asserts both asks fire
+  with the correct `canRecover` (false undamaged, true once wounded via `damagePlayer`), the
+  recover choice heals exactly 1 hp, and a control case (`huangzhong`+`zhurong`, neither a
+  companion pair nor leftover-half) asks neither.
+- **Verification, three layers:** (1) `npx tsc --noEmit` clean; `npm run sim` 77/77 passing (76
+  pre-existing unmodified + this 1 new). (2) Live `ws` server, scripted against the real running
+  process (not simulate.ts): repeated real games found and confirmed all 3 log lines actually
+  fire -- `"P7 rút 1 lá (thể lực lẻ nửa)"` (half-hp draw), `"P8 hồi 1 máu (珠联璧合)"` (companion
+  recover), `"P1 rút 2 lá (珠联璧合)"` (companion draw). (3) A separate ws script claimed a real
+  seat (the human-controller path, `server.ts`'s `askClient`, not the bot-controller path used
+  above) and received a real `chooseCompanionBonus` message from the live server with the exact
+  shape the browser UI's `showCompanionBonusPrompt` reads (`canRecover: true, mainGeneralName:
+  "Mạnh Hoạch", deputyGeneralName: "Chúc Dung", requestId, timeoutMs`), responded with the same
+  `{type:"response", choice:"recover"}` shape the real UI sends, and the server accepted it --
+  confirming the exact network contract the new prompt UI depends on, end to end.
+
 ## Deploy
 
 This is a single stateless Node process (`src/server.ts`) with everything in memory -- no

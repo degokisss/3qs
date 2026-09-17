@@ -22,9 +22,41 @@ export class GamePlayer {
   general = ""; // set by Room from skill.ts's GENERALS; empty until assigned (pinyin id, e.g. "caocao" -- drives asset filenames)
   generalName = ""; // Vietnamese display name (e.g. "Tào Tháo"), set alongside `general` from GeneralDef.displayName
   kingdom = ""; // "wei"/"shu"/"wu"/"qun", set alongside general
+  /** Hegemony mode only (stays "" in Identity mode): the paired DEPUTY general's pinyin id/
+   *  display name, alongside `general`/`generalName` above which hold the MAIN general of the
+   *  pair. Both share `kingdom`; skills/HP/gender are the combined pair (see
+   *  `Room.pickGenerals`'s Hegemony branch and `gamerule.ts`'s `combineHegemonyHp`). */
+  deputyGeneral = "";
+  deputyGeneralName = "";
   gender: "male" | "female" = "male"; // set alongside general from GeneralDef.gender (defaults
   // male -- see skill.ts's GeneralDef doc comment); needed by DoubleSword's opposite-gender check
-  skills: Skill[] = [];
+  private _skills: Skill[] = [];
+  /** Hegemony mode only: how many of `_skills` (declaration order) belong to the MAIN general
+   *  -- the rest belong to the deputy. Set by `Room.pickGenerals`'s Hegemony branch right after
+   *  assigning `skills`; stays 0 everywhere else (Identity mode, or before a Hegemony player's
+   *  deputy is drafted), which combined with `deputyGeneral === ""` there means the `skills`
+   *  getter below returns the full list unfiltered -- no gating concept applies outside an
+   *  actual drafted Hegemony pair. */
+  mainSkillCount = 0;
+  /** Milestone 23 (Hegemony/Quốc Chiến mode only -- stays "" in Identity mode, which keeps using
+   *  `role` above): the player's team key. Team players (Wei/Shu/Wu/Qun) share their kingdom
+   *  string ("wei"/"shu"/"wu"/"qun"); an Ambitionist (野心-家 -- a kingdom's overflow player past
+   *  the official half-table quota, see gamerule.ts) gets a unique `"ambitionist:<id>"` key so
+   *  they never coincidentally ally with anyone, including another Ambitionist. See gamerule.ts's
+   *  `isAlly`: a non-empty `faction` always takes precedence over the legacy `role`-based check,
+   *  so Identity mode (which never sets this field) is byte-for-byte unaffected. */
+  faction = "";
+  /** True only for a Hegemony-mode Ambitionist (see `faction` above) -- must eliminate every
+   *  other living player alone to win; kept as its own flag (redundant with `faction`'s prefix)
+   *  purely so call sites don't need to string-match. */
+  isAmbitionist = false;
+  /** Hegemony mode only (Milestone 23 addendum "暗置/明置" reveal system, both stay false in
+   *  Identity mode): whether the main/deputy general is currently face-up. Both start face-down
+   *  -- kingdom (and therefore `faction`/`isAmbitionist` above, which only get assigned the
+   *  FIRST time either flips true, see `Room.runHegemonyReveal`) stays unknown to OTHER players
+   *  until then. Revealing either general reveals the kingdom (both share one, by construction). */
+  mainRevealed = false;
+  deputyRevealed = false;
   /** One-shot additive damage bonus armed by a skill (e.g. Luoyi), consumed by the next
    *  applyDamage this player deals, then reset to 0. */
   pendingBonusDamage = 0;
@@ -62,6 +94,32 @@ export class GamePlayer {
 
   get handcardNum(): number {
     return this.hand.length;
+  }
+
+  /**
+   * Milestone 23 (2nd reveal-TIMING addendum -- skill-availability gating): in Hegemony mode,
+   * once a player has drafted a real deputy, only a REVEALED general's skills actually fire --
+   * every mechanical consumer across skill.ts/combat.ts/trick.ts/room.ts iterates `player.skills`
+   * for real hook-firing, so gating it HERE means every one of those ~40 call sites respects
+   * reveal state automatically, with zero call-site changes. Falls through to the full
+   * unfiltered list whenever gating doesn't apply: Identity mode (`deputyGeneral` never gets
+   * set there) and Hegemony BEFORE a pair is drafted both hit the `!this.deputyGeneral` branch.
+   * Use `allSkills` instead when you specifically want the full declared kit regardless of
+   * reveal state (e.g. a player's own hero panel, which should show what they drafted even
+   * before choosing to reveal it to anyone else -- see server.ts's `personalize`).
+   */
+  get skills(): Skill[] {
+    if (!this.deputyGeneral) return this._skills;
+    const active: Skill[] = [];
+    if (this.mainRevealed) active.push(...this._skills.slice(0, this.mainSkillCount));
+    if (this.deputyRevealed) active.push(...this._skills.slice(this.mainSkillCount));
+    return active;
+  }
+  set skills(value: Skill[]) {
+    this._skills = value;
+  }
+  get allSkills(): Skill[] {
+    return this._skills;
   }
 
   // Player::getMaxCards(MaxCardsType::Normal) simplifies (absent skills/equip) to current HP.

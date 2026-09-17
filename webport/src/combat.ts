@@ -72,8 +72,11 @@ function takeCard(hand: Card[], kind: CardKind): Card | null {
   return hand.splice(idx, 1)[0];
 }
 
-/** A real Jink card, or (e.g. Longdan/Qingguo) the first card some skill allows viewing as Jink. */
-export function findJinkLikeCard(player: GamePlayer): Card | null {
+/** A real Jink card, or (e.g. Longdan/Qingguo) the first card some skill allows viewing as
+ *  Jink, or (Ao Chiến, Hegemony's late-game rule) a held Peach -- once Ao Chiến disables
+ *  Peach's rescue/heal effect (see `findRescueCard`'s own `aoChienActive` gate), the real rule
+ *  lets it substitute for Slash or Jink instead. */
+export function findJinkLikeCard(player: GamePlayer, aoChienActive = false): Card | null {
   const real = player.hand.find((c) => c.kind === CardKind.Jink);
   if (real) return real;
   for (const skill of player.skills) {
@@ -81,16 +84,23 @@ export function findJinkLikeCard(player: GamePlayer): Card | null {
     const viewed = player.hand.find((c) => skill.canViewAsJink!(c, player));
     if (viewed) return viewed;
   }
+  if (aoChienActive) {
+    const peach = player.hand.find((c) => c.kind === CardKind.Peach);
+    if (peach) return peach;
+  }
   return null;
 }
 
 /** A real Peach or Analeptic card (both heal 1 hp during a dying rescue -- see Analeptic's OTHER,
  *  Play-phase-only damage-boost use in `resolveAnalepticBuff`/`resolveSlash`'s consumption of
  *  `pendingSlashBonusDamage` below), or (e.g. Jijiu) the first card some skill allows viewing as
- *  a Peach. */
-function findRescueCard(player: GamePlayer): Card | null {
-  const real = player.hand.find((c) => c.kind === CardKind.Peach || c.kind === CardKind.Analeptic);
+ *  a Peach. `aoChienActive` (Hegemony's late-game rule): once true, Peach (real OR any
+ *  canViewAsPeach substitution -- both are the same "played as Peach" rescue) no longer rescues
+ *  at all; Analeptic's rescue is untouched (the real rule only restricts 桃/Peach specifically). */
+function findRescueCard(player: GamePlayer, aoChienActive: boolean): Card | null {
+  const real = player.hand.find((c) => c.kind === CardKind.Analeptic || (!aoChienActive && c.kind === CardKind.Peach));
   if (real) return real;
+  if (aoChienActive) return null;
   for (const skill of player.skills) {
     if (!skill.canViewAsPeach) continue;
     const viewed = player.hand.find((c) => skill.canViewAsPeach!(c, player));
@@ -109,14 +119,19 @@ function rescueCardLabel(card: Card): "peach" | "analeptic" | null {
   return null;
 }
 
-/** A real Slash card, or (e.g. Wusheng/Longdan) the first card some skill allows viewing as Slash. */
-export function findSlashLikeCard(player: GamePlayer): Card | null {
+/** A real Slash card, or (e.g. Wusheng/Longdan) the first card some skill allows viewing as
+ *  Slash, or (Ao Chiến) a held Peach -- see `findJinkLikeCard`'s doc comment for why. */
+export function findSlashLikeCard(player: GamePlayer, aoChienActive = false): Card | null {
   const real = player.hand.find((c) => c.kind === CardKind.Slash);
   if (real) return real;
   for (const skill of player.skills) {
     if (!skill.canViewAsSlash) continue;
     const viewed = player.hand.find((c) => skill.canViewAsSlash!(c, player));
     if (viewed) return viewed;
+  }
+  if (aoChienActive) {
+    const peach = player.hand.find((c) => c.kind === CardKind.Peach);
+    if (peach) return peach;
   }
   // Fan (weapon): any ONE held non-Slash card may be played/discarded as if it were a Slash --
   // same single-card viewAs shape as Wusheng/Longdan above, just weapon-gated instead of
@@ -130,14 +145,20 @@ export function findSlashLikeCard(player: GamePlayer): Card | null {
 }
 
 /** Every real Slash card plus every card a skill allows viewing as Slash (e.g. Wusheng/Longdan)
- *  -- unlike `findSlashLikeCard`, returns ALL matches, not just the first, for a freeform Play
- *  phase's legal-action list (see room.ts's `computeLegalActions`). */
-export function allSlashLikeCards(player: GamePlayer): Card[] {
+ *  plus (Ao Chiến) every held Peach -- unlike `findSlashLikeCard`, returns ALL matches, not
+ *  just the first, for a freeform Play phase's legal-action list (see room.ts's
+ *  `computeLegalActions`). */
+export function allSlashLikeCards(player: GamePlayer, aoChienActive = false): Card[] {
   const cards = player.hand.filter((c) => c.kind === CardKind.Slash);
   for (const skill of player.skills) {
     if (!skill.canViewAsSlash) continue;
     for (const c of player.hand) {
       if (c.kind !== CardKind.Slash && skill.canViewAsSlash(c, player) && !cards.includes(c)) cards.push(c);
+    }
+  }
+  if (aoChienActive) {
+    for (const c of player.hand) {
+      if (c.kind === CardKind.Peach && !cards.includes(c)) cards.push(c);
     }
   }
   if (player.weapon?.weaponName === "Fan") {
@@ -353,6 +374,12 @@ export interface EngineContext {
    *  fires `onEquipLost` on `target`), just retargetable to someone other than the card's
    *  original owner. */
   equipPlayer: (target: GamePlayer, card: Card) => Promise<void>;
+  /** Hegemony mode only (Milestone 23 addendum "Ao Chiến"/鏖战, always false in Identity mode):
+   *  once true, Peach no longer rescues/heals anyone for the rest of the game -- instead
+   *  (matching the real rule exactly) it becomes playable/discardable as Slash or Jink, see
+   *  `findRescueCard`'s own gate for the heal-disable half and `findSlashLikeCard`/
+   *  `findJinkLikeCard`/`allSlashLikeCards`'s `aoChienActive` param for the substitution half. */
+  aoChienActive: boolean;
 }
 
 /** Vietnamese card-suit names for judge-card log lines (Ganglie/Tieqi/Shuangxiong/Leiji/Beige/
@@ -457,13 +484,13 @@ export async function resolveSlash(
   const requiredJinks = dodgeBlocked
     ? 0
     : Math.max(1, ...effectiveTarget.skills.map((s) => s.responseCountRequired?.("dodge", effectiveTarget) ?? 1));
-  const firstJink = requiredJinks > 0 ? findJinkLikeCard(effectiveTarget) : null;
+  const firstJink = requiredJinks > 0 ? findJinkLikeCard(effectiveTarget, ctx.aoChienActive) : null;
   if (firstJink && (await ctx.askDodge(effectiveTarget))) {
     const spent = [firstJink];
     effectiveTarget.hand.splice(effectiveTarget.hand.indexOf(firstJink), 1);
     let allFound = true;
     for (let i = 1; i < requiredJinks; i++) {
-      const next = findJinkLikeCard(effectiveTarget);
+      const next = findJinkLikeCard(effectiveTarget, ctx.aoChienActive);
       if (!next) {
         allFound = false;
         break;
@@ -639,7 +666,7 @@ async function resolveDying(ctx: EngineContext, player: GamePlayer, killer?: Gam
   ctx.log.push(`${player.id} đang hấp hối (máu ${player.hp})`);
   await ctx.onDyingStarted?.(player);
   while (player.hp <= 0) {
-    const selfCard = findRescueCard(player);
+    const selfCard = findRescueCard(player, ctx.aoChienActive);
     if (selfCard && (await ctx.askPeach(player))) {
       player.hand.splice(player.hand.indexOf(selfCard), 1);
       ctx.discardPile.push(selfCard);
@@ -666,7 +693,7 @@ async function resolveDying(ctx: EngineContext, player: GamePlayer, killer?: Gam
     let rescued = false;
     for (let i = 1; i < n; i++) {
       const rescuer = ctx.alivePlayers[(dyingIdx + i) % n];
-      const card = findRescueCard(rescuer);
+      const card = findRescueCard(rescuer, ctx.aoChienActive);
       if (!card || !(await ctx.askPeachForOther(rescuer, player))) continue;
       rescuer.hand.splice(rescuer.hand.indexOf(card), 1);
       ctx.discardPile.push(card);

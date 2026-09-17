@@ -933,7 +933,7 @@ async function luanwuSelfAction(ctx: EngineContext, self: GamePlayer): Promise<v
     if (others.length === 0) continue;
     const minDist = Math.min(...others.map((o) => effectiveDistance(ctx.alivePlayers, p, o)));
     const nearest = others.filter((o) => effectiveDistance(ctx.alivePlayers, p, o) === minDist);
-    const slash = findSlashLikeCard(p);
+    const slash = findSlashLikeCard(p, ctx.aoChienActive);
     if (slash && (await ctx.askUseSelfAction(p, "luanwu-slash"))) {
       const target = nearest.length === 1 ? nearest[0] : ((await ctx.askChooseAnyPlayer(p, nearest)) ?? nearest[0]);
       p.hand.splice(p.hand.indexOf(slash), 1);

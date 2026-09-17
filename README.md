@@ -4,7 +4,7 @@ A Vietnamese fork of [QSanguosha](https://github.com/Mogara/QSanguosha) / [QSang
 
 The whole game (engine, WebSocket server, HTML/JS client) lives in **[`webport/`](webport/)**, a TypeScript implementation of the game rules written from scratch: state machine, cards, skills, combat, role assignment and win conditions.
 
-Game mode: standard **Role/Identity mode** (身份场) — Lord (Chủ công) + Loyalist (Trung thần) + Rebel (Phản tặc) + Renegade (Nội gián), 5–10 players.
+Two selectable game modes: standard **Role/Identity mode** (身份场) — Lord (Chủ công) + Loyalist (Trung thần) + Rebel (Phản tặc) + Renegade (Nội gián) — and **Hegemony / Quốc Chiến mode** (国战) — 4 kingdom teams (Ngụy/Thục/Ngô/Quần) with the official Ambitionist (Dã Tâm Gia) overflow rule. Both support 5–10 players.
 
 ## Play it
 
@@ -25,6 +25,7 @@ This is an active, ongoing reimplementation of the game rules. Current status, i
 - Full turn/phase state machine, all 4 roles, 5–10 player tables.
 - The complete Standard card pool actually dealt (85 cards: Slash-family, Jink, Peach, Analeptic, 8 trick cards, 16 equips), real Slash/Jink/Duel/dying-and-Peach-rescue resolution (including ally rescue, not just self-rescue).
 - 44 of the 46 investigated Standard generals and their skills (the rest need subsystems — judge-area/delayed tricks, armor, pindian, dual-generals — not built yet; see `webport/README.md` for the exact list and reasoning per general).
+- Hegemony/Quốc Chiến mode: kingdom-team setup + the official Ambitionist overflow rule + faction-based ally/win-condition logic + the real dual-general (主将/副將) system (each player drafts 2 same-kingdom generals, HP/skills/gender combine per the official rule) + the face-down/face-up (暗置/明置) reveal-TIMING mechanic (both generals start hidden — real fog-of-war, not just a client-side toggle — until each player chooses to reveal, which is also when their kingdom/Ambitionist status is finally decided, AND when their skills actually become usable — a hidden general's abilities are genuinely inert, not just visually hidden) + "Ao Chiến" (鏖战, once the table narrows to ≤4 distinct factions Peach stops healing and instead becomes playable as Slash or Jink) + 珠联璧合 companion-pair bonuses (a recover-or-draw choice, verified against the real upstream C++ source for the 9 companion pairs where both generals are actually ported here) + the leftover-half-HP bonus draw, both offered at the real trigger moment (the instant a player's 2nd general reveals), selectable per room from the lobby. Not built (checked directly against the real upstream C++ source, not just this repo's own roster): formation skills (阵法技/围攻/队列, a genuinely separate package of unported generals) and kingdom-wide lord-skill team bonuses (e.g. `shouyue`).
 - A lobby with multiple concurrent rooms, room codes, claimable seats (any unclaimed seat plays itself via a simple bot), a full turn-order general-pick screen, and an interactive draw-your-own-card / play-your-own-cards flow for claimed seats — not just yes/no prompts.
 
 For the detailed, milestone-by-milestone engineering log (what was ported from which upstream source file, what was deliberately simplified and why, test coverage, verification evidence) see **[`webport/README.md`](webport/README.md)**.

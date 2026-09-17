@@ -586,6 +586,12 @@
     border-radius: 50%; display: block; background: var(--ink);
     border: 1px solid var(--ink);
   }
+  .avatarHidden, .heroAvatarHidden {
+    width: 100%; height: 100%; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    background: #1c1f28; border: 1px solid #2f3340; color: var(--text-dim);
+    font-family: var(--font-display); font-size: 22px;
+  }
+  .heroAvatarHidden { font-size: 34px; }
   .info { flex: 1; min-width: 0; }
   .id { font-family: var(--font-label); font-weight: 700; font-size: 14px; color: var(--parchment); letter-spacing: 0.5px; }
   .seatIdTag { font-weight: 400; font-size: 10px; color: var(--text-dim); letter-spacing: 0.3px; margin-left: 3px; }
@@ -599,6 +605,7 @@
   .role-rebel { background: #3a1414; color: #f2a3a3; border: 1px solid #6b2323; }
   .role-renegade { background: #2c1338; color: #d3a3f2; border: 1px solid #52226b; }
   .role-hidden { background: #23262f; color: var(--text-dim); border: 1px solid #2f3340; }
+  .role-kingdom { background: color-mix(in srgb, var(--kcolor, #6f9bc2) 22%, #1a1a1a); color: var(--kcolor, #6f9bc2); border: 1px solid var(--kcolor, #6f9bc2); }
   .roleIcon { width: 13px; height: 13px; }
   .general { font-family: var(--font-label); font-size: 12px; color: var(--text-dim); text-transform: capitalize; margin-top: 1px; }
   .hp { margin: 7px 0 3px; display: flex; gap: 2px; }
@@ -882,6 +889,33 @@
     text-transform: uppercase;
   }
   #createRoomBtn:hover { background: #ddb95c; }
+  #modeToggleGroup { display: flex; gap: 6px; }
+  .modeToggleBtn {
+    background: #23262f;
+    color: var(--text-dim);
+    border: 1px solid #2f3340;
+    border-radius: 3px;
+    padding: 7px 14px;
+    cursor: pointer;
+    font-family: var(--font-label);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+  .modeToggleBtn.active { background: var(--gold-dim); color: var(--ink); border-color: var(--gold); }
+  .roomMode {
+    display: inline-block;
+    font-size: 9px;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    padding: 1px 6px;
+    border-radius: 3px;
+    margin-left: 6px;
+    background: #2a2410;
+    color: var(--gold-dim);
+    border: 1px solid #4a3e14;
+  }
   .roomEmpty { color: var(--text-dim); font-size: 13px; padding: 10px 0; }
   .roomRow {
     display: flex;
@@ -1013,6 +1047,10 @@
     <div id="lobbyPanel">
       <div id="lobbyHeading">Danh sách phòng</div>
       <div id="createRoomRow">
+        <div id="modeToggleGroup">
+          <button class="modeToggleBtn active" data-mode="identity" onclick="window.__selectRoomMode('identity')">Vai trò</button>
+          <button class="modeToggleBtn" data-mode="hegemony" onclick="window.__selectRoomMode('hegemony')">Quốc Chiến</button>
+        </div>
         <button id="createRoomBtn">Tạo phòng mới</button>
       </div>
       <div id="roomListEl"></div>
@@ -1073,6 +1111,7 @@
     const ROLE_LABEL = { lord: "Chủ công", loyalist: "Trung thần", rebel: "Phản tặc", renegade: "Nội gián" };
     const ROLE_ICON = { lord: true, renegade: true }; // only these two ship an image/system/roles/*.png
     const KINGDOM_VAR = { wei: "--wei", shu: "--shu", wu: "--wu", qun: "--qun" };
+    const AMBITIONIST_LABEL = "Dã Tâm Gia";
     const KINGDOM_LABEL = { wei: "Ngụy", shu: "Thục", wu: "Ngô", qun: "Quần" };
     const TRICK_LABEL = {
       ex_nihilo: "Vô Trung Sinh Hữu",
@@ -1135,6 +1174,7 @@
     let pendingSpearPick = null; // { requestId, hand } while choosing 2 cards for Spear (Trượng Bát Xà Mâu)
     let selectedSpearIds = new Set(); // cardIds toggled for the pending spear pick
     let myRoomId = null; // roomId this tab is currently watching, if any (null = in the lobby)
+    let selectedRoomMode = "identity"; // "identity" | "hegemony" -- which mode the NEXT created room uses (lobby-only choice, see createRoomBtn/createRoomRow)
     let pendingPrompt = null; // { requestId, candidateIds } while awaiting our own answer
     let lastState = null; // most recent state snapshot, for looking up a player's general/etc.
     let amICreator = false; // true if this tab created the room it's currently watching
@@ -1432,6 +1472,7 @@
           <div>
             <span class="roomCode">${r.id}</span>
             <span class="roomStatus roomStatus--${status.cls}">${status.label}</span>
+            <span class="roomMode">${r.mode === "hegemony" ? "Quốc Chiến" : "Vai trò"}</span>
             <span class="roomMeta">${r.seatsClaimed} người · ${r.botCount} bot · ${r.watchers} đang xem</span>
           </div>
           <button class="roomJoinBtn" onclick="window.__joinRoom('${r.id}')">${joinLabel}</button>
@@ -1440,6 +1481,10 @@
         .join("");
     }
     window.__joinRoom = (roomId) => send({ type: "joinRoom", roomId });
+    window.__selectRoomMode = (mode) => {
+      selectedRoomMode = mode;
+      document.querySelectorAll(".modeToggleBtn").forEach((btn) => btn.classList.toggle("active", btn.dataset.mode === mode));
+    };
 
     /** Library ("Thư viện"): browsable reference of every ported general's skills + every card
      *  kind's rules text -- reachable from the header at any time (lobby or mid-game), no room
@@ -1612,12 +1657,43 @@
       }
       return parts.join("");
     }
+    /** Player-card/hero-panel badge: Identity mode's existing Role badge, or Hegemony mode's
+     *  kingdom badge / Ambitionist marker (2 call sites -- renderPlayer's table card and
+     *  renderHero's own-hero panel -- both need the same mode+Ambitionist branch, mirroring
+     *  server.ts gamerule.ts's `factionLabelVI`). Hegemony's kingdom is visible from the start
+     *  (no reveal subsystem, see webport/README.md's Milestone 23 entry), so `masked` (the
+     *  shared-screen `hideOwnRole` privacy toggle) is the only thing that ever hides it. */
+    function factionBadge(p, masked) {
+      if (masked) return { cls: "role-hidden", label: "🙈", icon: "" };
+      if (lastState?.mode === "hegemony") {
+        if (!p.faction) return { cls: "role-hidden", label: "?", icon: "" };
+        if (p.isAmbitionist) return { cls: "role-renegade", label: AMBITIONIST_LABEL, icon: "" };
+        return { cls: "role-kingdom", label: KINGDOM_LABEL[p.kingdom] || p.kingdom, icon: "" };
+      }
+      return {
+        cls: p.role ? "role-" + p.role : "role-hidden",
+        label: p.role ? ROLE_LABEL[p.role] : "?",
+        icon: p.role && ROLE_ICON[p.role] ? `<img class="roleIcon" src="${IMG}/system/roles/${p.role}.png" alt="">` : "",
+      };
+    }
+    /** Player-card/hero-panel general-name text: Identity mode's plain name, or Hegemony's
+     *  "Main / Deputy" pair once the deputy pick has landed (2 call sites, same shape as
+     *  factionBadge). Checks the actual `general`/`deputyGeneral` field (null only for a still-
+     *  hidden OPPONENT, see server.ts snapshot's fog-of-war) rather than `mainRevealed`/
+     *  `deputyRevealed` directly -- personalize() always sends the claiming socket's OWN true
+     *  names regardless of reveal state (you obviously know your own generals), so gating on
+     *  the reveal flag itself would wrongly show "Ẩn" for your own not-yet-revealed-to-others
+     *  pair too. */
+    function generalDisplayName(p) {
+      if (lastState?.mode !== "hegemony") return p.generalName || p.general;
+      const mainLabel = p.general ? p.generalName || p.general : "Ẩn";
+      const deputyLabel = p.deputyGeneral ? p.deputyGeneralName || p.deputyGeneral : "Ẩn";
+      return `${mainLabel} / ${deputyLabel}`;
+    }
     function renderPlayer(p, state) {
       const gems = Array.from({ length: p.maxHp }, (_, i) => `<span class="gem ${i < p.hp ? "" : "lost"}"></span>`).join("");
       const maskRole = hideOwnRole && p.id === mySeat; // shared-screen privacy toggle -- see hideOwnRole
-      const roleCls = maskRole ? "role-hidden" : p.role ? "role-" + p.role : "role-hidden";
-      const roleLabel = maskRole ? "🙈" : p.role ? ROLE_LABEL[p.role] : "?";
-      const roleIcon = !maskRole && p.role && ROLE_ICON[p.role] ? `<img class="roleIcon" src="${IMG}/system/roles/${p.role}.png" alt="">` : "";
+      const badge = factionBadge(p, maskRole);
 
       const skillsHtml = (p.skills || [])
         .map((s) => `<div class="skill"><span class="skillName">◆ ${s.name}</span><span class="skillDesc">${s.description}</span></div>`)
@@ -1659,11 +1735,10 @@
       const style = kcolorVar ? ` style="--kcolor:var(${kcolorVar})"` : "";
       return `<div class="${classes.join(" ")}"${onclick}${style} data-player-id="${p.id}">
         <div class="playerHead">
-          <div class="avatarRing"><img class="avatar" src="${IMG}/generals/avatar/${p.general}.png" alt="${p.general}"
-               onerror="this.parentElement.style.visibility='hidden'"></div>
+          <div class="avatarRing">${p.general ? `<img class="avatar" src="${IMG}/generals/avatar/${p.general}.png" alt="${p.general}" onerror="this.parentElement.style.visibility='hidden'">` : `<div class="avatarHidden">?</div>`}</div>
           <div class="info">
-            <div class="id">${p.playerName ? `${escapeHtml(p.playerName)} <span class="seatIdTag">${p.id}</span>` : p.id}<span class="role ${roleCls}">${roleLabel}</span>${roleIcon}</div>
-            <div class="general">${p.generalName || p.general}</div>
+            <div class="id">${p.playerName ? `${escapeHtml(p.playerName)} <span class="seatIdTag">${p.id}</span>` : p.id}<span class="role ${badge.cls}">${badge.label}</span>${badge.icon}</div>
+            <div class="general">${generalDisplayName(p)}</div>
             <div class="hp">${gems}</div>
           </div>
         </div>
@@ -1702,13 +1777,12 @@
       myHeroEl.className = "active";
       if (kcolorVar) myHeroEl.style.setProperty("--kcolor", `var(${kcolorVar})`);
       myHeroEl.innerHTML = `
-        <div class="heroAvatarRing"><img class="heroAvatar" src="${IMG}/generals/avatar/${p.general}.png" alt="${p.general}"
-             onerror="this.parentElement.style.visibility='hidden'"></div>
+        <div class="heroAvatarRing">${p.general ? `<img class="heroAvatar" src="${IMG}/generals/avatar/${p.general}.png" alt="${p.general}" onerror="this.parentElement.style.visibility='hidden'">` : `<div class="heroAvatarHidden">?</div>`}</div>
         <div class="heroInfo">
           <div class="heroLabel">Tướng của bạn — ${p.id}${p.alive ? "" : " (đã mất)"}</div>
           <div class="heroTopRow">
-            <span class="heroName">${p.generalName || p.general}</span>
-            <span class="heroGeneral">${hideOwnRole ? "🙈 Ẩn" : p.role ? ROLE_LABEL[p.role] : ""}</span>
+            <span class="heroName">${generalDisplayName(p)}</span>
+            <span class="heroGeneral">${hideOwnRole ? "🙈 Ẩn" : factionBadge(p, false).label}</span>
           </div>
           <div class="heroHp">${gems}</div>
           <div class="equipRow">${equipIcons(p) || '<span class="equipEmpty">Không trang bị</span>'}</div>
@@ -1900,7 +1974,12 @@
      *  the asked player's own candidates are ever sent to that player's socket. */
     function renderPickGeneral() {
       if (pendingGeneralPick) {
-        pickGeneralHintEl.textContent = "Lượt của bạn — lật và chọn 1 trong 3 tướng";
+        pickGeneralHintEl.textContent =
+          pendingGeneralPick.role === "main"
+            ? "Lượt của bạn — lật và chọn TƯỚNG CHÍNH trong 3 tướng (Quốc Chiến: quyết định thế lực của bạn)"
+            : pendingGeneralPick.role === "deputy"
+              ? "Lượt của bạn — lật và chọn TƯỚNG PHÓ (cùng thế lực với tướng chính) trong 3 tướng"
+              : "Lượt của bạn — lật và chọn 1 trong 3 tướng";
         pickGeneralCardsEl.innerHTML = pendingGeneralPick.candidates
           .map((g, i) => {
             if (!flippedGeneralIndices.has(i)) {
@@ -1980,9 +2059,19 @@
         centerTurnEl.textContent = "Chưa bắt đầu";
         centerActingEl.textContent = "";
       } else {
-        const winnerLabel = over ? state.gameOver.winners.map((w) => ROLE_LABEL[w]).join(" + ") : "";
+        let winnerLabel = "";
+        if (over) {
+          if (state.mode === "hegemony") {
+            const winner = state.players.find((p) => state.gameOver.winners.includes(p.id));
+            winnerLabel = winner?.isAmbitionist
+              ? `${AMBITIONIST_LABEL} (${nameFor(winner.id, state.players)})`
+              : KINGDOM_LABEL[winner?.kingdom] || winner?.faction || "";
+          } else {
+            winnerLabel = state.gameOver.winners.map((w) => ROLE_LABEL[w]).join(" + ");
+          }
+        }
         turnBannerEl.textContent = over ? `${winnerLabel} chiến thắng` : "";
-        centerTurnEl.textContent = `Lượt ${state.turnNumber}`;
+        centerTurnEl.textContent = `Lượt ${state.turnNumber}${state.aoChienActive ? " · Ao Chiến (Đào hết tác dụng hồi máu)" : ""}`;
         centerActingEl.textContent = over ? "Ván đấu kết thúc" : `Đang đi: ${state.currentPlayerId ? nameFor(state.currentPlayerId, state.players) : "-"}`;
         centerWinnerEl.innerHTML = over
           ? `👑 ${winnerLabel} chiến thắng!<span class="winnerSub">Ván đấu kết thúc — mọi vai trò đã lộ diện</span>`
@@ -2100,6 +2189,86 @@
           close();
         };
       });
+      startPromptCountdown(msg.requestId, msg.timeoutMs, close);
+    }
+
+    /** Hegemony reveal-TIMING prompt (Milestone 23 addendum "暗置/明置"): at the start of a human
+     *  seat's own turn while anything is still hidden, offer a button per still-hidden general
+     *  plus "Giữ kín" (stay hidden, the always-available default) -- multiple buttons may be
+     *  clicked in sequence before confirming, since real Sanguosha allows revealing BOTH at
+     *  once. Auto-closes on timeout -- the server's own fallback is "stay hidden", never forced. */
+    function showRevealPrompt(msg) {
+      promptOverlayEl.className = "active";
+      let revealMain = false;
+      let revealDeputy = false;
+      const render = () => {
+        const buttons = [];
+        if (msg.mainHidden) {
+          buttons.push(
+            `<button id="revealMainBtn" class="${revealMain ? "confirmYes" : ""}">${revealMain ? "✓ " : ""}Minh trí CHỦ tướng${msg.mainGeneralName ? ` (${msg.mainGeneralName})` : ""}</button>`,
+          );
+        }
+        if (msg.deputyHidden) {
+          buttons.push(
+            `<button id="revealDeputyBtn" class="${revealDeputy ? "confirmYes" : ""}">${revealDeputy ? "✓ " : ""}Minh trí PHÓ tướng${msg.deputyGeneralName ? ` (${msg.deputyGeneralName})` : ""}</button>`,
+          );
+        }
+        promptEl.innerHTML = `
+          <div class="promptTitle">Lượt của bạn — minh trí (lộ diện) tướng?</div>
+          <div class="promptSub">Không bắt buộc, có thể giữ kín — còn <span id="promptCountdown">${Math.ceil(msg.timeoutMs / 1000)}</span>s để trả lời</div>
+          ${buttons.join("")}
+          <button id="revealConfirmBtn">${revealMain || revealDeputy ? "Xác nhận" : "Giữ kín"}</button>`;
+        if (msg.mainHidden) {
+          document.getElementById("revealMainBtn").onclick = () => {
+            revealMain = !revealMain;
+            render();
+          };
+        }
+        if (msg.deputyHidden) {
+          document.getElementById("revealDeputyBtn").onclick = () => {
+            revealDeputy = !revealDeputy;
+            render();
+          };
+        }
+        document.getElementById("revealConfirmBtn").onclick = () => {
+          send({ type: "response", requestId: msg.requestId, main: revealMain, deputy: revealDeputy });
+          close();
+        };
+      };
+      const close = () => {
+        clearPromptCountdown();
+        promptOverlayEl.className = "";
+        promptEl.innerHTML = "";
+      };
+      render();
+      startPromptCountdown(msg.requestId, msg.timeoutMs, close);
+    }
+
+    /** Hegemony companion-bonus prompt (Milestone 23 addendum 5, 珠联璧合): fires once, the instant
+     *  a human seat's SECOND general reveals, ONLY when their drafted pair is a real companion
+     *  pair. "Hồi 1 máu" only shows while wounded (mirrors the real rule's own conditional 3rd
+     *  choice); "Bỏ qua" is always available. Auto-closes on timeout -- server fallback matches
+     *  the bot default (recover if wounded/eligible, else draw), never silently drawn/healed. */
+    function showCompanionBonusPrompt(msg) {
+      promptOverlayEl.className = "active";
+      promptEl.innerHTML = `
+        <div class="promptTitle">Châu Liên Bích Hợp (珠联璧合)!</div>
+        <div class="promptSub">${msg.mainGeneralName || ""} + ${msg.deputyGeneralName || ""} là cặp tướng đồng hành — còn <span id="promptCountdown">${Math.ceil(msg.timeoutMs / 1000)}</span>s để trả lời</div>
+        ${msg.canRecover ? '<button id="companionRecoverBtn" class="confirmYes">Hồi 1 máu</button>' : ""}
+        <button id="companionDrawBtn">Rút 2 lá</button>
+        <button id="companionCancelBtn">Bỏ qua</button>`;
+      const close = () => {
+        clearPromptCountdown();
+        promptOverlayEl.className = "";
+        promptEl.innerHTML = "";
+      };
+      const answer = (choice) => {
+        send({ type: "response", requestId: msg.requestId, choice });
+        close();
+      };
+      if (msg.canRecover) document.getElementById("companionRecoverBtn").onclick = () => answer("recover");
+      document.getElementById("companionDrawBtn").onclick = () => answer("draw");
+      document.getElementById("companionCancelBtn").onclick = () => answer("cancel");
       startPromptCountdown(msg.requestId, msg.timeoutMs, close);
     }
 
@@ -2285,6 +2454,16 @@
           renderPickGeneral();
           return;
         }
+        if (msg.type === "chooseReveal") {
+          if (msg.actorId !== mySeat) return; // a prompt for a seat this tab doesn't control
+          showRevealPrompt(msg);
+          return;
+        }
+        if (msg.type === "chooseCompanionBonus") {
+          if (msg.actorId !== mySeat) return; // a prompt for a seat this tab doesn't control
+          showCompanionBonusPrompt(msg);
+          return;
+        }
         if (msg.type === "chooseFreeAction") {
           if (msg.actorId !== mySeat) return; // a prompt for a seat this tab doesn't control
           if (lastState) lastState.myHand = msg.hand; // server only re-broadcasts full state once
@@ -2357,6 +2536,7 @@
           "confirmDoubleSword",
           "confirmDiscardDoubleSword",
           "confirmSelfAction",
+          "confirmHalfMaxHpDraw",
         ].includes(msg.type);
         if (isPromptType) {
           if (msg.actorId !== mySeat) return; // a prompt for a seat this tab doesn't control
@@ -2411,6 +2591,8 @@
               msg.skillDescription || "Bạn có muốn dùng kỹ năng này ngay bây giờ không?",
             );
           }
+          else if (msg.type === "confirmHalfMaxHpDraw")
+            showConfirm(msg, `${IMG}/system/card-back.png`, "Thể lực lẻ nửa!", "Cặp tướng của bạn dư nửa thể lực — rút 1 lá?");
           return;
         }
       };
@@ -2435,7 +2617,7 @@
         send({ type: "leaveRoom" });
       };
       createRoomBtn.onclick = () => {
-        send({ type: "createRoom" });
+        send({ type: "createRoom", mode: selectedRoomMode });
       };
       startGameBtn.onclick = () => {
         send({ type: "startGame" });

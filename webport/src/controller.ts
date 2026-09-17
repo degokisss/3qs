@@ -78,8 +78,30 @@ export function pickLeastImportantCards(hand: Card[], count: number): Card[] {
 
 export interface Controller {
   /** Milestone 6: `candidates` is always non-empty (never returns null -- every player must end
-   *  up with a general; Room falls back to `candidates[0]` if this somehow returns a falsy value). */
-  chooseGeneral(candidates: GeneralDef[]): Promise<GeneralDef>;
+   *  up with a general; Room falls back to `candidates[0]` if this somehow returns a falsy value).
+   *  `role` (Hegemony mode only, see `Room.pickGenerals`'s Hegemony branch): `"main"` for the
+   *  first of the pair, `"deputy"` for the second (already filtered to the main's kingdom) --
+   *  purely informational, lets a human ask show which slot is being picked; bots ignore it. */
+  chooseGeneral(candidates: GeneralDef[], role?: "main" | "deputy"): Promise<GeneralDef>;
+  /** Hegemony mode only (Milestone 23 addendum "暗置/明置" reveal system), asked at the start of
+   *  `player`'s own turn while anything is still hidden (`Room.runHegemonyReveal`, `Phase.
+   *  RoundStart`) -- `mainHidden`/`deputyHidden` say which slot(s) are still eligible; the
+   *  returned `main`/`deputy` say which to reveal THIS turn (either, both, or neither -- staying
+   *  hidden is a valid choice with no forced timeout in the real rule). Never asked once both
+   *  are already revealed. */
+  chooseReveal(player: GamePlayer, mainHidden: boolean, deputyHidden: boolean): Promise<{ main: boolean; deputy: boolean }>;
+  /** Hegemony mode only, fires exactly once for `player`, the instant their SECOND general
+   *  reveals (`hasShownAllGenerals`, see `Room.runHegemonyReveal`) -- only asked when their
+   *  drafted pair is actually a real companion (珠联璧合) pair (`gamerule.ts`'s
+   *  `isCompanionPair`). `canRecover` mirrors the real rule's own conditional 3rd choice (only
+   *  offered while wounded); the 3rd option is always available as an implicit "decline"
+   *  (return `"cancel"` or anything falsy-equivalent -- Room treats any non-"recover"/"draw"
+   *  value as a decline). */
+  chooseCompanionBonus(player: GamePlayer, canRecover: boolean): Promise<"recover" | "draw" | "cancel">;
+  /** Hegemony mode only, fires alongside `chooseCompanionBonus` (same `hasShownAllGenerals`
+   *  moment) whenever the pair's combined HP left an unpaired half (`combineHegemonyHp`'s
+   *  `bonusDraw`) -- draw 1 card, purely optional. */
+  wantsHalfMaxHpBonusDraw(player: GamePlayer): Promise<boolean>;
   /** `candidates` is always non-empty (Room checks first). Return null to decline/pass. */
   chooseSlashTarget(actor: GamePlayer, candidates: GamePlayer[]): Promise<GamePlayer | null>;
   /** Room already confirmed `card` is a legal Weapon/Horse to equip right now. */
@@ -180,6 +202,18 @@ export function makeBotController(rng: () => number): Controller {
   return {
     async chooseGeneral(candidates) {
       return candidates[Math.floor(rng() * candidates.length)];
+    },
+    // Bots have no bluffing strategy -- reveal everything still hidden the instant it's asked
+    // (their very first turn, since `Room.runHegemonyReveal` skips the ask once nothing's left).
+    async chooseReveal(_player, mainHidden, deputyHidden) {
+      return { main: mainHidden, deputy: deputyHidden };
+    },
+    // Bots always take the resource: recover if wounded (and eligible), otherwise draw.
+    async chooseCompanionBonus(player, canRecover) {
+      return canRecover && player.isWounded() ? "recover" : "draw";
+    },
+    async wantsHalfMaxHpBonusDraw() {
+      return true;
     },
     async chooseSlashTarget(_actor, candidates) {
       return pickRandom(candidates);

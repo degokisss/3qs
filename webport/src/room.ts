@@ -6,8 +6,18 @@
 
 import { Card, CardKind, Suit, buildStandardDeck, shuffle } from "./card.js";
 import { GamePlayer } from "./player.js";
-import { Phase, PHASE_ORDER, Role } from "./types.js";
-import { assignRoles, checkWinCondition, ROLE_LABEL_VI, WinResult } from "./gamerule.js";
+import { GameMode, Phase, PHASE_ORDER, Role } from "./types.js";
+import {
+  assignHegemonyFaction,
+  assignRoles,
+  checkHegemonyWinCondition,
+  checkWinCondition,
+  combineHegemonyHp,
+  factionLabelVI,
+  isCompanionPair,
+  ROLE_LABEL_VI,
+  WinResult,
+} from "./gamerule.js";
 import {
   EngineContext,
   allDismantlementLikeCards,
@@ -54,12 +64,24 @@ const TRICK_LABEL_VI: Partial<Record<CardKind, string>> = {
 };
 
 export class Room {
+  readonly mode: GameMode;
   readonly players: GamePlayer[];
   drawPile: Card[];
   discardPile: Card[] = [];
   currentIndex = 0;
   turnNumber = 0;
   gameOver: WinResult = null;
+  /** Hegemony mode only (Milestone 23 addendum "Ao Chiến"/鏖战, see gamerule.ts's Hegemony
+   *  header): latches true once ≤4 players remain and every one of them is on a distinct
+   *  faction (checked after every death -- see `checkAoChienTrigger`), and never resets. */
+  aoChienActive = false;
+  /** Hegemony mode only: the running per-kingdom team-size tally + the official quota
+   *  (floor(playerCount/2)) `assignHegemonyFaction` needs -- moved to Room-instance fields (was
+   *  a `pickGenerals`-local variable before the reveal-TIMING addendum) since faction is now
+   *  assigned at REVEAL time (`runHegemonyReveal`), which can happen any time during play, not
+   *  just during the draft loop. Set once in the constructor, mutated in place thereafter. */
+  private readonly hegemonyKingdomCounts: Record<string, number> = {};
+  private readonly hegemonyKingdomQuota: number;
   readonly log: string[] = [];
   private readonly rng: () => number;
   private readonly controllers = new Map<string, Controller>();
@@ -73,12 +95,16 @@ export class Room {
    *  normal seat rotation (`currentIndex`) resumes -- see `playTurn()`. */
   private extraTurnQueue: GamePlayer[] = [];
 
-  constructor(playerIds: string[], rng: () => number = Math.random) {
+  constructor(playerIds: string[], rng: () => number = Math.random, mode: GameMode = GameMode.Identity) {
     if (playerIds.length < 5 || playerIds.length > 10) {
-      throw new Error("identity mode supports 5-10 players");
+      throw new Error("both modes support 5-10 players");
     }
+    this.mode = mode;
+    this.hegemonyKingdomQuota = Math.floor(playerIds.length / 2);
     this.players = playerIds.map((id) => new GamePlayer(id));
-    assignRoles(this.players, rng);
+    // Hegemony mode has no Lord/Loyalist/Rebel/Renegade -- kingdom teams are assigned per-player
+    // as each one picks a general (see pickGenerals()'s Hegemony branch below), not up front.
+    if (mode === GameMode.Identity) assignRoles(this.players, rng);
     this.players.forEach((p, i) => (p.seat = i + 1));
 
     this.rng = rng;
@@ -88,18 +114,28 @@ export class Room {
     // player's maxHp is finally known.
     this.drawPile = shuffle(buildStandardDeck(), rng);
 
-    // Room::adjustSeats: turn order (both general-picking and Play-phase turns) starts with the lord.
-    const lordIndex = this.players.findIndex((p) => p.role === Role.Lord);
-    this.currentIndex = lordIndex;
+    // Room::adjustSeats: turn order (both general-picking and Play-phase turns) starts with the
+    // lord in Identity mode; Hegemony mode has no lord, so it starts with a random seat instead.
+    this.currentIndex =
+      mode === GameMode.Identity ? this.players.findIndex((p) => p.role === Role.Lord) : Math.floor(rng() * this.players.length);
 
     for (const player of this.players) this.controllers.set(player.id, makeBotController(rng));
   }
 
   /** Deals `count` distinct, not-yet-taken candidate generals (Milestone 6). Fewer than `count`
    *  only if the pool is nearly exhausted (44 generals / up to 10 players -- never actually hits
-   *  this in practice, but degrades gracefully instead of throwing). */
-  private candidateGenerals(count: number): GeneralDef[] {
-    const remaining = GENERALS.filter((g) => !this.takenGenerals.has(g.name));
+   *  this in practice, but degrades gracefully instead of throwing). `kingdom`, if given
+   *  (Hegemony mode's deputy pick, see `pickGenerals`), restricts the pool to that kingdom
+   *  first -- real Hegemony requires both generals of a pair to share one kingdom. Falls back
+   *  to the full remaining pool if that kingdom's own pool is exhausted (a real possibility once
+   *  several players have already drafted 2 generals each from a small kingdom -- degrades
+   *  gracefully rather than ever leaving a player with zero deputy candidates). */
+  private candidateGenerals(count: number, kingdom?: string): GeneralDef[] {
+    let remaining = GENERALS.filter((g) => !this.takenGenerals.has(g.name));
+    if (kingdom) {
+      const sameKingdom = remaining.filter((g) => g.kingdom === kingdom);
+      if (sameKingdom.length > 0) remaining = sameKingdom;
+    }
     const picks: GeneralDef[] = [];
     for (let i = 0; i < count && remaining.length > 0; i++) {
       const idx = Math.floor(this.rng() * remaining.length);
@@ -110,43 +146,93 @@ export class Room {
   }
 
   /**
-   * Milestone 6: turn-based general selection. Starting with the lord and proceeding around the
-   * table in seat order (the same order Play-phase turns use), each player is dealt 3 not-yet-taken
-   * candidate generals and picks one via their Controller's `chooseGeneral` -- bots (the default
-   * policy) pick immediately with no ask; a claimed human seat is asked over WebSocket
-   * (server.ts's HumanController). `onStep`, if given, fires once before each ask (so the caller
-   * can broadcast "whose turn now") and once after each assignment (so it can broadcast the
+   * Milestone 6: turn-based general selection. Starting with the lord (Identity mode) or a
+   * random seat (Hegemony mode, see the constructor) and proceeding around the table in seat
+   * order (the same order Play-phase turns use), each player is dealt 3 not-yet-taken candidate
+   * generals and picks one via their Controller's `chooseGeneral` -- bots (the default policy)
+   * pick immediately with no ask; a claimed human seat is asked over WebSocket (server.ts's
+   * HumanController). `onStep`, if given, fires once before each ask (so the caller can
+   * broadcast "whose turn now") and once after each assignment (so it can broadcast the
    * result), plus a final time once hands are dealt. MUST complete before `playTurn()` is ever
    * called -- see the guard there.
+   *
+   * Hegemony mode drafts 2 SAME-kingdom generals per player (main then deputy, the real rule --
+   * see gamerule.ts's Hegemony header): the deputy's candidate pool is filtered to the main's
+   * kingdom via `candidateGenerals`'s `kingdom` param, stats combine via `combineHegemonyHp` +
+   * skill union, and `player.general`/`generalName` are only assigned once BOTH picks land (so
+   * the room-wide `pickingGenerals` flag -- driven by `!p.general` -- stays accurate while a
+   * player's deputy pick is still pending). `faction`/`isAmbitionist` are NOT assigned here any
+   * more (Milestone 23's reveal-TIMING addendum): both generals start hidden
+   * (`mainRevealed`/`deputyRevealed` default false), and kingdom -- so also `faction` -- only
+   * becomes known the first time either one is revealed (`runHegemonyReveal`, `Phase.
+   * RoundStart`). The draft log line therefore never names which general or kingdom was picked.
    */
   async pickGenerals(onStep?: () => void): Promise<void> {
     // Standard rule: the lord's identity is public knowledge once the match begins -- but not
     // before, while the room still sits in the lobby/waiting-room (see gamerule.ts assignRoles).
+    // No-op in Hegemony mode: `role` is never assigned there, so this never matches.
     const lord = this.players.find((p) => p.role === Role.Lord);
     if (lord) lord.roleShown = true;
     const n = this.players.length;
+
     for (let step = 0; step < n; step++) {
       const player = this.players[(this.currentIndex + step) % n];
       this.pickTurnPlayerId = player.id;
-      onStep?.();
-      const candidates = this.candidateGenerals(3);
-      const chosen = (await this.controllers.get(player.id)!.chooseGeneral(candidates)) ?? candidates[0];
-      this.takenGenerals.add(chosen.name);
-      player.general = chosen.name;
-      player.generalName = chosen.displayName;
-      player.kingdom = chosen.kingdom;
-      player.gender = chosen.gender ?? "male";
-      player.skills = chosen.skillNames.map((s) => SKILLS[s]);
-      player.maxHp = chosen.maxHp;
-      player.hp = chosen.maxHp;
-      this.log.push(`${player.id} chọn tướng ${chosen.displayName}`);
-      onStep?.();
+      const controller = this.controllers.get(player.id)!;
+      if (this.mode === GameMode.Hegemony) {
+        onStep?.();
+        const mainCandidates = this.candidateGenerals(3);
+        const main = (await controller.chooseGeneral(mainCandidates, "main")) ?? mainCandidates[0];
+        this.takenGenerals.add(main.name);
+        onStep?.();
+        const deputyCandidates = this.candidateGenerals(3, main.kingdom);
+        const deputy = (await controller.chooseGeneral(deputyCandidates, "deputy")) ?? deputyCandidates[0];
+        this.takenGenerals.add(deputy.name);
+
+        player.general = main.name;
+        player.generalName = main.displayName;
+        player.deputyGeneral = deputy.name;
+        player.deputyGeneralName = deputy.displayName;
+        player.kingdom = main.kingdom;
+        player.gender = main.gender ?? "male"; // real rule: main general determines gender once both are shown
+        player.skills = [...main.skillNames, ...deputy.skillNames].map((s) => SKILLS[s]);
+        player.mainSkillCount = main.skillNames.length;
+        player.maxHp = combineHegemonyHp(main.maxHp, deputy.maxHp).maxHp;
+        player.hp = player.maxHp;
+        // The leftover-half bonus draw (if any) is resolved later, alongside the companion
+        // bonus, the instant this player's SECOND general reveals -- see `runHegemonyReveal`.
+
+        // Both generals stay face-down -- no kingdom/name leak in the shared log (see this
+        // method's header). `runHegemonyReveal` assigns faction/Ambitionist once revealed.
+        this.log.push(`${player.id} đã chọn xong 2 tướng (ẩn cho đến khi lộ diện)`);
+        onStep?.();
+      } else {
+        onStep?.();
+        const candidates = this.candidateGenerals(3);
+        const chosen = (await controller.chooseGeneral(candidates)) ?? candidates[0];
+        this.takenGenerals.add(chosen.name);
+        player.general = chosen.name;
+        player.generalName = chosen.displayName;
+        player.kingdom = chosen.kingdom;
+        player.gender = chosen.gender ?? "male";
+        player.skills = chosen.skillNames.map((s) => SKILLS[s]);
+        player.maxHp = chosen.maxHp;
+        player.hp = chosen.maxHp;
+        this.log.push(`${player.id} chọn tướng ${chosen.displayName}`);
+        onStep?.();
+      }
     }
     this.pickTurnPlayerId = null;
     for (const player of this.players) {
       player.hand = this.drawPile.splice(0, player.maxHp); // initial hand size == max hp
     }
-    this.log.push(`Bắt đầu ván đấu: ${this.players.map((p) => `${p.id}=${ROLE_LABEL_VI[p.role]}/${p.generalName}`).join(", ")}`);
+    // Hegemony's summary omits names (see method header); Identity's still names generals since
+    // those were never hidden to begin with.
+    this.log.push(
+      this.mode === GameMode.Hegemony
+        ? "Bắt đầu ván đấu: mọi tướng đều ẩn, sẽ lộ diện dần khi từng người vào lượt của mình"
+        : `Bắt đầu ván đấu: ${this.players.map((p) => `${p.id}=${factionLabelVI(this.mode, p)}/${p.generalName}`).join(", ")}`,
+    );
     onStep?.();
   }
 
@@ -240,19 +326,35 @@ export class Room {
   private async killPlayer(player: GamePlayer, killer?: GamePlayer): Promise<void> {
     player.alive = false;
     player.roleShown = true; // Player death always reveals role (BuryVictim)
+    // Hegemony: death always reveals BOTH generals too (same "BuryVictim" principle), even if
+    // the player never chose to during play -- assigns faction/Ambitionist right here if they
+    // died still fully hidden, so the win-check right below sees a determined force for them.
+    if (this.mode === GameMode.Hegemony && (!player.mainRevealed || !player.deputyRevealed)) {
+      const wasHidden = player.faction === "";
+      player.mainRevealed = true;
+      player.deputyRevealed = true;
+      if (wasHidden) {
+        const { faction, isAmbitionist } = assignHegemonyFaction(player.id, player.kingdom, this.hegemonyKingdomCounts, this.hegemonyKingdomQuota);
+        player.faction = faction;
+        player.isAmbitionist = isAmbitionist;
+      }
+    }
 
     // Standard rule: killing a Rebel rewards the killer with 3 cards, regardless of the
     // killer's own role. Only fires when we know the specific killer (the real combat pipeline
     // always does; Room.damagePlayer's test-only scripted-damage bypass only has a role to
-    // credit, not a specific player, so this reward doesn't apply there).
-    if (killer?.alive && player.role === Role.Rebel) {
+    // credit, not a specific player, so this reward doesn't apply there). Identity mode only --
+    // Hegemony's `role` is never assigned (see the constructor), so this would never fire there
+    // even unguarded, but the explicit mode check documents that rather than relying on it.
+    if (this.mode === GameMode.Identity && killer?.alive && player.role === Role.Rebel) {
       this.drawCards(killer, 3);
       this.log.push(`${killer.id} giết phản tặc ${player.id}, rút 3 lá`);
     }
 
     // Standard rule: if the Lord kills a Loyalist (friendly fire), the Lord discards their
-    // entire hand and all equipped cards as punishment.
-    if (killer?.alive && killer.role === Role.Lord && player.role === Role.Loyalist) {
+    // entire hand and all equipped cards as punishment. Identity mode only, same reasoning as
+    // the Rebel-kill reward above.
+    if (this.mode === GameMode.Identity && killer?.alive && killer.role === Role.Lord && player.role === Role.Loyalist) {
       const punishedLord: GamePlayer = killer;
       const equipsLost = [punishedLord.weapon, punishedLord.defenseHorse, punishedLord.offenseHorse].filter((c): c is Card => c !== null);
       if (punishedLord.hand.length > 0 || equipsLost.length > 0) {
@@ -281,16 +383,21 @@ export class Room {
       this.discardPile.push(...player.hand);
     }
     player.hand = [];
-    this.log.push(`${player.id} (${ROLE_LABEL_VI[player.role]}) qua đời`);
+    this.log.push(`${player.id} (${factionLabelVI(this.mode, player)}) qua đời`);
 
     if (!this.gameOver) {
-      const result = checkWinCondition(this.players);
-      if (result) {
-        this.gameOver = result;
-        this.log.push(`Kết thúc ván: ${result.winners.map((r) => ROLE_LABEL_VI[r]).join(" + ")} thắng`);
-        // Real Sanguosha reveals EVERY identity once the match ends, not just the dead/lord --
-        // survivors' roles were only fogged during play (Player::hasShownRole).
-        for (const p of this.players) p.roleShown = true;
+      if (this.mode === GameMode.Hegemony) {
+        this.checkHegemonyGameEnd();
+      } else {
+        const result = checkWinCondition(this.players);
+        if (result) {
+          this.gameOver = result;
+          const label = result.winners.map((r) => ROLE_LABEL_VI[r as Role]).join(" + ");
+          this.log.push(`Kết thúc ván: ${label} thắng`);
+          // Real Sanguosha reveals EVERY identity once the match ends, not just the dead/lord --
+          // survivors' roles were only fogged during play (Player::hasShownRole).
+          for (const p of this.players) p.roleShown = true;
+        }
       }
     }
 
@@ -298,6 +405,111 @@ export class Room {
     const ctx = this.makeContext(this.players.filter((p) => p.alive));
     for (const p of ctx.alivePlayers) {
       for (const skill of p.skills) await skill.onAllyDeath?.(ctx, p, player, this.rng);
+    }
+  }
+
+  /** Hegemony "Ao Chiến"/鏖战 trigger (Milestone 23 addendum) -- checked after every death that
+   *  doesn't already end the game. Official condition: ≤4 players remain and no faction has
+   *  more than 1 living member. A still-hidden (unrevealed) player counts as their OWN distinct
+   *  faction for THIS specific check (confirmed live: "暗置武将也算不同势力（暗置与暗置武将间也是如
+   *  此）") -- unlike `checkHegemonyWinCondition`, which can't assess victory at all while
+   *  anyone's still hidden, so it needs no such substitution. Latches permanently once true. */
+  private checkAoChienTrigger(): void {
+    const alive = this.players.filter((p) => p.alive);
+    if (alive.length > 4) return;
+    const effectiveFaction = (p: GamePlayer) => p.faction || `hidden:${p.id}`;
+    const everyoneDistinct = alive.every((p) => alive.filter((q) => effectiveFaction(q) === effectiveFaction(p)).length === 1);
+    if (!everyoneDistinct) return;
+    this.aoChienActive = true;
+    this.log.push("Ao Chiến bắt đầu: từ giờ Đào không còn tác dụng hồi máu (chỉ có thể bỏ đi)");
+  }
+
+  /** Hegemony reveal-TIMING mechanic (Milestone 23 addendum "暗置/明置"): asked at the start of
+   *  `player`'s own turn (`Phase.RoundStart`) while anything is still hidden -- bots always
+   *  reveal everything remaining immediately (see `makeBotController`'s `chooseReveal`, no
+   *  bluffing strategy to gain from staying hidden); a claimed human gets the real choice, and
+   *  may legitimately decline forever. The FIRST time either general flips face-up for a given
+   *  player, their kingdom becomes known -- `faction`/`isAmbitionist` are assigned right then
+   *  (`assignHegemonyFaction`, using the Room-level running quota tally), not at draft time. */
+  private async runHegemonyReveal(player: GamePlayer): Promise<void> {
+    if (player.mainRevealed && player.deputyRevealed) return;
+    const wasHidden = player.faction === "";
+    const controller = this.controllers.get(player.id)!;
+    const choice = await controller.chooseReveal(player, !player.mainRevealed, !player.deputyRevealed);
+    const revealedNow: string[] = [];
+    if (choice.main && !player.mainRevealed) {
+      player.mainRevealed = true;
+      revealedNow.push(`chủ tướng ${player.generalName}`);
+    }
+    if (choice.deputy && !player.deputyRevealed) {
+      player.deputyRevealed = true;
+      revealedNow.push(`phó tướng ${player.deputyGeneralName}`);
+    }
+    if (revealedNow.length === 0) return;
+    if (wasHidden) {
+      const { faction, isAmbitionist } = assignHegemonyFaction(player.id, player.kingdom, this.hegemonyKingdomCounts, this.hegemonyKingdomQuota);
+      player.faction = faction;
+      player.isAmbitionist = isAmbitionist;
+    }
+    this.log.push(`${player.id} minh trí ${revealedNow.join(", ")} -- thế lực: ${factionLabelVI(this.mode, player)}`);
+    // A reveal (not just a death) can itself be what finally lets an already-converged table
+    // conclude -- checkHegemonyWinCondition blocks on ANY hidden living player, so the LAST one
+    // revealing might complete it right here.
+    this.checkHegemonyGameEnd();
+    // The 2 one-time reveal-completion bonuses (companion pair, leftover-half-HP) only fire the
+    // instant BOTH generals are now shown, and only if the game didn't just end right above.
+    if (!this.gameOver && player.mainRevealed && player.deputyRevealed) {
+      await this.resolveHegemonyRevealBonuses(player);
+    }
+    this.onLiveUpdate?.();
+  }
+
+  /** Hegemony-only, fires exactly once per player the instant their SECOND general reveals
+   *  (matches the real upstream `gamerule.cpp`'s `GeneralShown` handler): a 珠联璧合 companion
+   *  bonus (recover 1 hp if wounded, or draw 2 cards) if the drafted main+deputy pair is a real
+   *  companion pair (`isCompanionPair`), and a leftover-half-HP bonus draw (1 card) if
+   *  `combineHegemonyHp` found an unpaired half. Both are the player's own optional choice. */
+  private async resolveHegemonyRevealBonuses(player: GamePlayer): Promise<void> {
+    const controller = this.controllers.get(player.id)!;
+    if (isCompanionPair(player.general, player.deputyGeneral)) {
+      const choice = await controller.chooseCompanionBonus(player, player.isWounded());
+      if (choice === "recover") {
+        await heal(this.makeContext(this.players.filter((p) => p.alive)), player, 1);
+        this.log.push(`${player.id} hồi 1 máu (珠联璧合)`);
+      } else if (choice === "draw") {
+        this.drawCards(player, 2);
+        this.log.push(`${player.id} rút 2 lá (珠联璧合)`);
+      }
+    }
+    const mainDef = GENERALS.find((g) => g.name === player.general);
+    const deputyDef = GENERALS.find((g) => g.name === player.deputyGeneral);
+    if (mainDef && deputyDef && combineHegemonyHp(mainDef.maxHp, deputyDef.maxHp).bonusDraw) {
+      if (await controller.wantsHalfMaxHpBonusDraw(player)) {
+        this.drawCards(player, 1);
+        this.log.push(`${player.id} rút 1 lá (thể lực lẻ nửa)`);
+      }
+    }
+    this.onLiveUpdate?.();
+  }
+
+  /** Hegemony-only: resolves `checkHegemonyWinCondition` and, if it fires, sets `gameOver` +
+   *  logs the result + force-reveals everyone (matching Identity mode's own "reveal every role
+   *  once the match ends" rule). Otherwise (game continues), checks the Ao Chiến trigger. Shared
+   *  by `killPlayer` (checked after every death) and `runHegemonyReveal` (checked after every
+   *  reveal, see its own call site comment for why). */
+  private checkHegemonyGameEnd(): void {
+    if (this.gameOver) return;
+    const result = checkHegemonyWinCondition(this.players);
+    if (result) {
+      this.gameOver = result;
+      const winner = this.players.find((p) => p.id === result.winners[0])!;
+      this.log.push(`Kết thúc ván: ${factionLabelVI(this.mode, winner)} thắng`);
+      for (const p of this.players) {
+        p.mainRevealed = true;
+        p.deputyRevealed = true;
+      }
+    } else if (!this.aoChienActive) {
+      this.checkAoChienTrigger();
     }
   }
 
@@ -327,6 +539,7 @@ export class Room {
     return {
       alivePlayers: alive,
       discardPile: this.discardPile,
+      aoChienActive: this.aoChienActive,
       log: this.log,
       rng: this.rng,
       draw: (player, n) => this.drawCards(player, n),
@@ -538,7 +751,7 @@ export class Room {
 
   private async tryPlaySlash(player: GamePlayer, explicitCard?: Card): Promise<boolean> {
     if (this.gameOver || !player.alive) return false;
-    const slashCard = explicitCard ?? findSlashLikeCard(player);
+    const slashCard = explicitCard ?? findSlashLikeCard(player, this.aoChienActive);
     // Spear (weapon): no real/viewAs Slash card in hand -- fall back to sacrificing 2 hand
     // cards as one, if equipped. Never reached when `explicitCard` is set (a human proactively
     // chose a specific held card via the freeform path, not this fallback).
@@ -622,7 +835,8 @@ export class Room {
     // by default -- see controller.ts's wantsToUsePeachSelfHeal -- preserving the pre-existing
     // fixed-pass behavior of never proactively burning Peach/Analeptic outside a real dying
     // emergency); a claimed human seat gets the real choice via the freeform path below instead.
-    for (let i = player.hand.length - 1; i >= 0 && player.alive && !this.gameOver; i--) {
+    // Skipped entirely once Ao Chiến is active (see checkAoChienTrigger) -- Peach no longer heals.
+    for (let i = player.hand.length - 1; i >= 0 && player.alive && !this.gameOver && !this.aoChienActive; i--) {
       if (!player.isWounded()) break;
       const c = player.hand[i];
       if (c.kind !== CardKind.Peach) continue;
@@ -758,7 +972,7 @@ export class Room {
     };
 
     if (slashesRemaining > 0 && slashCandidates(alive, player).length > 0) {
-      addPlayCard(allSlashLikeCards(player), CardKind.Slash);
+      addPlayCard(allSlashLikeCards(player, this.aoChienActive), CardKind.Slash);
     }
     if (dismantlementCandidates(player, alive).length > 0) {
       addPlayCard(allDismantlementLikeCards(player), CardKind.Dismantlement);
@@ -782,7 +996,7 @@ export class Room {
       actions.push({ kind: "spearSlash" });
     }
     addPlayCard(player.hand.filter((c) => c.kind === CardKind.AmazingGrace), CardKind.AmazingGrace);
-    if (player.isWounded()) {
+    if (player.isWounded() && !this.aoChienActive) {
       addPlayCard(player.hand.filter((c) => c.kind === CardKind.Peach), CardKind.Peach);
     }
     addPlayCard(player.hand.filter((c) => c.kind === CardKind.Analeptic), CardKind.Analeptic);
@@ -994,6 +1208,7 @@ export class Room {
     await this.runOtherPhaseActions(player, phase);
     switch (phase) {
       case Phase.RoundStart:
+        if (this.mode === GameMode.Hegemony) await this.runHegemonyReveal(player);
         break;
       case Phase.Judge:
         await this.runJudgePhase(player);
@@ -1065,7 +1280,7 @@ export class Room {
       return;
     }
     this.turnNumber++;
-    this.log.push(`--- Lượt ${this.turnNumber}: ${player.id} (${ROLE_LABEL_VI[player.role]}) ---`);
+    this.log.push(`--- Lượt ${this.turnNumber}: ${player.id} (${factionLabelVI(this.mode, player)}) ---`);
     player.playedSlashThisTurn = false;
     player.luoyiArmedThisTurn = false;
     player.duelViewAsBlackAllowed = null;

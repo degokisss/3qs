@@ -7,11 +7,12 @@ import strict from "node:assert/strict";
 import { Card, CardKind, Suit, buildStandardDeck } from "./card.js";
 import { Room } from "./room.js";
 import { GamePlayer } from "./player.js";
-import { EngineContext, allIndulgenceLikeCards, effectiveAttackRange, effectiveDistance, findIndulgenceLikeCard, findSlashLikeCard, loseHp, resolveSlash } from "./combat.js";
-import { SKILLS } from "./skill.js";
+import { EngineContext, allIndulgenceLikeCards, allSlashLikeCards, effectiveAttackRange, effectiveDistance, findIndulgenceLikeCard, findJinkLikeCard, findSlashLikeCard, loseHp, resolveSlash } from "./combat.js";
+import { GENERALS, SKILLS } from "./skill.js";
 import { pickLeastImportantCards, slashCandidates } from "./controller.js";
 import { attachIndulgence, duelCandidates, resolveArcheryAttack, resolveDismantlement, resolveDuel, resolveIndulgenceJudgment, resolveSavageAssault, resolveSnatch, snatchCandidates } from "./trick.js";
-import { Phase, Role } from "./types.js";
+import { GameMode, Phase, Role } from "./types.js";
+import { KINGDOMS, assignHegemonyFaction, checkHegemonyWinCondition, combineHegemonyHp, isAlly, isCompanionPair } from "./gamerule.js";
 const DECK_SIZE = 54 + 17 + 16; // basics(Slash-family 29+Jink 14+Peach 8+Analeptic 3) + implemented tricks(17, incl. 2 Indulgence) + equips(10 weapons+6 horses), see card.ts
 
 function playerIds(n: number): string[] {
@@ -1213,6 +1214,7 @@ function makeTestContext(alivePlayers: GamePlayer[], log: string[], drawTop: () 
   return {
     alivePlayers,
     discardPile: [],
+    aoChienActive: false,
     log,
     rng: Math.random,
     draw: () => {},
@@ -2456,6 +2458,448 @@ function testGuoseLetsADiamondCardBePlayedAsIndulgence(): void {
   console.log("PASS testGuoseLetsADiamondCardBePlayedAsIndulgence: diamond card offered as viewAs indulgence, spade-only hand offered nothing");
 }
 
+// -------------------------------------------------------------------------------------------
+// Milestone 23 -- Hegemony (国战 / Quốc Chiến) mode. See gamerule.ts's Hegemony section header
+// for the exact ported ruleset (kingdom teams + the official Ambitionist overflow rule) and
+// what's deliberately deferred (dual-general/reveal, pincer/formation skills, Ao Chiến).
+
+/**
+ * Pure proof of `assignHegemonyFaction`'s quota/overflow rule, independent of any Room/RNG:
+ * with quota=2, the first 2 sequential "wei" picks join the wei team; the 3rd becomes an
+ * Ambitionist (a faction unique to them, not counted toward wei's team size) instead -- while a
+ * DIFFERENT kingdom's pick right after is unaffected by wei's already-full quota.
+ */
+function testAssignHegemonyFactionRespectsQuota(): void {
+  const kingdomCounts: Record<string, number> = {};
+  const first = assignHegemonyFaction("P1", "wei", kingdomCounts, 2);
+  const second = assignHegemonyFaction("P2", "wei", kingdomCounts, 2);
+  const third = assignHegemonyFaction("P3", "wei", kingdomCounts, 2);
+  const fourth = assignHegemonyFaction("P4", "shu", kingdomCounts, 2);
+  strict.deepEqual(first, { faction: "wei", isAmbitionist: false });
+  strict.deepEqual(second, { faction: "wei", isAmbitionist: false });
+  strict.deepEqual(third, { faction: "ambitionist:P3", isAmbitionist: true }, "3rd wei pick past quota 2 must become an Ambitionist");
+  strict.deepEqual(fourth, { faction: "shu", isAmbitionist: false }, "a different kingdom is unaffected by wei's already-full quota");
+  strict.equal(kingdomCounts.wei, 2, "the Ambitionist must NOT count toward wei's team size");
+  console.log("PASS testAssignHegemonyFactionRespectsQuota: 3rd same-kingdom pick past quota became an Ambitionist, others unaffected");
+}
+
+/** Pure proof of `checkHegemonyWinCondition`: a team wins the instant their kingdom is the only
+ *  one left alive (teammates need not fight to the last survivor); an Ambitionist's unique
+ *  faction means the SAME check only ever fires for them once they're the sole survivor,
+ *  matching the real "eliminate everyone else alone" rule with no special-case branch. */
+function testHegemonyWinCondition(): void {
+  const a = new GamePlayer("A");
+  a.faction = "wei";
+  const b = new GamePlayer("B");
+  b.faction = "wei";
+  const c = new GamePlayer("C");
+  c.faction = "shu";
+  strict.equal(checkHegemonyWinCondition([a, b, c]), null, "2 distinct factions (wei, shu) still alive -- game continues");
+
+  c.alive = false;
+  strict.deepEqual(checkHegemonyWinCondition([a, b, c]), { winners: ["A", "B"] }, "only wei left alive -- the whole wei team wins together");
+
+  const d = new GamePlayer("D");
+  d.faction = "ambitionist:D";
+  const e = new GamePlayer("E");
+  e.faction = "wei";
+  strict.equal(checkHegemonyWinCondition([d, e]), null, "an Ambitionist and a team player both alive -- game continues");
+  e.alive = false;
+  strict.deepEqual(checkHegemonyWinCondition([d, e]), { winners: ["D"] }, "Ambitionist must be the sole survivor to win, matching the real rule");
+  console.log("PASS testHegemonyWinCondition: team win requires only that kingdom alive, Ambitionist requires being the sole survivor");
+}
+
+/** Pure proof that `isAlly` uses Hegemony's `faction` (not the legacy Identity `role`) once
+ *  it's set, and that 2 different Ambitionists are never allies despite sharing the
+ *  "ambitionist:" faction prefix (each one's full faction string is unique to them). */
+function testHegemonyIsAllyUsesFactionNotRole(): void {
+  const a = new GamePlayer("A");
+  a.faction = "wei";
+  a.role = Role.Lord;
+  const b = new GamePlayer("B");
+  b.faction = "wei";
+  b.role = Role.Rebel; // different legacy Role, same Hegemony faction
+  const c = new GamePlayer("C");
+  c.faction = "shu";
+  const d1 = new GamePlayer("D1");
+  d1.faction = "ambitionist:D1";
+  const d2 = new GamePlayer("D2");
+  d2.faction = "ambitionist:D2";
+
+  strict.ok(isAlly(a, b), "same faction (wei) must be allies regardless of differing legacy Role values");
+  strict.ok(!isAlly(a, c), "different kingdoms are not allies");
+  strict.ok(!isAlly(d1, d2), "two different Ambitionists must never be allies, even though both are 'ambitionist:*'");
+  console.log("PASS testHegemonyIsAllyUsesFactionNotRole: faction equality decided every case, legacy Role was ignored");
+}
+
+/** Pure proof of `combineHegemonyHp` against the official rule ("国战体力值是原来武将的一半...体力值
+ *  计算方法：两名武将的体力值之和"): both-even sums exactly, an odd total floors down AND grants the
+ *  bonus draw (the leftover unpaired half), both-odd sums exactly again (the 2 halves pair up). */
+function testCombineHegemonyHp(): void {
+  strict.deepEqual(combineHegemonyHp(4, 4), { maxHp: 4, bonusDraw: false }, "4+4 solo halves to 2+2, no leftover");
+  strict.deepEqual(combineHegemonyHp(4, 3), { maxHp: 3, bonusDraw: true }, "4+3=7 halves to 3 with 1 leftover half -> bonus draw");
+  strict.deepEqual(combineHegemonyHp(3, 3), { maxHp: 3, bonusDraw: false }, "3+3=6, the 2 leftover halves pair into a whole point");
+  strict.deepEqual(combineHegemonyHp(5, 3), { maxHp: 4, bonusDraw: false }, "5+3=8 halves to 4, no leftover");
+  console.log("PASS testCombineHegemonyHp: even+even/odd+odd land exact, even+odd floors down with a bonus draw");
+}
+
+/**
+ * Real `pickGenerals()` Hegemony draft (Milestone 23 addendum: dual-general system): every
+ * player must end up with 2 DISTINCT generals sharing one kingdom, combined stats matching
+ * `combineHegemonyHp` + a skill union, main general deciding gender -- driven through the exact
+ * same bot `Controller.chooseGeneral` path a live game uses, across several seeds since which
+ * generals land is random.
+ */
+async function testHegemonyDraftPicksSameKingdomPairWithCombinedStats(): Promise<void> {
+  for (let seed = 1; seed <= 8; seed++) {
+    const room = new Room(playerIds(6), seededRng(seed), GameMode.Hegemony);
+    await room.pickGenerals();
+    for (const p of room.players) {
+      strict.ok(p.deputyGeneral !== "", `seed ${seed}: ${p.id} must have a deputy general assigned`);
+      strict.notEqual(p.general, p.deputyGeneral, `seed ${seed}: ${p.id}'s main and deputy must be 2 distinct generals`);
+      const mainDef = GENERALS.find((g) => g.name === p.general)!;
+      const deputyDef = GENERALS.find((g) => g.name === p.deputyGeneral)!;
+      strict.equal(mainDef.kingdom, deputyDef.kingdom, `seed ${seed}: ${p.id}'s pair must share one kingdom`);
+      strict.equal(p.kingdom, mainDef.kingdom, `seed ${seed}: ${p.id}'s kingdom must match the pair's shared kingdom`);
+      strict.equal(p.skills.length, 0, `seed ${seed}: ${p.id}'s ACTIVE skills must be empty -- nothing revealed yet right after the draft`);
+      strict.equal(
+        p.allSkills.length,
+        mainDef.skillNames.length + deputyDef.skillNames.length,
+        `seed ${seed}: ${p.id}'s DECLARED (allSkills) kit must be the union of both generals' skills`,
+      );
+      strict.equal(
+        p.maxHp,
+        combineHegemonyHp(mainDef.maxHp, deputyDef.maxHp).maxHp,
+        `seed ${seed}: ${p.id}'s combined maxHp must match combineHegemonyHp`,
+      );
+      strict.equal(p.gender, mainDef.gender ?? "male", `seed ${seed}: ${p.id}'s gender must follow the MAIN general`);
+    }
+  }
+  console.log("PASS testHegemonyDraftPicksSameKingdomPairWithCombinedStats: every player got 2 distinct same-kingdom generals with correctly combined stats, across 8 seeds");
+}
+
+/**
+ * Ao Chiến (Milestone 23 addendum) proof: once `ctx.aoChienActive` is true, a dying player
+ * holding only a Peach can no longer self-rescue with it -- driven directly through `loseHp`
+ * (pure, deterministic), with a control case proving the SAME setup rescues normally when it's
+ * not active (so this isn't just "askPeach always declines" masking the real gate).
+ */
+async function testAoChienBlocksPeachRescue(): Promise<void> {
+  const deck = buildStandardDeck();
+  const peach = deck.find((c) => c.kind === CardKind.Peach)!;
+
+  const dying = new GamePlayer("D");
+  dying.hp = 1;
+  dying.hand = [peach];
+  const log: string[] = [];
+  let died = false;
+  const ctx = makeTestContext([dying], log);
+  ctx.aoChienActive = true;
+  ctx.askPeach = async () => true; // would accept if offered -- proves it's never even offered
+  ctx.onDying = () => {
+    died = true;
+  };
+  await loseHp(ctx, dying, 1);
+  strict.ok(died, "a dying player holding only a Peach must still die once Ao Chiến is active");
+  strict.ok(dying.hand.includes(peach), "the Peach must NOT be consumed -- Ao Chiến means it's never offered as a rescue");
+
+  const control = new GamePlayer("C");
+  control.hp = 1;
+  control.hand = [peach];
+  const log2: string[] = [];
+  let controlDied = false;
+  const ctx2 = makeTestContext([control], log2);
+  ctx2.askPeach = async () => true;
+  ctx2.onDying = () => {
+    controlDied = true;
+  };
+  await loseHp(ctx2, control, 1);
+  strict.ok(!controlDied, "control: the exact same setup WITHOUT Ao Chiến must rescue normally");
+  strict.ok(!control.hand.includes(peach), "control: the Peach must be consumed by the successful rescue");
+  console.log("PASS testAoChienBlocksPeachRescue: rescue blocked while active, identical control case rescues normally");
+}
+
+/**
+ * Ao Chiến's OTHER half (Milestone 23 addendum): once active, a held Peach is also matched by
+ * the Slash/Jink viewAs search -- `findSlashLikeCard`/`findJinkLikeCard`/`allSlashLikeCards` all
+ * accept an `aoChienActive` param that makes a bare Peach qualify, and never otherwise (control).
+ */
+function testAoChienLetsPeachSubstituteForSlashAndJink(): void {
+  const deck = buildStandardDeck();
+  const peach = deck.find((c) => c.kind === CardKind.Peach)!;
+  const player = new GamePlayer("P");
+  player.hand = [peach];
+
+  strict.equal(findSlashLikeCard(player, false), null, "control: without Ao Chiến, a bare Peach is never Slash-like");
+  strict.equal(findSlashLikeCard(player, true), peach, "Ao Chiến: a held Peach is found as Slash-like");
+  strict.equal(findJinkLikeCard(player, false), null, "control: without Ao Chiến, a bare Peach is never Jink-like");
+  strict.equal(findJinkLikeCard(player, true), peach, "Ao Chiến: a held Peach is found as Jink-like");
+  strict.deepEqual(allSlashLikeCards(player, false), [], "control: allSlashLikeCards excludes Peach without Ao Chiến");
+  strict.deepEqual(allSlashLikeCards(player, true), [peach], "Ao Chiến: allSlashLikeCards includes the held Peach");
+
+  console.log("PASS testAoChienLetsPeachSubstituteForSlashAndJink: Peach matches Slash/Jink search only while Ao Chiến is active");
+}
+
+/**
+ * Ao Chiến trigger condition, driven through a real Room: latches `aoChienActive` the instant
+ * <=4 players remain with every one of them on a distinct faction, and NOT before (a shared
+ * faction among the survivors must keep it off). Faction assigned directly (bypassing the real
+ * draft/quota outcome, which isn't guaranteed to leave 8 distinct factions) so the exact
+ * boundary condition is deterministic to set up.
+ */
+async function testAoChienTriggersOnlyAtFourDistinctFactionSurvivors(): Promise<void> {
+  const room = new Room(playerIds(8), seededRng(1), GameMode.Hegemony);
+  await room.pickGenerals();
+  room.players.forEach((p, i) => {
+    p.faction = `test:${i}`; // 8 distinct factions
+  });
+  room.players[2].faction = room.players[3].faction; // players 2 and 3 share a faction
+  strict.equal(room.aoChienActive, false, "must not be active before anyone dies");
+
+  // Kill players 4-7 (4 deaths) -- leaves exactly players 0-3 alive (4 survivors), but 2 and 3
+  // share a faction, so it must NOT trigger yet even though the alive count already hit 4.
+  for (const idx of [4, 5, 6, 7]) {
+    await room.damagePlayer(room.players[idx].id, room.players[idx].maxHp);
+  }
+  strict.equal(room.players.filter((p) => p.alive).length, 4);
+  strict.equal(room.aoChienActive, false, "exactly 4 survivors but 2 of them share a faction -- must not trigger");
+
+  // Kill player 3 (one of the shared-faction pair) -- leaves players 0-2 (3 survivors), all
+  // distinct factions now -- must trigger.
+  await room.damagePlayer(room.players[3].id, room.players[3].maxHp);
+  strict.equal(room.players.filter((p) => p.alive).length, 3);
+  strict.ok(room.aoChienActive, "3 survivors, all distinct factions (<=4, no shared faction) -- must trigger");
+  console.log(
+    "PASS testAoChienTriggersOnlyAtFourDistinctFactionSurvivors: stayed off while a faction was shared among the survivors, latched true the instant every survivor was distinct",
+  );
+}
+
+/**
+ * End-to-end Hegemony smoke test (mirrors `testEmergentCombatReachesWinCondition`'s Identity-mode
+ * proof): a real `pickGenerals()` draft + the reveal-TIMING mechanic (bots always reveal
+ * everything on their own first turn, see `runHegemonyReveal`) + the naive bot policy alone (no
+ * scripted damage) eventually drives the game to a real Hegemony win -- every living player at
+ * the end shares one faction, matching `checkHegemonyWinCondition`, and by then every player
+ * (dead or alive) has been fully revealed (voluntarily or forced by death), matching the real
+ * "victory can't be assessed until everyone's force is determined" rule.
+ */
+async function testEmergentHegemonyGameReachesWinCondition(): Promise<void> {
+  const MAX_TURNS = 3000;
+  let converged = false;
+  for (let seed = 1; seed <= 20 && !converged; seed++) {
+    const room = new Room(playerIds(8), seededRng(seed), GameMode.Hegemony);
+    await room.pickGenerals();
+    strict.ok(
+      room.players.every((p) => p.faction === "" && !p.mainRevealed && !p.deputyRevealed),
+      `every player must still be fully hidden right after pickGenerals, before any turn runs (seed ${seed})`,
+    );
+
+    await room.runUntilGameOver(MAX_TURNS);
+    if (room.gameOver) {
+      // By game-over, EVERY player (dead or alive) must have been fully revealed at some point --
+      // either voluntarily (bots reveal on their own first turn) or forced by death.
+      strict.ok(
+        room.players.every((p) => p.mainRevealed && p.deputyRevealed),
+        `every player must be fully revealed by game-over (seed ${seed})`,
+      );
+      const quota = Math.floor(8 / 2);
+      for (const kingdom of KINGDOMS) {
+        const teamSize = room.players.filter((p) => p.faction === kingdom).length;
+        strict.ok(teamSize <= quota, `kingdom ${kingdom} team size ${teamSize} must never exceed quota ${quota} (seed ${seed})`);
+      }
+
+      const alive = room.players.filter((p) => p.alive);
+      strict.ok(alive.length >= 1, "at least the winner(s) must still be alive");
+      strict.ok(
+        alive.every((p) => p.faction === alive[0].faction),
+        "every living player at game-over must share the same faction",
+      );
+      strict.deepEqual(
+        [...room.gameOver.winners].sort(),
+        alive.map((p) => p.id).sort(),
+        "gameOver.winners must be exactly the living players' ids",
+      );
+      console.log(
+        `PASS testEmergentHegemonyGameReachesWinCondition: seed ${seed} -> winners ${room.gameOver.winners.join("+")} after ${room.turnNumber} turns`,
+      );
+      converged = true;
+    }
+  }
+  strict.ok(converged, `no seed reached a Hegemony win condition within ${MAX_TURNS} turns across 20 seeds`);
+}
+
+/**
+ * Hegemony reveal-TIMING mechanic (Milestone 23 addendum "暗置/明置"), driven through a real
+ * Room: every player starts fully hidden right after `pickGenerals`; a bot reveals everything
+ * the instant its own first turn starts (`playTurn`) while every other player stays untouched;
+ * a controller that always declines stays hidden through its own turn; and death force-reveals
+ * + assigns a faction even for a player killed before ever taking a turn.
+ */
+async function testHegemonyRevealTiming(): Promise<void> {
+  const room = new Room(playerIds(6), seededRng(3), GameMode.Hegemony);
+  await room.pickGenerals();
+  const firstPlayer = room.players[room.currentIndex];
+  await room.playTurn();
+  strict.ok(firstPlayer.mainRevealed && firstPlayer.deputyRevealed, "the first-to-act bot must reveal both generals on its own first turn");
+  strict.notEqual(firstPlayer.faction, "", "revealing must assign a faction immediately");
+  for (const p of room.players) {
+    if (p === firstPlayer) continue;
+    strict.equal(p.faction, "", `${p.id} must still be fully hidden -- only the acting player's turn ran`);
+  }
+
+  const room2 = new Room(playerIds(6), seededRng(3), GameMode.Hegemony);
+  await room2.pickGenerals();
+  const holdout = room2.players[room2.currentIndex];
+  room2.setController(holdout.id, { chooseReveal: async () => ({ main: false, deputy: false }) });
+  await room2.playTurn();
+  strict.equal(holdout.mainRevealed, false, "a controller that always declines must stay hidden through its own turn");
+  strict.equal(holdout.faction, "", "an undetermined player must have no faction");
+
+  const target = room2.players.find((p) => p !== holdout && !p.mainRevealed)!;
+  strict.equal(target.faction, "", "sanity: target must still be hidden before dying");
+  await room2.damagePlayer(target.id, target.maxHp);
+  strict.ok(target.mainRevealed && target.deputyRevealed, "death must force-reveal both generals even with no prior turn");
+  strict.notEqual(target.faction, "", "death must assign a faction if the player died still undetermined");
+
+  console.log("PASS testHegemonyRevealTiming: bot reveals on its own first turn, a declining controller stays hidden, death force-reveals");
+}
+
+/**
+ * Skill-availability gating (Milestone 23 3rd addendum), pure: with a drafted deputy set,
+ * `GamePlayer.skills` (the getter every mechanical consumer reads) exposes exactly the revealed
+ * general's slice of the declared kit -- empty while both are hidden, the main's skills once
+ * main reveals, the full union once both do -- while `allSkills` always shows the full declared
+ * kit regardless. A player with no deputy (Identity mode, or before a Hegemony pair is drafted)
+ * is never gated at all.
+ */
+function testHegemonySkillsGatedByReveal(): void {
+  const player = new GamePlayer("P");
+  player.deputyGeneral = "somebody"; // any non-empty value marks this as a drafted Hegemony pair
+  player.skills = [SKILLS.paoxiao, SKILLS.wusheng, SKILLS.ganglie]; // pretend: first 2 = main, last 1 = deputy
+  player.mainSkillCount = 2;
+
+  strict.deepEqual(player.skills, [], "neither general revealed -- no active skills");
+  strict.equal(player.allSkills.length, 3, "allSkills always shows the full declared kit regardless of reveal state");
+
+  player.mainRevealed = true;
+  strict.deepEqual(player.skills, [SKILLS.paoxiao, SKILLS.wusheng], "only the main's 2 skills are active once main is revealed");
+
+  player.deputyRevealed = true;
+  strict.deepEqual(player.skills, [SKILLS.paoxiao, SKILLS.wusheng, SKILLS.ganglie], "both revealed -- full union active");
+
+  const solo = new GamePlayer("S");
+  solo.skills = [SKILLS.paoxiao];
+  strict.deepEqual(solo.skills, [SKILLS.paoxiao], "no deputyGeneral -- skills always fully active, no gating");
+
+  console.log("PASS testHegemonySkillsGatedByReveal: active skills track main/deputy reveal state exactly, allSkills always shows the full kit");
+}
+
+/**
+ * Hegemony reveal-COMPLETION bonuses (Milestone 23 addendum 5, verified against the real
+ * upstream `gamerule.cpp`'s `GeneralShown` handler): the instant a player's SECOND general
+ * reveals (`Room.runHegemonyReveal`'s `resolveHegemonyRevealBonuses`), a real companion pair
+ * (珠联璧合, `isCompanionPair`) offers a one-time recover-if-wounded-or-draw-2 choice, and a
+ * leftover-half-HP pair (`combineHegemonyHp`'s `bonusDraw`) offers a one-time bonus draw --
+ * both via Controller asks, both correctly skipped for a pair that's neither. Driven through a
+ * real Room (not just gamerule.ts's pure helpers), since the actual trigger moment
+ * (`hasShownAllGenerals`) lives in Room, not gamerule.ts.
+ */
+async function testHegemonyRevealCompletionBonuses(): Promise<void> {
+  const zhaoyun = GENERALS.find((g) => g.name === "zhaoyun")!;
+  const liushan = GENERALS.find((g) => g.name === "liushan")!;
+  strict.ok(isCompanionPair(zhaoyun.name, liushan.name), "sanity: zhaoyun/liushan must be a real companion pair");
+  strict.ok(combineHegemonyHp(zhaoyun.maxHp, liushan.maxHp).bonusDraw, "sanity: zhaoyun(4)+liushan(3) must leave a leftover half");
+
+  // Case 1: undamaged companion pair with a leftover half -- both bonuses offered, both accepted (draw).
+  {
+    let companionAskCount = 0;
+    let companionCanRecover = true; // overwritten before use; starts wrong on purpose so a missed ask fails loudly
+    let halfHpAsked = false;
+    const room = new Room(playerIds(6), seededRng(1), GameMode.Hegemony);
+    const targetId = room.players[room.currentIndex].id;
+    room.setController(targetId, {
+      chooseGeneral: async (_c, role) => (role === "main" ? zhaoyun : liushan),
+      chooseCompanionBonus: async (_p, canRecover) => {
+        companionAskCount++;
+        companionCanRecover = canRecover;
+        return "draw";
+      },
+      wantsHalfMaxHpBonusDraw: async () => {
+        halfHpAsked = true;
+        return true;
+      },
+    });
+    await room.pickGenerals();
+    const player = room.players.find((p) => p.id === targetId)!;
+    strict.equal(player.general, "zhaoyun", "forced main pick must be respected regardless of offered candidates");
+    strict.equal(player.deputyGeneral, "liushan", "forced deputy pick must be respected");
+
+    await room.playTurn(); // bots (and this forced controller) always reveal everything on their own 1st turn
+    strict.ok(player.mainRevealed && player.deputyRevealed, "sanity: fully revealed after the player's own turn");
+    strict.equal(companionAskCount, 1, "companion bonus must be asked exactly once");
+    strict.equal(companionCanRecover, false, "companion bonus asked, canRecover false (undamaged)");
+    strict.ok(halfHpAsked, "half-hp bonus draw asked -- leftover half present");
+    strict.ok(room.log.some((l) => l.includes(`${targetId} rút 2 lá (珠联璧合)`)), "companion draw(2) choice must be logged");
+    strict.ok(room.log.some((l) => l.includes(`${targetId} rút 1 lá (thể lực lẻ nửa)`)), "half-hp bonus draw must be logged");
+  }
+
+  // Case 2: a WOUNDED companion pair choosing "recover" -- heals 1 hp instead of drawing, and
+  // canRecover correctly flips true.
+  {
+    let companionAskCount = 0;
+    let companionCanRecover = false; // overwritten before use; starts wrong on purpose so a missed ask fails loudly
+    const room = new Room(playerIds(6), seededRng(1), GameMode.Hegemony);
+    const targetId = room.players[room.currentIndex].id;
+    room.setController(targetId, {
+      chooseGeneral: async (_c, role) => (role === "main" ? zhaoyun : liushan),
+      chooseCompanionBonus: async (_p, canRecover) => {
+        companionAskCount++;
+        companionCanRecover = canRecover;
+        return "recover";
+      },
+      wantsHalfMaxHpBonusDraw: async () => false,
+    });
+    await room.pickGenerals();
+    const player = room.players.find((p) => p.id === targetId)!;
+    await room.damagePlayer(targetId, 1);
+    const hpBefore = player.hp;
+    await room.playTurn();
+    strict.equal(companionAskCount, 1, "companion bonus must be asked exactly once");
+    strict.equal(companionCanRecover, true, "companion bonus asked with canRecover true once wounded");
+    strict.equal(player.hp, hpBefore + 1, "recover choice must heal exactly 1 hp");
+    strict.ok(room.log.some((l) => l.includes(`${targetId} hồi 1 máu (珠联璧合)`)), "companion recover must be logged");
+  }
+
+  // Case 3: a non-companion pair with no leftover half -- neither bonus is ever asked.
+  {
+    let anyBonusAsked = false;
+    const huangzhong = GENERALS.find((g) => g.name === "huangzhong")!;
+    const zhurong = GENERALS.find((g) => g.name === "zhurong")!;
+    strict.ok(!isCompanionPair(huangzhong.name, zhurong.name), "sanity: huangzhong/zhurong must NOT be a companion pair");
+    strict.ok(!combineHegemonyHp(huangzhong.maxHp, zhurong.maxHp).bonusDraw, "sanity: huangzhong(4)+zhurong(4) must leave no leftover half");
+    const room = new Room(playerIds(6), seededRng(1), GameMode.Hegemony);
+    const targetId = room.players[room.currentIndex].id;
+    room.setController(targetId, {
+      chooseGeneral: async (_c, role) => (role === "main" ? huangzhong : zhurong),
+      chooseCompanionBonus: async () => {
+        anyBonusAsked = true;
+        return "cancel";
+      },
+      wantsHalfMaxHpBonusDraw: async () => {
+        anyBonusAsked = true;
+        return false;
+      },
+    });
+    await room.pickGenerals();
+    await room.playTurn();
+    strict.equal(anyBonusAsked, false, "neither bonus may be asked for a non-companion, no-leftover-half pair");
+  }
+
+  console.log(
+    "PASS testHegemonyRevealCompletionBonuses: companion pair offers recover/draw exactly once at full reveal, leftover-half offers a bonus draw, neither fires for an unrelated pair",
+  );
+}
+
 await testZhijianEquipsAnotherPlayer();
 await testWanshaBlocksAllyRescueDuringOwnTurn();
 await testPindianTieBreakFavorsOpponent();
@@ -2463,6 +2907,18 @@ await testIndulgenceSkipsPlayPhaseOnFailedJudgment();
 await testTianduClaimsOwnJudgmentCard();
 testQianxunBlocksIndulgenceEntry();
 testGuoseLetsADiamondCardBePlayedAsIndulgence();
+testAssignHegemonyFactionRespectsQuota();
+testHegemonyWinCondition();
+testHegemonyIsAllyUsesFactionNotRole();
+testCombineHegemonyHp();
+await testHegemonyDraftPicksSameKingdomPairWithCombinedStats();
+await testAoChienBlocksPeachRescue();
+testAoChienLetsPeachSubstituteForSlashAndJink();
+await testAoChienTriggersOnlyAtFourDistinctFactionSurvivors();
+await testEmergentHegemonyGameReachesWinCondition();
+await testHegemonyRevealTiming();
+testHegemonySkillsGatedByReveal();
+await testHegemonyRevealCompletionBonuses();
 console.log(
-  "\nAll Milestone 0-3.9 smoke tests passed, plus Luoshen/Fanjian/Lieren/Quhu/Jieyin/Dimeng/Zhijian/Lijian/Wansha/Luanwu/Xiongyi/Guidao/Lirang/Duoshi/Fangquan/Indulgence/Tiandu/Guose.",
+  "\nAll Milestone 0-3.9 smoke tests passed, plus Luoshen/Fanjian/Lieren/Quhu/Jieyin/Dimeng/Zhijian/Lijian/Wansha/Luanwu/Xiongyi/Guidao/Lirang/Duoshi/Fangquan/Indulgence/Tiandu/Guose, plus Milestone 23 Hegemony (Quốc Chiến) mode.",
 );
