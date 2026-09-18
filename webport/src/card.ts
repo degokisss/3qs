@@ -8,18 +8,24 @@
 // Only card kinds with resolution logic implemented (combat.ts / trick.ts) are dealt by
 // Room. Kinds present in the real source but NOT YET resolvable are explicitly excluded here
 // rather than silently dropped:
-//   Trick: IronChain(x3), FireAttack(x2), Collateral(x1), Nullification(x1), HegNullification(x2),
-//     AwaitExhausted(x2), KnownBoth(x2), BefriendAttacking(x1), Lightning(x1) -- all need the
-//     delayed-trick/judge-area system or a reactive counter-play stack (respond-with-
-//     Nullification-to-a-trick-in-flight), neither of which exists yet.
-//     Indulgence WAS in this list too -- now implemented (Guojia's Tiandu needed at least 1
-//     delayed trick to ever have anything to claim); see room.ts's judgeArea/runJudgePhase and
-//     trick.ts's resolveIndulgenceJudgment. SupplyShortage (Milestone 25, Xu Huang's Duanliang)
-//     WAS in this list too -- same judge-area system, a 2nd delayed trick attached alongside it
-//     -- see trick.ts's resolveSupplyShortageJudgment. Still no Nullification counter-play
-//     window for either (same precedent already accepted for every other targeted trick here).
-//   Equip: EightDiagram/RenwangShield/Vine/SilverLion (all 4 Standard armors) -- need the
-//     trigger/skill system (judgment-based dodge, locked damage immunity, etc.)
+//   Trick: Indulgence, SupplyShortage, FireAttack, Lightning, Collateral, BefriendAttacking,
+//     AwaitExhausted, IronChain, Nullification, HegNullification, KnownBoth WERE all in this
+//     list at some point across earlier milestones -- each turned out to fit (or extend)
+//     existing engine machinery; see each one's own resolver in trick.ts for the exact
+//     reasoning (Milestone 31's header there covers the last 3 -- the reactive counter-play
+//     window and the private-reveal channel).
+//   Equip: EightDiagram/RenwangShield/Vine/SilverLion (the 4 Standard armors, Milestone 34) WAS
+//     in this list too -- turned out to need only a 4th equip SLOT (`player.armor`, alongside
+//     the existing weapon/defenseHorse/offenseHorse) plus a handful of new hook points already
+//     shaped for exactly this kind of thing: 3 of the 4 are "Tỏa định kỹ" (locked, always-on,
+//     no ask) -- RenwangShield/Vine nullify a Slash/AOE outright inside `resolveSlash`/
+//     `resolveSavageAssault`/`resolveArcheryAttack` (same `Global_NonSkillNullify`-equivalent
+//     early-return already used for Weimu's black-trick immunity), SilverLion caps damage and
+//     Vine adds +1 Fire damage inside the single shared `applyDamage` choke point every damage
+//     source already flows through. Only EightDiagram needed a genuinely NEW ask
+//     (`askUseEightDiagram`) -- an optional judgment-based backup dodge, offered when no real/
+//     viewAs Jink was found, reusing the existing `judge()` helper. See combat.ts's
+//     `applyDamage`/`resolveSlash` headers and trick.ts's AOE resolvers for the exact hooks.
 // AmazingGrace/GodSalvation/ArcheryAttack are constructed with no suit/point in the source
 // (`new ArcheryAttack` etc.) -- modeled here with a placeholder Spade/0, since no implemented
 // mechanic reads their suit yet.
@@ -48,8 +54,18 @@ export enum CardKind {
   Dismantlement = "dismantlement",
   Indulgence = "indulgence",
   SupplyShortage = "supply_shortage",
+  FireAttack = "fire_attack",
+  Lightning = "lightning",
+  Collateral = "collateral",
+  BefriendAttacking = "befriend_attacking",
+  AwaitExhausted = "await_exhausted",
+  IronChain = "iron_chain",
+  Nullification = "nullification",
+  HegNullification = "heg_nullification",
+  KnownBoth = "known_both",
   Weapon = "weapon",
   Horse = "horse",
+  Armor = "armor",
 }
 
 export interface Card {
@@ -62,6 +78,7 @@ export interface Card {
   weaponRange?: number; // Weapon only, src/package/standard-equips.cpp Weapon(suit, number, range)
   horseName?: string;
   horseDelta?: number; // Horse only: +1 defensive, -1 offensive
+  armorName?: string; // Armor only
   /** True only for `makeVirtualSlash()`'s output -- a card that was never part of the dealt
    *  deck (see its own doc comment). Lets card-count invariants (e.g. simulate.ts's
    *  `totalCardsInPlay`) exclude it instead of drifting the expected total. */
@@ -141,6 +158,40 @@ function implementedTrickCards(): Card[] {
     // `dev`-branch source, `trickCards()`'s `new SupplyShortage(Card::Spade, 10) << new
     // SupplyShortage(Card::Club, 10)`).
     card(CardKind.SupplyShortage, S, 10), card(CardKind.SupplyShortage, C, 10),
+    // Real Sanguosha ships 2: Heart 2, Heart 3 (verified against this repo's actual `dev`-branch
+    // source, `trickCards()`'s `new FireAttack(Card::Heart, 2) << new FireAttack(Card::Heart, 3)`).
+    card(CardKind.FireAttack, H, 2), card(CardKind.FireAttack, H, 3),
+    // Real Sanguosha ships 1, constructed with no suit/point in the source (`new Lightning` at
+    // the end of `trickCards()`) -- same "no implemented mechanic reads a delayed trick's own
+    // suit/point, only the freshly-drawn judgment card's suit matters" precedent as Indulgence/
+    // SupplyShortage, modeled with the same placeholder Spade/0 this file already uses for
+    // AmazingGrace/GodSalvation/ArcheryAttack.
+    card(CardKind.Lightning, S, 0),
+    // Real Sanguosha ships 1 each, both constructed with no suit/point in the source (`new
+    // Collateral` / `new BefriendAttacking`) -- same placeholder-Spade/0 precedent as
+    // AmazingGrace/GodSalvation/ArcheryAttack/Lightning above (no implemented mechanic reads
+    // either card's own suit/point).
+    card(CardKind.Collateral, S, 0),
+    card(CardKind.BefriendAttacking, S, 0),
+    // Real Sanguosha ships 2: Heart 11, Diamond 4 (verified against this repo's actual
+    // `dev`-branch source, `trickCards()`'s `new AwaitExhausted(Card::Heart, 11) << new
+    // AwaitExhausted(Card::Diamond, 4)`).
+    card(CardKind.AwaitExhausted, H, 11), card(CardKind.AwaitExhausted, D, 4),
+    // Real Sanguosha ships 3: Spade 12, Club 12, Club 13 (verified against this repo's actual
+    // `dev`-branch source, `trickCards()`'s `new IronChain(Card::Spade, 12) << new
+    // IronChain(Card::Club, 12) << new IronChain(Card::Club, 13)`).
+    card(CardKind.IronChain, S, 12), card(CardKind.IronChain, C, 12), card(CardKind.IronChain, C, 13),
+    // Real Sanguosha ships 1, constructed with no explicit suit/point in the source (`new
+    // Nullification` -- the base class default is `Spade, 11`, per standard-tricks.h's
+    // `Q_INVOKABLE Nullification(Card::Suit suit = Spade, int number = 11)`).
+    card(CardKind.Nullification, S, 11),
+    // Real Sanguosha ships 2: Club 13, Diamond 12 (verified against this repo's actual
+    // `dev`-branch source, `trickCards()`'s `new HegNullification(Card::Club, 13) << new
+    // HegNullification(Card::Diamond, 12)`).
+    card(CardKind.HegNullification, C, 13), card(CardKind.HegNullification, D, 12),
+    // Real Sanguosha ships 2: Club 3, Club 4 (verified against this repo's actual `dev`-branch
+    // source, `trickCards()`'s `new KnownBoth(Card::Club, 3) << new KnownBoth(Card::Club, 4)`).
+    card(CardKind.KnownBoth, C, 3), card(CardKind.KnownBoth, C, 4),
   ];
 }
 
@@ -168,6 +219,14 @@ const HORSES: [string, Suit, number, number][] = [
   ["ZiXing", Suit.Diamond, 13, -1],
 ];
 
+// [name, suit, point]
+const ARMORS: [string, Suit, number][] = [
+  ["EightDiagram", Suit.Spade, 2],
+  ["RenwangShield", Suit.Club, 2],
+  ["Vine", Suit.Club, 2],
+  ["SilverLion", Suit.Club, 1],
+];
+
 function equipCards(): Card[] {
   const weapons = WEAPONS.map(([name, suit, point, range]) =>
     card(CardKind.Weapon, suit, point, { weaponName: name, weaponRange: range }),
@@ -175,10 +234,11 @@ function equipCards(): Card[] {
   const horses = HORSES.map(([name, suit, point, delta]) =>
     card(CardKind.Horse, suit, point, { horseName: name, horseDelta: delta }),
   );
-  return [...weapons, ...horses];
+  const armors = ARMORS.map(([name, suit, point]) => card(CardKind.Armor, suit, point, { armorName: name }));
+  return [...weapons, ...horses, ...armors];
 }
 
-/** Full deck actually dealt by Room: basics + the implemented trick/equip subset (87 cards). */
+/** Full deck actually dealt by Room: basics + the implemented trick/equip subset (108 cards). */
 export function buildStandardDeck(): Card[] {
   return [...basicCards(), ...implementedTrickCards(), ...equipCards()];
 }

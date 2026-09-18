@@ -1,6 +1,7 @@
 // General skills. This is a deliberately small, TYPED hook system (not a generic
 // events<<...>>/triggerable/cost/effect trigger bus like src/core/skill.h's TriggerSkill) --
-// these hook points cover the 44 generals ported so far. If/when many more generals are ported,
+// these hook points cover all 60 generals ported so far (see the GENERALS array's own header
+// comment below for the milestone-by-milestone breakdown). If/when even more are ever needed,
 // this should graduate to a real event bus (Room emits named events, skills subscribe); doing
 // that now would be speculative infrastructure.
 //
@@ -303,6 +304,16 @@ export interface Skill {
    *  the skill do its own compensation (e.g. Shensu: force a rangeless bonus Slash; Qiaobian:
    *  take a card from up to 2 chosen players during a skipped Draw phase). */
   onPhaseSkippedForDiscard?(ctx: EngineContext, player: GamePlayer, phase: Phase): Promise<void>;
+  /** ViewAs: can `card` be played as if it were Fire Attack (e.g. Wolong's Huoji, any red
+   *  card)? Milestone 27. */
+  canViewAsFireAttack?(card: Card, player: GamePlayer): boolean;
+  /** Milestone 27 (Zhou Tai's Buqu): consulted by `resolveDying` (combat.ts) only once every
+   *  normal self/ally Peach-rescue attempt has already been exhausted and `player.hp` is still
+   *  <=0 -- returning true keeps `player` alive at their current (possibly negative) hp instead
+   *  of dying, with NO healing. Distinct from `cheatsDeath` (always heals back to a positive hp,
+   *  once-per-game): this can fire every single time `player` would die, for as long as it
+   *  keeps succeeding. */
+  preventsDeath?(ctx: EngineContext, player: GamePlayer): Promise<boolean>;
 }
 
 function isRed(card: Card): boolean {
@@ -1123,8 +1134,9 @@ async function niepanCheatsDeath(ctx: EngineContext, player: GamePlayer): Promis
   if (player.usedLimitSkills.has("niepan") || !(await ctx.askUseSelfAction(player, "niepan"))) return false;
   player.usedLimitSkills.add("niepan");
   ctx.discardPile.push(...player.hand.splice(0));
-  const equipsLost = [player.weapon, player.defenseHorse, player.offenseHorse].filter((c): c is Card => c !== null);
+  const equipsLost = [player.weapon, player.armor, player.defenseHorse, player.offenseHorse].filter((c): c is Card => c !== null);
   player.weapon = null;
+  player.armor = null;
   player.defenseHorse = null;
   player.offenseHorse = null;
   ctx.discardPile.push(...equipsLost, ...player.judgeArea.splice(0));
@@ -1226,21 +1238,22 @@ const jushouAction = {
  *  3rd-party trigger, not something the attacker or the damaged player's own skills decide. */
 async function kuangfuOnSomeoneSlashDamaged(ctx: EngineContext, panfeng: GamePlayer, target: GamePlayer): Promise<void> {
   if (panfeng === target) return; // the real rule's own equip-slot-conflict logic implies a 3rd party reacting, not self-targeting
-  const candidates = [target.weapon, target.defenseHorse, target.offenseHorse].filter((c): c is Card => c !== null);
+  const candidates = [target.weapon, target.armor, target.defenseHorse, target.offenseHorse].filter((c): c is Card => c !== null);
   if (candidates.length === 0 || !(await ctx.askUseSelfAction(panfeng, "kuangfu"))) return;
   const chosen = await ctx.askPickPlayerCard(panfeng, target, candidates);
   const ownSlotEmpty =
     (chosen.kind === CardKind.Weapon && !panfeng.weapon) ||
+    (chosen.kind === CardKind.Armor && !panfeng.armor) ||
     (chosen.horseDelta === 1 && !panfeng.defenseHorse) ||
     (chosen.horseDelta === -1 && !panfeng.offenseHorse);
   const move = ownSlotEmpty && (await ctx.askUseSelfAction(panfeng, "kuangfu-move"));
   await detachCardFrom(ctx, target, chosen);
   if (move) {
     await ctx.equipPlayer(panfeng, chosen);
-    ctx.log.push(`${panfeng.id} chuyển ${chosen.weaponName ?? chosen.horseName} của ${target.id} về mình (kuangfu)`);
+    ctx.log.push(`${panfeng.id} chuyển ${chosen.weaponName ?? chosen.horseName ?? chosen.armorName} của ${target.id} về mình (kuangfu)`);
   } else {
     ctx.discardPile.push(chosen);
-    ctx.log.push(`${panfeng.id} bỏ ${chosen.weaponName ?? chosen.horseName} của ${target.id} (kuangfu)`);
+    ctx.log.push(`${panfeng.id} bỏ ${chosen.weaponName ?? chosen.horseName ?? chosen.armorName} của ${target.id} (kuangfu)`);
   }
 }
 
@@ -1334,6 +1347,82 @@ async function tianyiOtherPhaseAction(ctx: EngineContext, taishici: GamePlayer):
     taishici.tianyiLostThisTurn = true;
     ctx.log.push(`${taishici.id} thua đấu điểm, không thể dùng Sát lượt này (tianyi)`);
   }
+}
+
+/**
+ * Buqu (Zhou Tai): real dev-branch behavior (lang/vi_VN describes a different, simpler
+ * single-general revision -- reveal exactly 1 card per dying attempt, heal straight to 1 hp on
+ * a non-matching point, discard-and-fail on a match -- not ported, matching this file's
+ * established "real C++ wins over a mismatched vi_VN revision" precedent set by Longdan/
+ * Kongcheng/Tieqi/Kurou above). Consulted by `resolveDying` (combat.ts) only after every normal
+ * self/ally Peach-rescue attempt this dying episode has already failed: may draw enough
+ * face-down "Sang" (scar) cards -- accumulated in `player.buquPile` across repeated dying
+ * attempts, never shrinking on its own -- to match the current hp deficit (`1 - player.hp`); if
+ * no two Sang share a point value, `player` survives at their current (possibly negative) hp
+ * instead of dying. A shared point value ends the streak: death proceeds for real.
+ */
+async function buquPreventsDeath(ctx: EngineContext, player: GamePlayer): Promise<boolean> {
+  if (!(await ctx.askUseSelfAction(player, "buqu"))) return false;
+  const need = 1 - player.hp;
+  const drawCount = need - player.buquPile.length;
+  for (let i = 0; i < drawCount; i++) {
+    const scar = ctx.drawTop();
+    if (!scar) break;
+    player.buquPile.push(scar);
+  }
+  const seenPoints = new Set<number>();
+  let hasDuplicate = false;
+  for (const scar of player.buquPile) {
+    if (seenPoints.has(scar.point)) {
+      hasDuplicate = true;
+      break;
+    }
+    seenPoints.add(scar.point);
+  }
+  if (hasDuplicate) {
+    ctx.log.push(`${player.id} phát động Bất Khuất nhưng có 2 Sang trùng điểm, không thoát chết (buqu)`);
+    return false;
+  }
+  ctx.log.push(`${player.id} phát động Bất Khuất, ${player.buquPile.length} Sang chưa trùng điểm, thoát chết (buqu)`);
+  return true;
+}
+
+/** Buqu's other half: the whole Sang pile is discarded the instant `player` actually recovers
+ *  back above 0 hp (real rule: `HpRecover` clears the pile) -- reuses the generic `onRecover`
+ *  hook every recovery source already fires through (`heal()`, combat.ts). */
+function buquOnRecover(ctx: EngineContext, player: GamePlayer): void {
+  if (player.hp > 0 && player.buquPile.length > 0) {
+    ctx.discardPile.push(...player.buquPile);
+    ctx.log.push(`${player.id} hồi máu dương, bỏ toàn bộ Sang tích lũy (buqu)`);
+    player.buquPile = [];
+  }
+}
+
+/** Qingcheng (Zoushi): once per Play phase (no explicit cap in the real rule either -- eligible
+ *  targets are naturally rare, same self-limiting-cost precedent as Zhijian above), discard 1
+ *  held equip card and choose another player who has revealed BOTH their generals
+ *  (`hasShownAllGenerals`-equivalent) -- hides their MAIN general again (real rule lets the
+ *  attacker pick which of the 2; this port always targets the main slot, same "faithful
+ *  behavior, simplified interaction" precedent as Guanxing's top/bottom split). Hegemony-mode-
+ *  only in practice: a `mainRevealed && deputyRevealed` candidate never exists outside a
+ *  drafted dual-general pair. Zoushi's OTHER skill, Huoshui (locks every other player out of
+ *  voluntarily revealing during her own turn), is correctly left unported -- this engine's own
+ *  reveal-TIMING simplification (`Room.runHegemonyReveal`) only ever asks a player to reveal
+ *  during THEIR OWN RoundStart, never during someone else's turn, so the exact action Huoshui
+ *  restricts never has an opportunity to happen for anyone but the active player in the first
+ *  place -- unobservable under this port's existing architecture, same class of genuine
+ *  engine-constraint gap as Dingfeng's Duanbing (README's Milestone 26 correction). */
+async function qingchengSelfAction(ctx: EngineContext, player: GamePlayer): Promise<void> {
+  const equipCards = player.hand.filter((c) => c.kind === CardKind.Weapon || c.kind === CardKind.Horse || c.kind === CardKind.Armor);
+  const candidates = ctx.alivePlayers.filter((p) => p !== player && p.deputyGeneral !== "" && p.mainRevealed && p.deputyRevealed);
+  if (equipCards.length === 0 || candidates.length === 0 || !(await ctx.askUseSelfAction(player, "qingcheng"))) return;
+  const card = await ctx.askPickCard(player, equipCards);
+  const target = await ctx.askChooseAnyPlayer(player, candidates);
+  if (!target) return;
+  player.hand.splice(player.hand.indexOf(card), 1);
+  ctx.discardPile.push(card);
+  target.mainRevealed = false;
+  ctx.log.push(`${player.id} bỏ 1 lá trang bị, úp lại chủ tướng của ${target.id} (qingcheng)`);
 }
 
 export const SKILLS: Record<string, Skill> = {
@@ -1860,6 +1949,27 @@ export const SKILLS: Record<string, Skill> = {
     otherPhaseAction: { phase: Phase.Play, run: tianyiOtherPhaseAction },
     slashLimit: (player) => (player.tianyiWonThisTurn ? 2 : 1),
   },
+  huoji: {
+    name: "huoji",
+    displayName: "Hỏa Kế",
+    description: "Bạn có thể chuyển hoá sử dụng lá bài chất Đỏ (♥/♦) trên tay thành [Hỏa Công].",
+    canViewAsFireAttack: (card) => isRed(card),
+  },
+  buqu: {
+    name: "buqu",
+    displayName: "Bất Khuất",
+    description:
+      "Tỏa định kỹ: Khi lẽ ra bạn phải chết (đã hết mọi cơ hội tự cứu/nhờ cứu), bạn có thể rút thêm bài úp làm 'Sang' cho đủ số lượng bằng lượng máu âm hiện tại; nếu chưa có 2 Sang trùng điểm số, bạn thoát chết (máu giữ nguyên, có thể âm); nếu trùng, bạn chết như bình thường. Sang tích lũy qua nhiều lần hấp hối, chỉ bỏ hết khi bạn hồi máu về dương.",
+    preventsDeath: buquPreventsDeath,
+    onRecover: buquOnRecover,
+  },
+  qingcheng: {
+    name: "qingcheng",
+    displayName: "Khuynh Thành",
+    description:
+      "Giai đoạn ra bài, bạn có thể bỏ 1 lá trang bị trên tay và chọn 1 người khác đã lộ diện toàn bộ tướng của họ, úp lại chủ tướng của người đó.",
+    selfAction: qingchengSelfAction,
+  },
 };
 
 export interface GeneralDef {
@@ -1875,8 +1985,9 @@ export interface GeneralDef {
   gender?: "female";
 }
 
-// 44 of the ~60 Standard generals in this repo's `dev`-branch source are ported so far -- see
-// webport/README.md's Milestone 2.6 section for the full remaining/blocked list and why.
+// 57 of the ~60 Standard generals in this repo's `dev`-branch source were ported before
+// Milestone 27; see webport/README.md's Milestone 27 section for the final 3 (Wolong/Zhoutai/
+// Zoushi, closing the roster to 60/60) and which of their skills were/weren't portable.
 export const GENERALS: GeneralDef[] = [
   { name: "zhangfei", displayName: "Trương Phi", kingdom: "shu", maxHp: 4, skillNames: ["paoxiao"] },
   { name: "guanyu", displayName: "Quan Vũ", kingdom: "shu", maxHp: 5, skillNames: ["wusheng"] },
@@ -1946,4 +2057,11 @@ export const GENERALS: GeneralDef[] = [
   { name: "xiahouyuan", displayName: "Hạ Hầu Uyên", kingdom: "wei", maxHp: 4, skillNames: ["shensu"] },
   { name: "zhanghe", displayName: "Trương Cáp", kingdom: "wei", maxHp: 4, skillNames: ["qiaobian"] },
   { name: "taishici", displayName: "Thái Sử Từ", kingdom: "wu", maxHp: 4, skillNames: ["tianyi"] },
+  // Milestone 27 (final 3 generals, 57->60 of 60 -- the real Standard roster is now fully
+  // ported): see webport/README.md's Milestone 27 section for the FireAttack trick card,
+  // Buqu's Sang-pile death-prevention hook, and why Zoushi's Huoshui was correctly left
+  // unported (a genuine engine-architecture gap, not an oversight).
+  { name: "wolong", displayName: "Ngọa Long", kingdom: "shu", maxHp: 3, skillNames: ["huoji"] },
+  { name: "zhoutai", displayName: "Chu Thái", kingdom: "wu", maxHp: 4, skillNames: ["buqu"] },
+  { name: "zoushi", displayName: "Trâu Thị", kingdom: "qun", maxHp: 3, skillNames: ["qingcheng"], gender: "female" }, // Huoshui deferred, see qingchengSelfAction's doc comment for the exact architecture reason
 ];
