@@ -26,8 +26,9 @@ import { CARD_CATALOG, GENERAL_CATALOG } from "./library.js";
 import type { Card } from "./card.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
-const MIN_PLAYERS = 5; // Room/gamerule.ts's role table only covers 5-10 players (identity mode).
-const MAX_PLAYERS = 10;
+const MIN_PLAYERS = 5; // Room's role table (Identity mode) and Hegemony's kingdom-quota math both start at 5.
+const MAX_PLAYERS_IDENTITY = 10; // Room/gamerule.ts's role table only covers 5-10 players.
+const MAX_PLAYERS_HEGEMONY = 12; // Hegemony has no role table -- kingdom quotas scale with player count.
 const TURN_INTERVAL_MS = 500;
 const HUMAN_RESPONSE_TIMEOUT_MS = 15000;
 
@@ -149,18 +150,19 @@ function scheduleLoop(gr: GameRoom, room: Room): void {
   }, TURN_INTERVAL_MS);
 }
 
-/** Always creates a room with the full 10 display slots (P1-P10) -- the creator decides, before
- *  starting, which ones actually play: claim a seat themselves, let others claim seats, and
- *  toggle bots onto whichever remaining slots they want filled (see "toggleBot"/"startGame").
- *  Anything left neither claimed nor bot-toggled is simply excluded from the real Room
- *  `startGame` builds, not silently defaulted to a bot like before. `mode` is fixed for the
- *  room's whole lifetime (see the GameRoom field doc comment) -- the placeholder Room built here
- *  is Identity-only regardless (its role/kingdom assignments are thrown away at `startGame`
- *  anyway; only the 10 P1..P10 seat slots it provides for the pre-start picker matter). */
+/** Always creates a room with the mode's full display-slot count (P1-P10 for Identity, P1-P12
+ *  for Hegemony) -- the creator decides, before starting, which ones actually play: claim a
+ *  seat themselves, let others claim seats, and toggle bots onto whichever remaining slots they
+ *  want filled (see "toggleBot"/"startGame"). Anything left neither claimed nor bot-toggled is
+ *  simply excluded from the real Room `startGame` builds, not silently defaulted to a bot like
+ *  before. `mode` is fixed for the room's whole lifetime (see the GameRoom field doc comment) --
+ *  the placeholder Room built here is already constructed with it (its role/kingdom assignments
+ *  are thrown away at `startGame` anyway; only the seat slots it provides for the pre-start
+ *  picker matter), since Room's own constructor validates player count PER mode. */
 function createRoom(creatorWs: WebSocket, mode: GameMode): GameRoom {
   const gr: GameRoom = {
     id: generateRoomId(),
-    room: new Room(newPlayerIds(MAX_PLAYERS)),
+    room: new Room(newPlayerIds(mode === GameMode.Hegemony ? MAX_PLAYERS_HEGEMONY : MAX_PLAYERS_IDENTITY), undefined, mode),
     clients: new Set(),
     claimedSeats: new Map(),
     botEnabledSlots: new Set(),
@@ -175,6 +177,7 @@ function createRoom(creatorWs: WebSocket, mode: GameMode): GameRoom {
   // Weapon/Horse equips otherwise wouldn't show up for any watching client until the whole turn
   // finished (broadcast() only fires once per COMPLETED turn) -- this makes them show immediately.
   gr.room.setLiveUpdateCallback(() => broadcast(gr));
+  gr.room.setPrivateRevealCallback((viewerId, reveal) => notifyClient(gr, viewerId, { type: "privateReveal", reveal }));
   // No scheduleLoop() here -- the room sits idle (no bot/human turns run) until the creator
   // sends `startGame`, so players can freely claim seats before anything happens.
   return gr;
@@ -245,8 +248,17 @@ function askClient<T>(
   return promise;
 }
 
+/** One-way notification to whichever client currently holds `playerId`'s seat -- unlike
+ *  `askClient`, no response is expected, so there's no requestId/timeout. A no-op if nobody is
+ *  connected to that seat (same silent-no-op-for-an-unclaimed-seat behavior `askClient` falls
+ *  back to via its own `fallback` param). Used for KnownBoth's private reveal. */
+function notifyClient(gr: GameRoom, playerId: string, payload: Record<string, unknown>): void {
+  const ws = gr.claimedSeats.get(playerId);
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
+}
+
 function equipCardName(card: Card): string {
-  return card.weaponName ?? card.horseName ?? card.kind;
+  return card.weaponName ?? card.horseName ?? card.armorName ?? card.kind;
 }
 
 /**
@@ -330,6 +342,17 @@ function makeHumanController(gr: GameRoom, playerId: string): Partial<Controller
         { type: "confirmAxe", actorId: playerId },
         (msg) => msg.value === true,
         false, // fallback: offensive/optional-resource action, same policy as wantsToUseKylinBow
+      ),
+    wantsToUseEightDiagram: () =>
+      askClient(
+        gr,
+        playerId,
+        { type: "confirmEightDiagram", actorId: playerId },
+        (msg) => msg.value !== false,
+        true, // fallback on timeout/disconnect: unlike Axe/IceSword/KylinBow (which spend a
+        // resource against SOMEONE ELSE), this ask only risks a wasted judgment card of your
+        // OWN in exchange for a free shot at avoiding certain damage -- matches
+        // wantsToDodge/wantsToUsePeach's "protective, always assumed yes" policy instead
       ),
     wantsToUseDoubleSword: () =>
       askClient(
@@ -491,7 +514,14 @@ function makeHumanController(gr: GameRoom, playerId: string): Partial<Controller
           cards: candidates.map((c) =>
             owner.hand.includes(c)
               ? { id: c.id, hidden: true }
-              : { id: c.id, hidden: false, kind: c.kind, weaponName: c.weaponName ?? null, horseName: c.horseName ?? null },
+              : {
+                  id: c.id,
+                  hidden: false,
+                  kind: c.kind,
+                  weaponName: c.weaponName ?? null,
+                  horseName: c.horseName ?? null,
+                  armorName: c.armorName ?? null,
+                },
           ),
         },
         (msg) => candidates.find((c) => c.id === msg.cardId) ?? candidates[0],
@@ -528,6 +558,33 @@ function makeHumanController(gr: GameRoom, playerId: string): Partial<Controller
           return Number.isInteger(idx) && idx >= 0 && idx < legalActions.length ? legalActions[idx] : null;
         },
         null, // no answer/timeout -> end the Play phase, same "silent human passes" policy as the other offensive/optional asks
+      ),
+    wantsToNullify: (_player, kind, source, target) =>
+      askClient(
+        gr,
+        playerId,
+        { type: "confirmNullification", actorId: playerId, kind, sourceId: source.id, targetId: target.id },
+        (msg) => msg.value === true,
+        false, // fallback on timeout/disconnect: spending a scarce answer card is an
+        // offensive/optional-resource action, same "silent human passes" policy as wantsToPlayTrick
+      ),
+    chooseHegNullificationScope: (_player, target) =>
+      askClient(
+        gr,
+        playerId,
+        { type: "chooseHegNullificationScope", actorId: playerId, targetId: target.id },
+        (msg) => (msg.scope === "all" ? "all" : "single"),
+        "single", // fallback on timeout/disconnect: the narrower, non-forced scope -- never
+        // silently escalated to the wider "all" option the player didn't actually choose
+      ),
+    chooseKnownBothOption: (_player, target, options) =>
+      askClient(
+        gr,
+        playerId,
+        { type: "chooseKnownBothOption", actorId: playerId, targetId: target.id, options },
+        (msg) => (options.includes(msg.choice as (typeof options)[number]) ? (msg.choice as (typeof options)[number]) : options[0]),
+        options[0], // fallback on timeout/disconnect: matches choosePickCard's own "first
+        // available option" default
       ),
   };
 }
@@ -586,6 +643,7 @@ function snapshot(gr: GameRoom) {
         deputyRevealed: p.deputyRevealed,
         kingdom: kingdomKnown ? p.kingdom : null,
         alive: p.alive,
+        chained: p.chained,
         hp: p.hp,
         maxHp: p.maxHp,
         // Role is only revealed to spectators once the player has shown it in-game (dead, or lord
@@ -599,6 +657,7 @@ function snapshot(gr: GameRoom) {
         handcardNum: p.handcardNum,
         weapon: p.weapon?.weaponName ?? null,
         weaponRange: p.weapon?.weaponRange ?? null,
+        armor: p.armor?.armorName ?? null,
         defenseHorse: p.defenseHorse?.horseName ?? null,
         defenseHorseDelta: p.defenseHorse?.horseDelta ?? null,
         offenseHorse: p.offenseHorse?.horseName ?? null,
@@ -810,8 +869,8 @@ wss.on("connection", (ws) => {
         // Only slots the creator actually configured (claimed by someone, or toggled to bot)
         // play -- anything left neither claimed nor bot-toggled is simply excluded, not
         // defaulted to a bot. Validate BEFORE constructing: Room's own constructor throws
-        // outside 5-10 players, and an uncaught throw here (inside a raw message handler, no
-        // request boundary) would crash the whole process.
+        // outside 5-10 players (Identity) / 5-12 players (Hegemony), and an uncaught throw here
+        // (inside a raw message handler, no request boundary) would crash the whole process.
         const activeIds = gr.room.players.map((p) => p.id).filter((id) => gr.claimedSeats.has(id) || gr.botEnabledSlots.has(id));
         if (activeIds.length < MIN_PLAYERS) {
           ws.send(
@@ -824,6 +883,7 @@ wss.on("connection", (ws) => {
         }
         gr.room = new Room(activeIds, undefined, gr.mode); // rebuild with exactly the final roster -- role/win tables are sized per player count
         gr.room.setLiveUpdateCallback(() => broadcast(gr));
+        gr.room.setPrivateRevealCallback((viewerId, reveal) => notifyClient(gr, viewerId, { type: "privateReveal", reveal }));
         for (const playerId of gr.claimedSeats.keys()) {
           gr.room.setController(playerId, makeHumanController(gr, playerId)); // bot-toggled seats already default to makeBotController
         }
@@ -871,9 +931,10 @@ wss.on("connection", (ws) => {
         clearTimeout(gr.loopTimer ?? undefined);
         gr.loopTimer = null;
         gr.started = false; // back to the waiting room; the creator must start it again
-        gr.room = new Room(newPlayerIds(MAX_PLAYERS)); // back to the full 10 display slots --
+        gr.room = new Room(newPlayerIds(gr.mode === GameMode.Hegemony ? MAX_PLAYERS_HEGEMONY : MAX_PLAYERS_IDENTITY), undefined, gr.mode); // back to the mode's full display slots --
         // botEnabledSlots/claimedSeats deliberately persist across a reset for a quick rematch
         gr.room.setLiveUpdateCallback(() => broadcast(gr)); // fresh Room instance -- re-register
+        gr.room.setPrivateRevealCallback((viewerId, reveal) => notifyClient(gr, viewerId, { type: "privateReveal", reveal }));
         reapplyClaims(gr);
         broadcast(gr);
         broadcastLobby();

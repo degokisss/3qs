@@ -19,6 +19,11 @@ export class GamePlayer {
   weapon: Card | null = null;
   defenseHorse: Card | null = null; // +1 delta: seatDistance(attacker -> me) is increased by 1
   offenseHorse: Card | null = null; // -1 delta: seatDistance(me -> target) is decreased by 1
+  /** Milestone 34: the 4th equip slot (Weapon/DefenseHorse/OffenseHorse being the other 3) --
+   *  one of the 4 Standard armors (EightDiagram/RenwangShield/Vine/SilverLion), all "Tỏa định
+   *  kỹ" (locked skill -- always active, no ask) except EightDiagram's own optional judge. See
+   *  combat.ts's `applyDamage`/`resolveSlash` headers for exactly how each one hooks in. */
+  armor: Card | null = null;
   general = ""; // set by Room from skill.ts's GENERALS; empty until assigned (pinyin id, e.g. "caocao" -- drives asset filenames)
   generalName = ""; // Vietnamese display name (e.g. "Tào Tháo"), set alongside `general` from GeneralDef.displayName
   kingdom = ""; // "wei"/"shu"/"wu"/"qun", set alongside general
@@ -112,6 +117,18 @@ export class GamePlayer {
    *  after that resumes completely normally, matching the real "auto-flip back up, no player
    *  choice involved" rule confirmed against gamerule.cpp's RoundStart handling). */
   faceDown = false;
+  /** Zhou Tai's Buqu (Milestone 27): "Sang" (scar) cards accumulated across repeated dying
+   *  attempts -- see skill.ts's `buquPreventsDeath` for how the pile grows and is checked, and
+   *  `buquOnRecover` for when it's discarded (the instant hp recovers back above 0). Never used
+   *  by any other general. */
+  buquPile: Card[] = [];
+  /** Iron Chain (Milestone 30): while true, this player takes/splashes chain damage -- see
+   *  combat.ts's `applyDamage` header for the exact real "any Fire/Thunder-natured hit on a
+   *  chained player unchains them and splashes the SAME damage to every OTHER still-chained
+   *  player" rule. Toggled by `trick.ts`'s `resolveIronChain`; never reset elsewhere (matches
+   *  the real rule -- stays chained indefinitely until either an elemental hit or another Iron
+   *  Chain use clears it). */
+  chained = false;
 
   constructor(id: string, maxHp = 4) {
     this.id = id;

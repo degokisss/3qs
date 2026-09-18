@@ -335,6 +335,19 @@
     text-transform: uppercase;
   }
   #libraryBtn:hover { background: var(--gold); color: var(--ink); }
+  #rulesBtn {
+    background: transparent;
+    color: var(--gold);
+    border: 1px solid var(--gold-dim);
+    border-radius: 3px;
+    padding: 5px 14px;
+    cursor: pointer;
+    font-family: var(--font-label);
+    font-size: 11.5px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  #rulesBtn:hover { background: var(--gold); color: var(--ink); }
   .libraryOverlay {
     display: none;
     position: fixed;
@@ -410,8 +423,21 @@
   .libCardName { font-family: var(--font-display); font-size: 17px; color: var(--parchment); margin-bottom: 4px; }
   .libCardMeta { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
   .libCardDesc { font-size: 11.5px; color: var(--text); line-height: 1.45; }
+  #rulesPanel { max-width: 820px; margin: 0 auto; }
+  #rulesContent { color: var(--text); font-size: 13.5px; line-height: 1.65; }
+  .rulesSection { margin-bottom: 22px; }
+  .rulesSection h3 {
+    font-family: var(--font-display); color: var(--gold); font-size: 18px;
+    margin: 0 0 8px; border-bottom: 1px solid #3a3f4d; padding-bottom: 6px;
+  }
+  .rulesSection p { margin: 0 0 10px; }
+  .rulesSection ul { margin: 0 0 10px; padding-left: 20px; }
+  .rulesSection li { margin-bottom: 5px; }
+  .rulesSection b { color: var(--parchment); }
+  .rulesSection .rulesNote { color: var(--text-dim); font-size: 12px; font-style: italic; }
 
-  /* --- the table: 10 seats ringed around a center emblem, like sitting around the game table --- */
+  /* --- the table: 10 seats (Identity) or 12 seats (Hegemony) ringed around a center emblem,
+     like sitting around the game table -- see #table.mode-hegemony for the wider variant --- */
   #table {
     max-width: 1280px;
     margin: 0 auto 22px;
@@ -425,9 +451,20 @@
     gap: 14px;
     align-items: stretch;
   }
+  #table.mode-hegemony {
+    grid-template-columns: 212px 1fr 1fr 1fr 1fr 1fr 212px;
+    grid-template-areas:
+      ".    top1  top2    top3    top4  top5  ."
+      "left  .    center  center  center  .   right"
+      ".    bot1  bot2    bot3    bot4  bot5  .";
+  }
   .slot-top1 { grid-area: top1; } .slot-top2 { grid-area: top2; } .slot-top3 { grid-area: top3; } .slot-top4 { grid-area: top4; }
   .slot-bot1 { grid-area: bot1; } .slot-bot2 { grid-area: bot2; } .slot-bot3 { grid-area: bot3; } .slot-bot4 { grid-area: bot4; }
   .slot-left { grid-area: left; } .slot-right { grid-area: right; }
+  .slot-top5 { grid-area: top5; } .slot-bot5 { grid-area: bot5; }
+  /* top5/bot5 only exist as named grid areas under .mode-hegemony's template above -- hide them
+     entirely outside it instead of letting them fall back to grid auto-placement. */
+  #table:not(.mode-hegemony) .slot-top5, #table:not(.mode-hegemony) .slot-bot5 { display: none; }
 
   #centerEmblem {
     grid-area: center;
@@ -607,6 +644,10 @@
   .role-hidden { background: #23262f; color: var(--text-dim); border: 1px solid #2f3340; }
   .role-kingdom { background: color-mix(in srgb, var(--kcolor, #6f9bc2) 22%, #1a1a1a); color: var(--kcolor, #6f9bc2); border: 1px solid var(--kcolor, #6f9bc2); }
   .roleIcon { width: 13px; height: 13px; }
+  .chainedBadge {
+    display: inline-block; margin-left: 5px; font-size: 12px; color: #8fa3c2;
+    filter: drop-shadow(0 0 2px rgba(143,163,194,0.7)); vertical-align: middle;
+  }
   .general { font-family: var(--font-label); font-size: 12px; color: var(--text-dim); text-transform: capitalize; margin-top: 1px; }
   .hp { margin: 7px 0 3px; display: flex; gap: 2px; }
   .gem { width: 10px; height: 10px; border-radius: 2px; transform: rotate(45deg); background: var(--blood); box-shadow: 0 0 4px rgba(163,49,47,0.6); }
@@ -624,6 +665,7 @@
   .equipBadge.weapon { background: var(--gold); color: var(--ink); } /* attack range */
   .equipBadge.defense { background: #4db8ff; color: #06131c; } /* +1: others need +1 distance to reach you */
   .equipBadge.offense { background: #f2795a; color: #260a03; } /* -1: your distance to others -1 */
+  .equipBadge.armor { background: #8bc98b; color: #0a1a0a; } /* locked passive protection, no numeric delta */
   .equipEmpty { font-size: 10px; color: var(--text-dim); font-style: italic; }
   /* --- custom floating tooltip: hover over equip icons (replaces the native `title` attribute,
      which is slow to appear and tiny/easy to miss against this dark theme) --- */
@@ -819,6 +861,27 @@
   }
   #confirmGuanxingBtn:hover { background: #ddb95c; }
 
+  /* --- KnownBoth's private reveal (Milestone 31): a short-lived toast in the corner, visible
+     only to the one client it's addressed to -- never part of the shared battle log. --- */
+  .privateRevealToast {
+    position: fixed;
+    top: 70px;
+    right: 18px;
+    z-index: 70;
+    max-width: 320px;
+    background: linear-gradient(180deg, #1c1710, #14100b);
+    border: 1px solid var(--gold);
+    border-radius: 6px;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.6);
+    padding: 12px 16px;
+    cursor: pointer;
+    animation: privateRevealIn 0.2s ease-out;
+  }
+  @keyframes privateRevealIn { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: translateX(0); } }
+  .privateRevealTitle { font-family: var(--font-label); font-size: 11.5px; color: var(--gold); letter-spacing: 0.5px; margin-bottom: 8px; }
+  .privateRevealCards { display: flex; gap: 6px; flex-wrap: wrap; font-size: 13px; color: var(--parchment); }
+  .privateRevealCards img { width: 44px; height: 60px; object-fit: cover; border-radius: 3px; border: 1px solid #3a3f4d; }
+
   #logWrap { max-width: 1280px; margin: 0 auto; }
   #logLabel {
     font-family: var(--font-label);
@@ -1006,6 +1069,9 @@
       grid-template-columns: 1fr 1fr;
       grid-template-areas: "top1 top2" "top3 top4" "left right" "center center" "bot1 bot2" "bot3 bot4";
     }
+    #table.mode-hegemony {
+      grid-template-areas: "top1 top2" "top3 top4" "top5 right" "left bot5" "center center" "bot4 bot3" "bot2 bot1";
+    }
   }
 </style>
 </head>
@@ -1016,6 +1082,7 @@
       <input id="myNameInput" type="text" placeholder="Tên của bạn" maxlength="24" />
       <span id="status" class="disconnected">connecting…</span>
       <button id="libraryBtn" onclick="window.__openLibrary()">Thư viện</button>
+      <button id="rulesBtn" onclick="window.__openRules()">Luật chơi</button>
       <span id="roomIdLabel"></span>
       <span id="myseat"></span>
       <button id="toggleRoleBtn" style="display:none" onclick="window.__toggleRole()"></button>
@@ -1040,6 +1107,20 @@
       </div>
       <input id="librarySearch" type="text" placeholder="Tìm theo tên tướng, kỹ năng, hoặc lá bài…" oninput="window.__onLibrarySearch(this.value)" />
       <div id="libraryContent"></div>
+    </div>
+  </div>
+
+  <div id="rulesOverlay" class="libraryOverlay">
+    <div id="rulesPanel">
+      <div id="libraryHeader">
+        <h2>Luật chơi</h2>
+        <div class="libraryTabs">
+          <button id="rulesTabIdentity" class="libraryTab active" onclick="window.__setRulesTab('identity')">Vai Trò</button>
+          <button id="rulesTabHegemony" class="libraryTab" onclick="window.__setRulesTab('hegemony')">Quốc Chiến</button>
+        </div>
+        <button id="rulesCloseBtn" onclick="window.__closeRules()">✕</button>
+      </div>
+      <div id="rulesContent"></div>
     </div>
   </div>
 
@@ -1089,7 +1170,9 @@
       <div class="slot-top2" data-slot="top2"></div>
       <div class="slot-top3" data-slot="top3"></div>
       <div class="slot-top4" data-slot="top4"></div>
+      <div class="slot-top5" data-slot="top5"></div>
       <div class="slot-right" data-slot="right"></div>
+      <div class="slot-bot5" data-slot="bot5"></div>
       <div class="slot-bot4" data-slot="bot4"></div>
       <div class="slot-bot3" data-slot="bot3"></div>
       <div class="slot-bot2" data-slot="bot2"></div>
@@ -1123,9 +1206,20 @@
       god_salvation: "Đào Viên Kết Nghĩa",
       amazing_grace: "Ngũ Cốc Phong Đăng",
       indulgence: "Lạc Bất Tư Thục",
+      fire_attack: "Hỏa Công",
+      lightning: "Thiểm Điện",
+      collateral: "Tá Đao Sát Nhân",
+      befriend_attacking: "Viễn Giao Cận Công",
+      await_exhausted: "Dĩ Dật Đãi Lao",
+      iron_chain: "Thiết Tác Liên Hoàn",
+      nullification: "Vô Giải Khả Kích",
+      heg_nullification: "Vô Giải Khả Kích - Quốc",
+      known_both: "Tri Bỉ Tri Kỉ",
     };
     const CARD_LABEL = { ...TRICK_LABEL, slash: "Sát", jink: "Thiểm", peach: "Đào", analeptic: "Tửu" };
-    const SLOT_ORDER = ["top1", "top2", "top3", "top4", "right", "bot4", "bot3", "bot2", "bot1", "left"]; // clockwise seating
+    const SLOT_ORDER_10 = ["top1", "top2", "top3", "top4", "right", "bot4", "bot3", "bot2", "bot1", "left"]; // clockwise seating, Identity mode (10 max)
+    const SLOT_ORDER_12 = ["top1", "top2", "top3", "top4", "top5", "right", "bot5", "bot4", "bot3", "bot2", "bot1", "left"]; // clockwise seating, Hegemony mode (12 max)
+    const ALL_SLOTS = ["top1", "top2", "top3", "top4", "top5", "right", "bot5", "bot4", "bot3", "bot2", "bot1", "left"];
     const IMG = "../../image";
 
     const statusEl = document.getElementById("status");
@@ -1148,7 +1242,7 @@
     const leaveRoomBtn = document.getElementById("leaveRoom");
     const newGameBtn = document.getElementById("newGame");
     const roomListEl = document.getElementById("roomListEl");
-    const slotEls = Object.fromEntries(SLOT_ORDER.map((s) => [s, document.querySelector(`[data-slot="${s}"]`)]));
+    const slotEls = Object.fromEntries(ALL_SLOTS.map((s) => [s, document.querySelector(`[data-slot="${s}"]`)]));
     const tableEl = document.getElementById("table");
     const pickGeneralPanelEl = document.getElementById("pickGeneralPanel");
     const pickGeneralHintEl = document.getElementById("pickGeneralHint");
@@ -1164,6 +1258,8 @@
     const drawPileLabelEl = document.getElementById("drawPileLabel");
     const libraryOverlayEl = document.getElementById("libraryOverlay");
     const libraryContentEl = document.getElementById("libraryContent");
+    const rulesOverlayEl = document.getElementById("rulesOverlay");
+    const rulesContentEl = document.getElementById("rulesContent");
 
     let ws = null;
     let pendingFreeAction = null; // { requestId, legalActions } while our turn's Play-phase prompt is active
@@ -1507,6 +1603,151 @@
       document.getElementById("libraryTabCards").classList.toggle("active", tab === "cards");
       renderLibrary();
     };
+
+    /** Rules ("Luật chơi"): static reference text for both game modes -- entirely client-side,
+     *  no server round-trip (unlike the library's server-fetched catalog), since the content
+     *  never depends on game state. Reachable from the header at any time (lobby or mid-game). */
+    let rulesTab = "identity"; // "identity" | "hegemony"
+    window.__openRules = () => {
+      rulesOverlayEl.className = "libraryOverlay active";
+      renderRules();
+    };
+    window.__closeRules = () => {
+      rulesOverlayEl.className = "libraryOverlay";
+    };
+    window.__setRulesTab = (tab) => {
+      rulesTab = tab;
+      document.getElementById("rulesTabIdentity").classList.toggle("active", tab === "identity");
+      document.getElementById("rulesTabHegemony").classList.toggle("active", tab === "hegemony");
+      renderRules();
+    };
+    function renderRules() {
+      rulesContentEl.innerHTML = rulesTab === "identity" ? RULES_IDENTITY_HTML : RULES_HEGEMONY_HTML;
+    }
+
+    /** Content is written to match this port's ACTUAL implemented rules exactly (see
+     *  gamerule.ts's ROLE_COUNTS/checkWinCondition for Identity, its Hegemony section for
+     *  Quốc Chiến) -- not the full upstream ruleset, since several upstream mechanics are
+     *  deliberately unported here (see gamerule.ts + README.md's milestone notes for the
+     *  authoritative list of what's deferred and why). */
+    const RULES_IDENTITY_HTML = `
+      <div class="rulesSection">
+        <h3>Tổng quan</h3>
+        <p>Chế độ Vai Trò (Identity) dành cho 5-10 người chơi. Mỗi người được chia ngẫu nhiên một
+        trong 4 vai trò, giữ bí mật trừ <b>Chủ công</b> (luôn công khai từ đầu ván):</p>
+        <ul>
+          <li><b>Chủ công</b> (duy nhất 1 người) -- ngồi công khai, thường có nhiều máu nhất bàn.</li>
+          <li><b>Trung thần</b> -- mục tiêu là bảo vệ Chủ công sống sót.</li>
+          <li><b>Phản tặc</b> -- mục tiêu là giết Chủ công.</li>
+          <li><b>Nội gián</b> (duy nhất 1 hoặc 2 người tùy số người chơi) -- phải là người sống sót
+          cuối cùng, kể cả phải trở mặt với phe đã từng hợp tác.</li>
+        </ul>
+      </div>
+      <div class="rulesSection">
+        <h3>Số lượng vai trò theo số người chơi</h3>
+        <ul>
+          <li>5 người: 1 Chủ công, 1 Trung thần, 2 Phản tặc, 1 Nội gián</li>
+          <li>6 người: 1 Chủ công, 1 Trung thần, 3 Phản tặc, 1 Nội gián</li>
+          <li>7 người: 1 Chủ công, 2 Trung thần, 3 Phản tặc, 1 Nội gián</li>
+          <li>8 người: 1 Chủ công, 2 Trung thần, 4 Phản tặc, 1 Nội gián</li>
+          <li>9 người: 1 Chủ công, 3 Trung thần, 4 Phản tặc, 1 Nội gián</li>
+          <li>10 người: 1 Chủ công, 3 Trung thần, 4 Phản tặc, 2 Nội gián</li>
+        </ul>
+      </div>
+      <div class="rulesSection">
+        <h3>Điều kiện thắng</h3>
+        <p>Được kiểm tra đúng theo thứ tự ưu tiên sau, sau mỗi lần có người chết:</p>
+        <ul>
+          <li>Nếu Nội gián là người sống sót <b>duy nhất</b> còn lại (Chủ công, mọi Trung thần và
+          mọi Phản tặc đều đã chết) -- <b>Nội gián thắng một mình</b>.</li>
+          <li>Ngược lại, nếu Chủ công chết -- <b>Phản tặc thắng</b>, bất kể ai là người ra đòn kết
+          liễu (Phản tặc, Trung thần bắn nhầm, hay tự sát).</li>
+          <li>Ngược lại, nếu không còn Phản tặc và không còn Nội gián nào sống -- <b>Chủ công và
+          toàn bộ Trung thần thắng</b>.</li>
+          <li>Nếu không rơi vào trường hợp nào ở trên, ván đấu tiếp tục.</li>
+        </ul>
+      </div>
+      <div class="rulesSection">
+        <h3>Trình tự một lượt chơi</h3>
+        <p>Mỗi lượt của một người chơi trải qua các giai đoạn theo thứ tự:</p>
+        <ul>
+          <li><b>Đầu lượt</b> -- các hiệu ứng kích hoạt đầu lượt (nếu có).</li>
+          <li><b>Phán quyết</b> -- lật các lá bài đang gắn trên người (Lạc Đình Chi Ước, Chí Loạn,
+          Ẩm Chấm, Lôi Kích...) theo thứ tự gắn vào.</li>
+          <li><b>Rút bài</b> -- rút 2 lá từ bộ bài (có thể bị kỹ năng/hiệu ứng thay đổi số lượng).</li>
+          <li><b>Ra bài</b> -- được đánh bất kỳ số cơ bản/tính năng/trang bị hợp lệ nào, và đúng 1
+          Sát mỗi lượt (trừ khi có Phá Quân Nỏ hoặc kỹ năng nới giới hạn).</li>
+          <li><b>Bỏ bài</b> -- nếu số bài trên tay vượt quá giới hạn (bằng máu hiện tại), phải bỏ
+          bớt cho đến khi bằng giới hạn.</li>
+          <li><b>Kết thúc lượt</b> -- các hiệu ứng kích hoạt cuối lượt (nếu có).</li>
+        </ul>
+      </div>
+      <div class="rulesSection">
+        <h3>Chiến đấu cơ bản</h3>
+        <ul>
+          <li><b>Sát</b> gây 1 sát thương lên mục tiêu trong tầm đánh, có thể né bằng <b>Thiểm</b>.</li>
+          <li><b>Đào</b> hồi 1 máu -- dùng cho bản thân bất cứ lúc nào, hoặc để cứu người khác khi
+          đang <b>hấp hối</b> (máu ≤ 0): mọi người chơi lần lượt được mời cứu bằng Đào cho đến khi
+          hồi phục hoặc tử vong.</li>
+          <li><b>Rượu</b> tăng 1 sát thương cho Sát tiếp theo trong lượt, hoặc hồi 1 máu khi hấp hối
+          (thay cho Đào, tùy tướng/kỹ năng).</li>
+          <li>Người chơi tử vong công khai vai trò và rời khỏi bàn; nếu bị Chủ công xử tử một
+          Trung thần, Chủ công bị mất toàn bộ bài trên tay lẫn trang bị.</li>
+        </ul>
+        <p class="rulesNote">Danh sách đầy đủ mọi lá bài/tướng đã port kèm mô tả chi tiết: xem mục
+        "Thư viện" ở đầu trang.</p>
+      </div>
+    `;
+    const RULES_HEGEMONY_HTML = `
+      <div class="rulesSection">
+        <h3>Tổng quan</h3>
+        <p>Quốc Chiến (Hegemony) dành cho 5-12 người chơi, chia thành 4 phe theo quốc gia trong
+        Tam Quốc -- <b>Ngụy, Thục, Ngô, Quần</b> -- mỗi phe là một đội thật sự cùng thắng cùng
+        thua, không có khái niệm Chủ công/Phản tặc như chế độ Vai Trò.</p>
+        <p>Mỗi người chơi được phát <b>5 tướng</b>, chọn <b>2 tướng cùng phe</b> trong số đó
+        (tướng chính, rồi tướng phó cùng phe với tướng chính trong 4 lá còn lại) -- 3 lá không
+        chọn được trả lại cho lượt phát tiếp theo; máu tối đa của
+        cặp tướng được gộp lại: <code>floor((máu1 + máu2) / 2)</code>, làm tròn xuống -- nếu tổng
+        là số lẻ thì được bốc thêm 1 lá bù. Kỹ năng của mỗi tướng chỉ dùng được sau khi tướng đó
+        <b>lộ diện</b> (xem bên dưới).</p>
+      </div>
+      <div class="rulesSection">
+        <h3>Dã Tâm Gia (Ambitionist)</h3>
+        <p>Mỗi phe chỉ được tối đa <code>floor(số người chơi / 2)</code> người. Người chơi nào lẽ
+        ra là người vượt quá giới hạn đó của phe mình sẽ tự động trở thành <b>Dã Tâm Gia</b> --
+        một phe riêng chỉ gồm đúng 1 người, không đồng minh với bất kỳ ai, kể cả Dã Tâm Gia khác.
+        Dã Tâm Gia phải là người sống sót cuối cùng của cả bàn để thắng.</p>
+      </div>
+      <div class="rulesSection">
+        <h3>Tướng ẩn / lộ diện</h3>
+        <p>Cả 2 tướng của mỗi người chơi bắt đầu ván đấu ở trạng thái <b>úp (ẩn)</b>. Khi còn ẩn,
+        phe của người chơi đó chưa ai biết và kỹ năng của tướng ẩn chưa dùng được. Người chơi tự
+        <b>lộ diện</b> từng tướng một (thường vào đầu lượt của chính mình); nếu chết khi còn tướng
+        chưa lộ, tướng đó bị lộ diện cưỡng bức lúc chết.</p>
+        <p>Khi lộ diện tướng thứ 2 (hoàn tất lộ diện) và cặp tướng của người chơi là một <b>cặp
+        "châu liên bích hợp"</b> chính thức (companion pair) trong nguyên tác, người chơi được hồi
+        1 máu hoặc bốc 2 lá (tùy trạng thái máu); nếu tổng máu gộp là số lẻ, người chơi luôn được
+        bốc thêm 1 lá khi lộ diện đủ, dù có là cặp companion hay không.</p>
+      </div>
+      <div class="rulesSection">
+        <h3>Ao Chiến (鏖战)</h3>
+        <p>Khi bàn đấu thu hẹp còn tối đa 4 người sống VÀ không còn phe nào có từ 2 người sống trở
+        lên (mỗi người sống là một phe riêng biệt), luật <b>Ao Chiến</b> kích hoạt cho đến hết
+        ván:</p>
+        <ul>
+          <li><b>Đào không còn hồi máu</b> -- kể cả tự cứu mình hay cứu người khác khi hấp hối.</li>
+          <li>Thay vào đó, <b>Đào có thể được dùng như Sát hoặc như Thiểm</b> khi cần.</li>
+        </ul>
+      </div>
+      <div class="rulesSection">
+        <h3>Điều kiện thắng</h3>
+        <p>Ngay khi toàn bộ người chơi còn sống đều thuộc <b>cùng một phe</b>, phe đó thắng --
+        toàn đội Ngụy/Thục/Ngô/Quần cùng thắng, hoặc Dã Tâm Gia thắng riêng nếu là người sống sót
+        duy nhất. Ván đấu tiếp tục cho đến khi điều kiện này đúng.</p>
+        <p class="rulesNote">Danh sách đầy đủ mọi lá bài/tướng đã port kèm mô tả chi tiết: xem mục
+        "Thư viện" ở đầu trang.</p>
+      </div>
+    `;
     window.__onLibrarySearch = (value) => {
       librarySearchQuery = value.trim().toLowerCase();
       renderLibrary();
@@ -1546,7 +1787,12 @@
         libraryContentEl.innerHTML = matches.length
           ? matches
               .map((c) => {
-                const fakeCard = { kind: c.kind, weaponName: c.kind === "weapon" ? c.name : undefined, horseName: c.kind === "horse" ? c.name : undefined };
+                const fakeCard = {
+                  kind: c.kind,
+                  weaponName: c.kind === "weapon" ? c.name : undefined,
+                  horseName: c.kind === "horse" ? c.name : undefined,
+                  armorName: c.kind === "armor" ? c.name : undefined,
+                };
                 const metaParts = [`${c.count} lá`];
                 if (c.range != null) metaParts.push(`tầm đánh ${c.range}`);
                 if (c.distanceDelta != null) metaParts.push(`khoảng cách ${c.distanceDelta > 0 ? "+" : ""}${c.distanceDelta}`);
@@ -1564,21 +1810,25 @@
       }
     }
 
-    /** Re-renders the (up to 10) seat slots from `lastState` + current `pendingPrompt`/`mySeat`
-     *  -- called both after a fresh state broadcast and whenever `pendingPrompt` itself changes
-     *  (a chooseSlashTarget/chooseTrickTarget ask does NOT come with its own state broadcast,
-     *  so without this the candidate highlighting + click handlers below would never appear). */
+    /** Re-renders the (up to 10 for Identity, up to 12 for Hegemony) seat slots from `lastState`
+     *  + current `pendingPrompt`/`mySeat` -- called both after a fresh state broadcast and
+     *  whenever `pendingPrompt` itself changes (a chooseSlashTarget/chooseTrickTarget ask does
+     *  NOT come with its own state broadcast, so without this the candidate highlighting +
+     *  click handlers below would never appear). */
     function renderPlayers() {
       if (!lastState) return;
+      const order = lastState.mode === "hegemony" ? SLOT_ORDER_12 : SLOT_ORDER_10;
       lastState.players.forEach((p, i) => {
-        const slot = SLOT_ORDER[i];
+        const slot = order[i];
         if (slotEls[slot]) slotEls[slot].innerHTML = renderPlayer(p, lastState);
       });
-      // The waiting room always shows 10 slots, but starting the match rebuilds the room with
-      // only the active (claimed/bot-toggled) subset -- clear any slots beyond that shorter
-      // roster so they don't keep showing a stale waiting-room ghost card from before start.
-      for (let i = lastState.players.length; i < SLOT_ORDER.length; i++) {
-        const slot = SLOT_ORDER[i];
+      // The waiting room always shows every one of the mode's display slots, but starting the
+      // match rebuilds the room with only the active (claimed/bot-toggled) subset -- clear any
+      // slots beyond that shorter roster so they don't keep showing a stale waiting-room ghost
+      // card from before start. Clears every slot the CURRENT order doesn't use too (covers a
+      // stale top5/bot5 card left over from switching away from Hegemony mid-session).
+      const unused = ALL_SLOTS.filter((s) => !order.includes(s) || order.indexOf(s) >= lastState.players.length);
+      for (const slot of unused) {
         if (slotEls[slot]) slotEls[slot].innerHTML = "";
       }
     }
@@ -1641,6 +1891,12 @@
         parts.push(`<div class="equipItem" data-tooltip="${escHtmlAttr(`${p.weapon} — Tầm đánh Sát: ${p.weaponRange}`)}">
           <img class="equipIcon" src="${IMG}/equips/${p.weapon}.png" alt="${p.weapon}">
           <span class="equipBadge weapon">${p.weaponRange}</span>
+        </div>`);
+      }
+      if (p.armor) {
+        parts.push(`<div class="equipItem" data-tooltip="${escHtmlAttr(`${p.armor} — Giáp`)}">
+          <img class="equipIcon" src="${IMG}/equips/${p.armor}.png" alt="${p.armor}">
+          <span class="equipBadge armor">🛡</span>
         </div>`);
       }
       if (p.defenseHorse) {
@@ -1737,7 +1993,7 @@
         <div class="playerHead">
           <div class="avatarRing">${p.general ? `<img class="avatar" src="${IMG}/generals/avatar/${p.general}.png" alt="${p.general}" onerror="this.parentElement.style.visibility='hidden'">` : `<div class="avatarHidden">?</div>`}</div>
           <div class="info">
-            <div class="id">${p.playerName ? `${escapeHtml(p.playerName)} <span class="seatIdTag">${p.id}</span>` : p.id}<span class="role ${badge.cls}">${badge.label}</span>${badge.icon}</div>
+            <div class="id">${p.playerName ? `${escapeHtml(p.playerName)} <span class="seatIdTag">${p.id}</span>` : p.id}<span class="role ${badge.cls}">${badge.label}</span>${badge.icon}${p.chained ? '<span class="chainedBadge" title="Đang liên hoàn (Thiết Tác Liên Hoàn)">⛓</span>' : ""}</div>
             <div class="general">${generalDisplayName(p)}</div>
             <div class="hp">${gems}</div>
           </div>
@@ -1779,7 +2035,7 @@
       myHeroEl.innerHTML = `
         <div class="heroAvatarRing">${p.general ? `<img class="heroAvatar" src="${IMG}/generals/avatar/${p.general}.png" alt="${p.general}" onerror="this.parentElement.style.visibility='hidden'">` : `<div class="heroAvatarHidden">?</div>`}</div>
         <div class="heroInfo">
-          <div class="heroLabel">Tướng của bạn — ${p.id}${p.alive ? "" : " (đã mất)"}</div>
+          <div class="heroLabel">Tướng của bạn — ${p.id}${p.alive ? "" : " (đã mất)"}${p.chained ? ' <span class="chainedBadge" title="Đang liên hoàn (Thiết Tác Liên Hoàn)">⛓</span>' : ""}</div>
           <div class="heroTopRow">
             <span class="heroName">${generalDisplayName(p)}</span>
             <span class="heroGeneral">${hideOwnRole ? "🙈 Ẩn" : factionBadge(p, false).label}</span>
@@ -1792,11 +2048,13 @@
 
     function cardImageSrc(card) {
       if (card.kind === "weapon" || card.kind === "horse") return `${IMG}/equips/${card.weaponName || card.horseName}.png`;
+      if (card.kind === "armor") return `${IMG}/equips/${card.armorName}.png`;
       return `${IMG}/card/${card.kind}.png`;
     }
     function cardLabel(card) {
       if (card.kind === "weapon") return card.weaponName;
       if (card.kind === "horse") return card.horseName;
+      if (card.kind === "armor") return card.armorName;
       return CARD_LABEL[card.kind] || card.kind;
     }
     function pointLabel(n) {
@@ -1817,7 +2075,7 @@
         myHandCardsEl.innerHTML = pendingSpearPick.hand
           .map((c) => {
             const selected = selectedSpearIds.has(c.id);
-            const isEquip = c.kind === "weapon" || c.kind === "horse";
+            const isEquip = c.kind === "weapon" || c.kind === "horse" || c.kind === "armor";
             const cls = `handCard discardable${isEquip ? " equipCard" : ""}${selected ? " selectedForDiscard" : ""}`;
             const suitOverlay = !isEquip
               ? `<img class="handCardSuit" src="${IMG}/system/cardsuit/${c.suit}.png" alt=""><span class="handCardPoint">${pointLabel(c.point)}</span>`
@@ -1844,7 +2102,7 @@
         myHandCardsEl.innerHTML = pendingDiscard.hand
           .map((c) => {
             const selected = selectedDiscardIds.has(c.id);
-            const isEquip = c.kind === "weapon" || c.kind === "horse";
+            const isEquip = c.kind === "weapon" || c.kind === "horse" || c.kind === "armor";
             const cls = `handCard discardable${isEquip ? " equipCard" : ""}${selected ? " selectedForDiscard" : ""}`;
             const suitOverlay = !isEquip
               ? `<img class="handCardSuit" src="${IMG}/system/cardsuit/${c.suit}.png" alt=""><span class="handCardPoint">${pointLabel(c.point)}</span>`
@@ -1886,7 +2144,7 @@
         .map((c) => {
           const actionId = cardActionMap.get(c.id);
           const playable = actionId !== undefined;
-          const isEquip = c.kind === "weapon" || c.kind === "horse";
+          const isEquip = c.kind === "weapon" || c.kind === "horse" || c.kind === "armor";
           const cls = `handCard${isEquip ? " equipCard" : ""}${playable ? " playable" : ""}`;
           const onclick = playable ? ` onclick="window.__playCard(${actionId})"` : "";
           const suitOverlay = !isEquip
@@ -1976,9 +2234,9 @@
       if (pendingGeneralPick) {
         pickGeneralHintEl.textContent =
           pendingGeneralPick.role === "main"
-            ? "Lượt của bạn — lật và chọn TƯỚNG CHÍNH trong 3 tướng (Quốc Chiến: quyết định thế lực của bạn)"
+            ? "Lượt của bạn — lật và chọn TƯỚNG CHÍNH trong 5 tướng được phát (Quốc Chiến: quyết định thế lực của bạn)"
             : pendingGeneralPick.role === "deputy"
-              ? "Lượt của bạn — lật và chọn TƯỚNG PHÓ (cùng thế lực với tướng chính) trong 3 tướng"
+              ? "Lượt của bạn — lật và chọn TƯỚNG PHÓ (cùng thế lực với tướng chính) trong các tướng còn lại"
               : "Lượt của bạn — lật và chọn 1 trong 3 tướng";
         pickGeneralCardsEl.innerHTML = pendingGeneralPick.candidates
           .map((g, i) => {
@@ -2041,6 +2299,7 @@
       startGameBtn.style.display = !started && amICreator ? "" : "none";
       newGameBtn.style.display = amICreator ? "" : "none";
       tableEl.style.display = picking ? "none" : "";
+      tableEl.classList.toggle("mode-hegemony", state.mode === "hegemony");
       pickGeneralPanelEl.style.display = picking ? "block" : "none";
       turnBannerEl.className = over ? "over" : "";
       centerEmblemEl.className = over ? "over" : "";
@@ -2052,7 +2311,7 @@
         renderPickGeneral();
       } else if (!started) {
         const activeCount = state.players.filter((p) => p.claimed || p.botEnabled).length;
-        const readyNote = ` (${activeCount}/10 -- cần tối thiểu 5)`;
+        const readyNote = ` (${activeCount}/${state.players.length} -- cần tối thiểu 5)`;
         turnBannerEl.textContent = amICreator
           ? `Phòng đang chờ — chọn ghế hoặc thêm bot, rồi bấm "Bắt đầu trận đấu"${readyNote}`
           : `Đang chờ chủ phòng bắt đầu trận đấu…${readyNote}`;
@@ -2290,7 +2549,7 @@
               <div class="pickCardLabel">Bài úp</div>
             </div>`;
           }
-          const name = c.weaponName || c.horseName;
+          const name = c.weaponName || c.horseName || c.armorName;
           return `<div class="pickCardOption" data-card-id="${c.id}">
             <img src="${IMG}/equips/${name}.png" alt="${name}">
             <div class="pickCardLabel">${name}</div>
@@ -2407,6 +2666,90 @@
       startPromptCountdown(msg.requestId, msg.timeoutMs, close);
     }
 
+    /** HegNullification scope choice (Milestone 31): fires right after a human confirms playing
+     *  a HegNullification card (not plain Nullification) against a Hegemony target -- block
+     *  just that target, or extend the block to their whole faction for this same AOE card's
+     *  remaining hits too? Auto-closes on timeout -- server fallback is "single", never forced
+     *  onto the wider (and situationally worse, if the caller wanted to spare an ally who'd
+     *  otherwise dodge/discard for value) "all" scope. */
+    function showHegNullificationScopePrompt(msg) {
+      promptOverlayEl.className = "active";
+      const target = lastState?.players.find((p) => p.id === msg.targetId);
+      const targetLabel = target?.generalName || target?.general || msg.targetId;
+      promptEl.innerHTML = `
+        <div class="promptTitle">Vô Giải Khả Kích - Quốc</div>
+        <div class="promptSub">Chặn hiệu quả chỉ với ${targetLabel}, hay cả thế lực của họ? — còn <span id="promptCountdown">${Math.ceil(msg.timeoutMs / 1000)}</span>s để trả lời</div>
+        <button id="hegScopeSingleBtn">Chỉ ${targetLabel}</button>
+        <button id="hegScopeAllBtn" class="confirmYes">Toàn bộ thế lực</button>`;
+      const close = () => {
+        clearPromptCountdown();
+        promptOverlayEl.className = "";
+        promptEl.innerHTML = "";
+      };
+      const answer = (scope) => {
+        send({ type: "response", requestId: msg.requestId, scope });
+        close();
+      };
+      document.getElementById("hegScopeSingleBtn").onclick = () => answer("single");
+      document.getElementById("hegScopeAllBtn").onclick = () => answer("all");
+      startPromptCountdown(msg.requestId, msg.timeoutMs, close);
+    }
+
+    const KNOWN_BOTH_OPTION_LABEL = { handcards: "Xem bài trên tay", head_general: "Xem Chủ tướng", deputy_general: "Xem Phó tướng" };
+
+    /** KnownBoth (Tri Bỉ Tri Kỉ, Milestone 31): pick what to privately view about `target` --
+     *  their hand, or (Hegemony) one of their still-hidden generals. `msg.options` is always
+     *  non-empty. Auto-closes on timeout -- server fallback picks `options[0]`, never a blocked
+     *  card use (KnownBoth already resolved by the time this fires). */
+    function showKnownBothOptionPrompt(msg) {
+      promptOverlayEl.className = "active";
+      const target = lastState?.players.find((p) => p.id === msg.targetId);
+      const targetLabel = target?.generalName || target?.general || msg.targetId;
+      const buttons = msg.options
+        .map((o, i) => `<button id="knownBothOpt${i}"${i === 0 ? ' class="confirmYes"' : ""}>${KNOWN_BOTH_OPTION_LABEL[o] || o}</button>`)
+        .join("");
+      promptEl.innerHTML = `
+        <div class="promptTitle">Tri Bỉ Tri Kỉ</div>
+        <div class="promptSub">Xem gì của ${targetLabel}? — còn <span id="promptCountdown">${Math.ceil(msg.timeoutMs / 1000)}</span>s để trả lời</div>
+        ${buttons}`;
+      const close = () => {
+        clearPromptCountdown();
+        promptOverlayEl.className = "";
+        promptEl.innerHTML = "";
+      };
+      msg.options.forEach((o, i) => {
+        document.getElementById(`knownBothOpt${i}`).onclick = () => {
+          send({ type: "response", requestId: msg.requestId, choice: o });
+          close();
+        };
+      });
+      startPromptCountdown(msg.requestId, msg.timeoutMs, close);
+    }
+
+    /** KnownBoth's private reveal (Milestone 31): a ONE-WAY notification (no requestId/response
+     *  -- the ask that triggered it already resolved via `showKnownBothOptionPrompt` above),
+     *  sent to exactly this viewer's own socket -- see combat.ts's `PrivateReveal` doc comment.
+     *  Rendered as a short-lived toast, auto-dismissing on its own; never touches the shared
+     *  battle log or any other player's screen. */
+    function showPrivateReveal(reveal) {
+      const owner = lastState?.players.find((p) => p.id === reveal.ownerId);
+      const ownerLabel = owner?.generalName || owner?.general || reveal.ownerId;
+      const toast = document.createElement("div");
+      toast.className = "privateRevealToast";
+      if (reveal.kind === "hand") {
+        const cardsHtml = reveal.cards
+          .map((c) => `<img src="${cardImageSrc(c)}" alt="${cardLabel(c)}" title="${cardLabel(c)}">`)
+          .join("");
+        toast.innerHTML = `<div class="privateRevealTitle">Tri Bỉ Tri Kỉ — bài trên tay ${ownerLabel}</div><div class="privateRevealCards">${cardsHtml || "(không có bài)"}</div>`;
+      } else {
+        const slotLabel = reveal.slot === "main" ? "Chủ tướng" : "Phó tướng";
+        toast.innerHTML = `<div class="privateRevealTitle">Tri Bỉ Tri Kỉ — ${slotLabel} của ${ownerLabel}</div><div class="privateRevealCards">${reveal.generalName}</div>`;
+      }
+      document.body.appendChild(toast);
+      setTimeout(() => toast.remove(), 8000);
+      toast.onclick = () => toast.remove();
+    }
+
     function connect() {
       // Same-origin deploy (server.ts now serves this page too): reuse the page's own
       // scheme/host, so wss:// is used automatically behind an HTTPS reverse proxy and no
@@ -2462,6 +2805,22 @@
         if (msg.type === "chooseCompanionBonus") {
           if (msg.actorId !== mySeat) return; // a prompt for a seat this tab doesn't control
           showCompanionBonusPrompt(msg);
+          return;
+        }
+        if (msg.type === "chooseHegNullificationScope") {
+          if (msg.actorId !== mySeat) return; // a prompt for a seat this tab doesn't control
+          showHegNullificationScopePrompt(msg);
+          return;
+        }
+        if (msg.type === "chooseKnownBothOption") {
+          if (msg.actorId !== mySeat) return; // a prompt for a seat this tab doesn't control
+          showKnownBothOptionPrompt(msg);
+          return;
+        }
+        if (msg.type === "privateReveal") {
+          // One-way notification, always addressed to exactly the viewing socket -- no
+          // actorId/mySeat check needed (server never broadcasts this to anyone else).
+          showPrivateReveal(msg.reveal);
           return;
         }
         if (msg.type === "chooseFreeAction") {
@@ -2533,10 +2892,12 @@
           "confirmKylinBow",
           "confirmIceSword",
           "confirmAxe",
+          "confirmEightDiagram",
           "confirmDoubleSword",
           "confirmDiscardDoubleSword",
           "confirmSelfAction",
           "confirmHalfMaxHpDraw",
+          "confirmNullification",
         ].includes(msg.type);
         if (isPromptType) {
           if (msg.actorId !== mySeat) return; // a prompt for a seat this tab doesn't control
@@ -2578,6 +2939,8 @@
             showConfirm(msg, `${IMG}/equips/IceSword.png`, "Hàn Băng Kiếm!", "Hủy sát thương, bắt mục tiêu bỏ tối đa 2 lá bài thay vào?");
           else if (msg.type === "confirmAxe")
             showConfirm(msg, `${IMG}/equips/Axe.png`, "Sát bị né!", "Bỏ 2 lá bài để buộc Sát trúng đòn (quán thạch phủ)?");
+          else if (msg.type === "confirmEightDiagram")
+            showConfirm(msg, `${IMG}/equips/EightDiagram.png`, "Bị Sát, không có Thiểm!", "Phán xét Bát Quái Trận (Đỏ = né)?");
           else if (msg.type === "confirmDoubleSword")
             showConfirm(msg, `${IMG}/equips/DoubleSword.png`, "Song Cổ Kiếm!", "Bắt mục tiêu bỏ 1 lá bài, hoặc bạn rút 1 lá nếu họ không bỏ?");
           else if (msg.type === "confirmDiscardDoubleSword")
@@ -2593,6 +2956,18 @@
           }
           else if (msg.type === "confirmHalfMaxHpDraw")
             showConfirm(msg, `${IMG}/system/card-back.png`, "Thể lực lẻ nửa!", "Cặp tướng của bạn dư nửa thể lực — rút 1 lá?");
+          else if (msg.type === "confirmNullification") {
+            const source = lastState?.players.find((p) => p.id === msg.sourceId);
+            const target = lastState?.players.find((p) => p.id === msg.targetId);
+            const sourceLabel = source?.generalName || source?.general || msg.sourceId;
+            const targetLabel = target?.generalName || target?.general || msg.targetId;
+            showConfirm(
+              msg,
+              `${IMG}/card/nullification.png`,
+              `${sourceLabel} dùng ${TRICK_LABEL[msg.kind] || msg.kind} lên ${targetLabel}!`,
+              "Dùng Vô Giải Khả Kích để triệt tiêu?",
+            );
+          }
           return;
         }
       };

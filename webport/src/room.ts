@@ -20,13 +20,17 @@ import {
 } from "./gamerule.js";
 import {
   EngineContext,
+  KnownBothOption,
+  PrivateReveal,
   allDismantlementLikeCards,
   allDuelLikeCards,
+  allFireAttackLikeCards,
   allIndulgenceLikeCards,
   allSlashLikeCards,
   allSupplyShortageLikeCards,
   findDismantlementLikeCard,
   findDuelLikeCard,
+  findFireAttackLikeCard,
   findIndulgenceLikeCard,
   findSlashLikeCard,
   findSupplyShortageLikeCard,
@@ -38,18 +42,33 @@ import { GENERALS, GeneralDef, SKILLS, routeDiscard } from "./skill.js";
 import { Controller, FreeAction, makeBotController, pickLeastImportantCards, slashCandidates } from "./controller.js";
 import {
   attachIndulgence,
+  attachLightning,
   attachSupplyShortage,
+  awaitExhaustedCandidates,
+  befriendAttackingCandidates,
+  collateralCandidates,
   dismantlementCandidates,
   duelCandidates,
+  fireAttackCandidates,
   indulgenceCandidates,
+  ironChainCandidates,
+  knownBothCandidates,
+  lightningCandidates,
   resolveAmazingGrace,
   resolveAnalepticBuff,
   resolveArcheryAttack,
+  resolveAwaitExhausted,
+  resolveBefriendAttacking,
+  resolveCollateral,
   resolveDismantlement,
   resolveDuel,
   resolveExNihilo,
+  resolveFireAttack,
   resolveGodSalvation,
   resolveIndulgenceJudgment,
+  resolveIronChain,
+  resolveKnownBoth,
+  resolveLightningJudgment,
   resolvePeachSelfHeal,
   resolveSavageAssault,
   resolveSnatch,
@@ -68,6 +87,15 @@ const TRICK_LABEL_VI: Partial<Record<CardKind, string>> = {
   [CardKind.Duel]: "Quyết Đấu",
   [CardKind.Indulgence]: "Lạc Bất Tư Thục",
   [CardKind.SupplyShortage]: "Binh Lương Thốn Đoạn",
+  [CardKind.FireAttack]: "Hỏa Công",
+  [CardKind.Lightning]: "Thiểm Điện",
+  [CardKind.Collateral]: "Tá Đao Sát Nhân",
+  [CardKind.BefriendAttacking]: "Viễn Giao Cận Công",
+  [CardKind.AwaitExhausted]: "Dĩ Dật Đãi Lao",
+  [CardKind.IronChain]: "Thiết Tác Liên Hoàn",
+  [CardKind.SavageAssault]: "Nam Man Nhập Xâm",
+  [CardKind.ArcheryAttack]: "Vạn Tiễn Tề Phát",
+  [CardKind.KnownBoth]: "Tri Bỉ Tri Kỉ",
 };
 
 export class Room {
@@ -98,13 +126,22 @@ export class Room {
   pickTurnPlayerId: string | null = null;
   /** Fired right after an equip resolves (weapon/horse) -- see `setLiveUpdateCallback`. */
   private onLiveUpdate: (() => void) | null = null;
+  /** KnownBoth's private-reveal delivery hook (Milestone 31) -- see `setPrivateRevealCallback`. */
+  private onPrivateReveal: ((viewerId: string, reveal: PrivateReveal) => void) | null = null;
   /** Fangquan (Liushan): players queued for an immediate extra turn, consumed before the
    *  normal seat rotation (`currentIndex`) resumes -- see `playTurn()`. */
   private extraTurnQueue: GamePlayer[] = [];
 
   constructor(playerIds: string[], rng: () => number = Math.random, mode: GameMode = GameMode.Identity) {
-    if (playerIds.length < 5 || playerIds.length > 10) {
-      throw new Error("both modes support 5-10 players");
+    // Identity mode's role table (gamerule.ts's ROLE_COUNTS) only covers 5-10 players. Hegemony
+    // mode has no such table (kingdom teams scale with `hegemonyKingdomQuota` below, computed
+    // for any size) and the real 国战 rule is commonly played up to 12 -- so it gets a higher
+    // ceiling than Identity mode.
+    const maxPlayers = mode === GameMode.Hegemony ? 12 : 10;
+    if (playerIds.length < 5 || playerIds.length > maxPlayers) {
+      throw new Error(
+        mode === GameMode.Hegemony ? "Hegemony mode supports 5-12 players" : "Identity mode supports 5-10 players",
+      );
     }
     this.mode = mode;
     this.hegemonyKingdomQuota = Math.floor(playerIds.length / 2);
@@ -130,15 +167,15 @@ export class Room {
   }
 
   /** Deals `count` distinct, not-yet-taken candidate generals (Milestone 6). Fewer than `count`
-   *  only if the pool is nearly exhausted (44 generals / up to 10 players -- never actually hits
-   *  this in practice, but degrades gracefully instead of throwing). `kingdom`, if given
-   *  (Hegemony mode's deputy pick, see `pickGenerals`), restricts the pool to that kingdom
+   *  only if the pool is nearly exhausted (60 generals / up to 12 Hegemony players -- never
+   *  actually hits this in practice, but degrades gracefully instead of throwing). `kingdom`, if
+   *  given (Hegemony mode's deputy pick, see `pickGenerals`), restricts the pool to that kingdom
    *  first -- real Hegemony requires both generals of a pair to share one kingdom. Falls back
    *  to the full remaining pool if that kingdom's own pool is exhausted (a real possibility once
    *  several players have already drafted 2 generals each from a small kingdom -- degrades
    *  gracefully rather than ever leaving a player with zero deputy candidates). */
-  private candidateGenerals(count: number, kingdom?: string): GeneralDef[] {
-    let remaining = GENERALS.filter((g) => !this.takenGenerals.has(g.name));
+  private candidateGenerals(count: number, kingdom?: string, pool?: GeneralDef[]): GeneralDef[] {
+    let remaining = pool ? [...pool] : GENERALS.filter((g) => !this.takenGenerals.has(g.name));
     if (kingdom) {
       const sameKingdom = remaining.filter((g) => g.kingdom === kingdom);
       if (sameKingdom.length > 0) remaining = sameKingdom;
@@ -163,16 +200,22 @@ export class Room {
    * result), plus a final time once hands are dealt. MUST complete before `playTurn()` is ever
    * called -- see the guard there.
    *
-   * Hegemony mode drafts 2 SAME-kingdom generals per player (main then deputy, the real rule --
-   * see gamerule.ts's Hegemony header): the deputy's candidate pool is filtered to the main's
-   * kingdom via `candidateGenerals`'s `kingdom` param, stats combine via `combineHegemonyHp` +
-   * skill union, and `player.general`/`generalName` are only assigned once BOTH picks land (so
-   * the room-wide `pickingGenerals` flag -- driven by `!p.general` -- stays accurate while a
-   * player's deputy pick is still pending). `faction`/`isAmbitionist` are NOT assigned here any
-   * more (Milestone 23's reveal-TIMING addendum): both generals start hidden
-   * (`mainRevealed`/`deputyRevealed` default false), and kingdom -- so also `faction` -- only
-   * becomes known the first time either one is revealed (`runHegemonyReveal`, `Phase.
-   * RoundStart`). The draft log line therefore never names which general or kingdom was picked.
+   * Hegemony mode drafts 2 generals per player from 5 dealt candidates (the real 国战 "phát 5,
+   * chọn 2" rule): all 5 are dealt UNFILTERED (any kingdom) via one `candidateGenerals(5)` call,
+   * the player picks their main general from those 5, then picks their deputy from the 4 that
+   * remain -- filtered down to the main's own kingdom first (real Hegemony requires both
+   * generals of a pair to share one kingdom; falls back to all 4 if none of them happen to share
+   * it, an edge case `candidateGenerals`'s kingdom filter already degrades gracefully for). The
+   * 3 (or more, if the kingdom filter empties out) generals never picked are NOT added to
+   * `takenGenerals`, so they go back into the shared pool for later players, matching the real
+   * rule's "trả lại" behavior. Stats combine via `combineHegemonyHp` + skill union, and
+   * `player.general`/`generalName` are only assigned once BOTH picks land (so the room-wide
+   * `pickingGenerals` flag -- driven by `!p.general` -- stays accurate while a player's deputy
+   * pick is still pending). `faction`/`isAmbitionist` are NOT assigned here any more (Milestone
+   * 23's reveal-TIMING addendum): both generals start hidden (`mainRevealed`/`deputyRevealed`
+   * default false), and kingdom -- so also `faction` -- only becomes known the first time either
+   * one is revealed (`runHegemonyReveal`, `Phase.RoundStart`). The draft log line therefore
+   * never names which general or kingdom was picked.
    */
   async pickGenerals(onStep?: () => void): Promise<void> {
     // Standard rule: the lord's identity is public knowledge once the match begins -- but not
@@ -188,11 +231,12 @@ export class Room {
       const controller = this.controllers.get(player.id)!;
       if (this.mode === GameMode.Hegemony) {
         onStep?.();
-        const mainCandidates = this.candidateGenerals(3);
-        const main = (await controller.chooseGeneral(mainCandidates, "main")) ?? mainCandidates[0];
+        const dealt = this.candidateGenerals(5);
+        const main = (await controller.chooseGeneral(dealt, "main")) ?? dealt[0];
         this.takenGenerals.add(main.name);
         onStep?.();
-        const deputyCandidates = this.candidateGenerals(3, main.kingdom);
+        const remaining = dealt.filter((g) => g.name !== main.name);
+        const deputyCandidates = this.candidateGenerals(remaining.length, main.kingdom, remaining);
         const deputy = (await controller.chooseGeneral(deputyCandidates, "deputy")) ?? deputyCandidates[0];
         this.takenGenerals.add(deputy.name);
 
@@ -559,6 +603,7 @@ export class Room {
       alivePlayers: alive,
       discardPile: this.discardPile,
       aoChienActive: this.aoChienActive,
+      isGameOver: () => this.gameOver !== null,
       log: this.log,
       rng: this.rng,
       draw: (player, n) => this.drawCards(player, n),
@@ -576,6 +621,7 @@ export class Room {
       askUseKylinBow: (player) => this.controllers.get(player.id)!.wantsToUseKylinBow(player),
       askUseIceSword: (player) => this.controllers.get(player.id)!.wantsToUseIceSword(player),
       askUseAxe: (player) => this.controllers.get(player.id)!.wantsToUseAxe(player),
+      askUseEightDiagram: (player) => this.controllers.get(player.id)!.wantsToUseEightDiagram(player),
       askUseDoubleSword: (player) => this.controllers.get(player.id)!.wantsToUseDoubleSword(player),
       askDiscardForDoubleSword: (player) => this.controllers.get(player.id)!.wantsToDiscardForDoubleSword(player),
       askChooseAnyPlayer: (player, candidates) => this.controllers.get(player.id)!.chooseAnyPlayerTarget(player, candidates),
@@ -605,7 +651,74 @@ export class Room {
         return distinctHeld.length >= min && distinctHeld.length <= max ? distinctHeld : [];
       },
       equipPlayer: (target, card) => this.equip(target, card),
+      askNullification: (source, target, kind) => this.resolveNullificationWindow(alive, source, target, kind),
+      revealPrivately: (viewer, reveal) => this.onPrivateReveal?.(viewer.id, reveal),
+      askKnownBothChoice: async (player, target, options) => {
+        const choice = await this.controllers.get(player.id)!.chooseKnownBothOption(player, target, options);
+        return options.includes(choice) ? choice : options[0];
+      },
     };
+  }
+
+  /** Nullification/HegNullification counter-play window (Milestone 31) -- offered once for
+   *  `kind` (played by `source`) about to take effect against `target`. Wraps `offerNullification`
+   *  (the actual, possibly-recursive chain) together with whatever HegNullification "all" scope
+   *  the FIRST responder chose (if any), for the 2 AOE per-target loops (trick.ts's
+   *  resolveSavageAssault/resolveArcheryAttack, via `EngineContext.askNullification`) to consume;
+   *  every other trick kind calls this directly from `tryPlayOnce`/`tryPlayTargeted`/
+   *  `tryPlayDelayedTrick` below and only reads `.blocked`. */
+  private async resolveNullificationWindow(
+    alive: GamePlayer[],
+    source: GamePlayer,
+    target: GamePlayer,
+    kind: CardKind,
+  ): Promise<{ blocked: boolean; shieldFaction: string | null }> {
+    let shieldFaction: string | null = null;
+    const blocked = await this.offerNullification(alive, source, target, kind, (faction) => {
+      shieldFaction = faction;
+    });
+    return { blocked, shieldFaction };
+  }
+
+  /** The actual chain: asks each alive player holding a Nullification/HegNullification card (in
+   *  seat order starting right after `target` -- the player the resolving effect is against --
+   *  same "closest-affected-player-first" precedent as `askPeachForOther`'s ally-rescue order;
+   *  this engine has no real network race to model, unlike the true multiplayer engine's
+   *  simultaneous-race-then-random-pick) whether they want to play it; the first "yes" wins. A
+   *  played card is itself immediately counter-nullifiable by a FURTHER Nullification/
+   *  HegNullification (recursion -- `onScopeChosen` is NOT forwarded into the recursive call,
+   *  since the "single vs. all" scope choice only ever applies to the card directly answering
+   *  the ORIGINAL trick; nullifying a Nullification-in-flight is never itself an AOE-multi-
+   *  target situation): an odd chain depth cancels the original effect, an even depth
+   *  (including 0, nobody responds) doesn't. Returns true iff `kind` ends up cancelled. */
+  private async offerNullification(
+    alive: GamePlayer[],
+    source: GamePlayer,
+    target: GamePlayer,
+    kind: CardKind,
+    onScopeChosen?: (faction: string) => void,
+  ): Promise<boolean> {
+    const startIdx = alive.indexOf(target);
+    const order = startIdx === -1 ? alive : [...alive.slice(startIdx + 1), ...alive.slice(0, startIdx + 1)];
+    for (const responder of order) {
+      const nullifyCard = responder.hand.find((c) => c.kind === CardKind.Nullification || c.kind === CardKind.HegNullification);
+      if (!nullifyCard) continue;
+      if (!(await this.controllers.get(responder.id)!.wantsToNullify(responder, kind, source, target))) continue;
+      responder.hand.splice(responder.hand.indexOf(nullifyCard), 1);
+      this.discardPile.push(nullifyCard);
+      const cardLabel = nullifyCard.kind === CardKind.HegNullification ? "Vô Giải Khả Kích - Quốc" : "Vô Giải Khả Kích";
+      this.log.push(`${responder.id} dùng ${cardLabel} lên ${TRICK_LABEL_VI[kind] ?? kind} (${source.id} -> ${target.id})`);
+      if (onScopeChosen && nullifyCard.kind === CardKind.HegNullification && target.faction !== "") {
+        const scope = await this.controllers.get(responder.id)!.chooseHegNullificationScope(responder, target);
+        if (scope === "all") {
+          this.log.push(`${responder.id} mở rộng phạm vi triệt tiêu sang cả thế lực của ${target.id}`);
+          onScopeChosen(target.faction);
+        }
+      }
+      const counterCancelled = await this.offerNullification(alive, responder, target, nullifyCard.kind);
+      return !counterCancelled;
+    }
+    return false;
   }
 
   /** Registers a callback fired immediately after an equip resolves. Broadcast() otherwise only
@@ -617,11 +730,21 @@ export class Room {
     this.onLiveUpdate = cb;
   }
 
+  /** Registers KnownBoth's private-reveal delivery hook (server.ts wires this straight to a
+   *  one-way message sent to just the viewing player's own socket). Mirrors
+   *  `setLiveUpdateCallback` above exactly -- see `onPrivateReveal`'s own doc comment. */
+  setPrivateRevealCallback(cb: ((viewerId: string, reveal: PrivateReveal) => void) | null): void {
+    this.onPrivateReveal = cb;
+  }
+
   private async equip(player: GamePlayer, equipCard: Card): Promise<void> {
     let replaced: Card | null = null;
     if (equipCard.kind === CardKind.Weapon) {
       replaced = player.weapon;
       player.weapon = equipCard;
+    } else if (equipCard.kind === CardKind.Armor) {
+      replaced = player.armor;
+      player.armor = equipCard;
     } else if (equipCard.horseDelta === 1) {
       replaced = player.defenseHorse;
       player.defenseHorse = equipCard;
@@ -629,9 +752,18 @@ export class Room {
       replaced = player.offenseHorse;
       player.offenseHorse = equipCard;
     }
-    this.log.push(`${player.id} trang bị ${equipCard.weaponName ?? equipCard.horseName}`);
+    this.log.push(`${player.id} trang bị ${equipCard.weaponName ?? equipCard.horseName ?? equipCard.armorName}`);
     if (replaced) {
       this.discardPile.push(replaced);
+      // SilverLion (armor, Milestone 34): heals 1 hp on leaving the equip zone while alive and
+      // wounded -- this branch covers the "replaced by a newly-equipped armor" departure;
+      // combat.ts's `detachCardFrom` covers every OTHER departure (Dismantlement/Snatch/
+      // IceSword). A player can only equip 1 armor at a time, so `replaced` here is always the
+      // OLD armor being displaced, never anything else.
+      if (replaced.armorName === "SilverLion" && player.alive && player.isWounded()) {
+        await heal(this.makeContext(this.players.filter((p) => p.alive)), player, 1);
+        this.log.push(`${player.id} hồi 1 máu do Bạch Ngân Sư Tử rời trang bị`);
+      }
       // Xiaoji (Sunshangxiang): draws 2 whenever an equip of hers leaves the equip zone.
       for (const skill of player.skills) {
         await skill.onEquipLost?.(this.makeContext(this.players.filter((p) => p.alive)), player);
@@ -689,6 +821,20 @@ export class Room {
       }
     }
 
+    // Nullification/HegNullification counter-play window (Milestone 31): offered once for the
+    // whole card use, EXCEPT SavageAssault/ArcheryAttack, which get real per-target granularity
+    // inside their own resolvers instead (see trick.ts's header). `player` doubles as the
+    // "target" here -- every kind routed through tryPlayOnce is either self-targeting (ExNihilo/
+    // AwaitExhausted) or a no-single-target whole-table effect (GodSalvation/AmazingGrace/the 2
+    // AOE cards skipped above), so there's no other real target to pass.
+    if (kind !== CardKind.SavageAssault && kind !== CardKind.ArcheryAttack) {
+      const { blocked } = await this.resolveNullificationWindow(alive, player, player, kind);
+      if (blocked) {
+        for (const skill of player.skills) await skill.onTrickPlayed?.(this.makeContext(alive), player, kind);
+        this.onLiveUpdate?.();
+        return;
+      }
+    }
     await resolve(card, target, alive);
     for (const skill of player.skills) await skill.onTrickPlayed?.(this.makeContext(alive), player, kind);
     this.onLiveUpdate?.();
@@ -731,6 +877,15 @@ export class Room {
       return;
     }
 
+    // Nullification/HegNullification counter-play window (Milestone 31) -- offered once for the
+    // whole card use (see tryPlayOnce's own comment on this same window for why the 2 AOE cards
+    // are the only exception, and they never reach here -- this method is single-target only).
+    const { blocked } = await this.resolveNullificationWindow(alive, player, target, kind);
+    if (blocked) {
+      for (const skill of player.skills) await skill.onTrickPlayed?.(this.makeContext(alive), player, kind);
+      this.onLiveUpdate?.();
+      return;
+    }
     await resolve(card, target, alive);
     for (const skill of player.skills) await skill.onTrickPlayed?.(this.makeContext(alive), player, kind);
     this.onLiveUpdate?.();
@@ -772,6 +927,18 @@ export class Room {
       return;
     }
 
+    // Nullification/HegNullification counter-play window (Milestone 31): a delayed trick is
+    // nullifiable at ATTACH time, not later when its judgment actually triggers (matches the
+    // real rule) -- unlike tryPlayOnce/tryPlayTargeted above, the card was NOT already pushed to
+    // discardPile (it normally goes to `target.judgeArea` via `attach` instead), so a blocked
+    // use pushes it there explicitly here.
+    const { blocked } = await this.resolveNullificationWindow(alive, player, target, kind);
+    if (blocked) {
+      this.discardPile.push(card);
+      for (const skill of player.skills) await skill.onTrickPlayed?.(this.makeContext(alive), player, kind);
+      this.onLiveUpdate?.();
+      return;
+    }
     attach(card, target, alive);
     for (const skill of player.skills) await skill.onTrickPlayed?.(this.makeContext(alive), player, kind);
     this.onLiveUpdate?.();
@@ -871,7 +1038,7 @@ export class Room {
     // action, no target, no limit -- the bot policy always wants to).
     for (let i = player.hand.length - 1; i >= 0; i--) {
       const c = player.hand[i];
-      if (c.kind === CardKind.Weapon || c.kind === CardKind.Horse) {
+      if (c.kind === CardKind.Weapon || c.kind === CardKind.Horse || c.kind === CardKind.Armor) {
         if (await controller.wantsToEquip(player, c)) {
           player.hand.splice(i, 1);
           await this.equip(player, c);
@@ -960,6 +1127,37 @@ export class Room {
       (_card, target, alive) => resolveDuel(this.makeContext(alive), player, target),
       (p) => findDuelLikeCard(p),
     );
+    await this.tryPlayTargeted(
+      player,
+      CardKind.FireAttack,
+      (alive) => fireAttackCandidates(player, alive),
+      (_card, target, alive) => resolveFireAttack(this.makeContext(alive), player, target),
+      (p) => findFireAttackLikeCard(p),
+    );
+    await this.tryPlayTargeted(
+      player,
+      CardKind.Collateral,
+      (alive) => collateralCandidates(player, alive),
+      (_card, target, alive) => resolveCollateral(this.makeContext(alive), player, target),
+    );
+    await this.tryPlayTargeted(
+      player,
+      CardKind.BefriendAttacking,
+      (alive) => befriendAttackingCandidates(player, alive),
+      (_card, target, alive) => resolveBefriendAttacking(this.makeContext(alive), player, target),
+    );
+    await this.tryPlayTargeted(
+      player,
+      CardKind.IronChain,
+      (alive) => ironChainCandidates(alive),
+      (_card, target, alive) => resolveIronChain(this.makeContext(alive), target),
+    );
+    await this.tryPlayTargeted(
+      player,
+      CardKind.KnownBoth,
+      (alive) => knownBothCandidates(player, alive),
+      (_card, target, alive) => resolveKnownBoth(this.makeContext(alive), player, target),
+    );
     await this.tryPlayDelayedTrick(
       player,
       CardKind.Indulgence,
@@ -974,11 +1172,23 @@ export class Room {
       (card, target) => attachSupplyShortage(this.makeContext(this.players.filter((p) => p.alive)), target, card),
       (p) => findSupplyShortageLikeCard(p),
     );
+    await this.tryPlayDelayedTrick(
+      player,
+      CardKind.Lightning,
+      () => lightningCandidates(player),
+      (card, target) => attachLightning(this.makeContext(this.players.filter((p) => p.alive)), target, card),
+    );
     await this.tryPlayOnce(
       player,
       CardKind.SavageAssault,
       (alive) => alive,
       (_card, alive) => resolveSavageAssault(this.makeContext(alive), player),
+    );
+    await this.tryPlayOnce(
+      player,
+      CardKind.AwaitExhausted,
+      () => awaitExhaustedCandidates(player),
+      (_card, alive) => resolveAwaitExhausted(this.makeContext(alive), player),
     );
     await this.tryPlayOnce(
       player,
@@ -1021,7 +1231,7 @@ export class Room {
     const actions: FreeAction[] = [];
 
     for (const c of player.hand) {
-      if (c.kind === CardKind.Weapon || c.kind === CardKind.Horse) actions.push({ kind: "equip", cardId: c.id });
+      if (c.kind === CardKind.Weapon || c.kind === CardKind.Horse || c.kind === CardKind.Armor) actions.push({ kind: "equip", cardId: c.id });
     }
 
     const addPlayCard = (cards: Card[], cardKind: CardKind) => {
@@ -1040,12 +1250,27 @@ export class Room {
     if (duelCandidates(player, alive).length > 0) {
       addPlayCard(allDuelLikeCards(player), CardKind.Duel);
     }
+    if (fireAttackCandidates(player, alive).length > 0) {
+      addPlayCard(allFireAttackLikeCards(player), CardKind.FireAttack);
+    }
+    if (collateralCandidates(player, alive).length > 0) {
+      addPlayCard(player.hand.filter((c) => c.kind === CardKind.Collateral), CardKind.Collateral);
+    }
+    if (befriendAttackingCandidates(player, alive).length > 0) {
+      addPlayCard(player.hand.filter((c) => c.kind === CardKind.BefriendAttacking), CardKind.BefriendAttacking);
+    }
+    addPlayCard(player.hand.filter((c) => c.kind === CardKind.IronChain), CardKind.IronChain);
+    if (knownBothCandidates(player, alive).length > 0) {
+      addPlayCard(player.hand.filter((c) => c.kind === CardKind.KnownBoth), CardKind.KnownBoth);
+    }
     if (indulgenceCandidates(player, alive).length > 0) {
       addPlayCard(allIndulgenceLikeCards(player), CardKind.Indulgence);
     }
     if (supplyShortageCandidates(player, alive).length > 0) {
       addPlayCard(allSupplyShortageLikeCards(player), CardKind.SupplyShortage);
     }
+    addPlayCard(player.hand.filter((c) => c.kind === CardKind.Lightning), CardKind.Lightning);
+    addPlayCard(player.hand.filter((c) => c.kind === CardKind.AwaitExhausted), CardKind.AwaitExhausted);
     addPlayCard(player.hand.filter((c) => c.kind === CardKind.ExNihilo), CardKind.ExNihilo);
     addPlayCard(player.hand.filter((c) => c.kind === CardKind.SavageAssault), CardKind.SavageAssault);
     addPlayCard(player.hand.filter((c) => c.kind === CardKind.ArcheryAttack), CardKind.ArcheryAttack);
@@ -1172,6 +1397,51 @@ export class Room {
           () => card,
         );
         return false;
+      case CardKind.FireAttack:
+        await this.tryPlayTargeted(
+          player,
+          CardKind.FireAttack,
+          (alive) => fireAttackCandidates(player, alive),
+          (_card, target, alive) => resolveFireAttack(this.makeContext(alive), player, target),
+          () => card,
+        );
+        return false;
+      case CardKind.Collateral:
+        await this.tryPlayTargeted(
+          player,
+          CardKind.Collateral,
+          (alive) => collateralCandidates(player, alive),
+          (_card, target, alive) => resolveCollateral(this.makeContext(alive), player, target),
+          () => card,
+        );
+        return false;
+      case CardKind.BefriendAttacking:
+        await this.tryPlayTargeted(
+          player,
+          CardKind.BefriendAttacking,
+          (alive) => befriendAttackingCandidates(player, alive),
+          (_card, target, alive) => resolveBefriendAttacking(this.makeContext(alive), player, target),
+          () => card,
+        );
+        return false;
+      case CardKind.IronChain:
+        await this.tryPlayTargeted(
+          player,
+          CardKind.IronChain,
+          (alive) => ironChainCandidates(alive),
+          (_card, target, alive) => resolveIronChain(this.makeContext(alive), target),
+          () => card,
+        );
+        return false;
+      case CardKind.KnownBoth:
+        await this.tryPlayTargeted(
+          player,
+          CardKind.KnownBoth,
+          (alive) => knownBothCandidates(player, alive),
+          (_card, target, alive) => resolveKnownBoth(this.makeContext(alive), player, target),
+          () => card,
+        );
+        return false;
       case CardKind.Indulgence:
         await this.tryPlayDelayedTrick(
           player,
@@ -1190,6 +1460,15 @@ export class Room {
           () => card,
         );
         return false;
+      case CardKind.Lightning:
+        await this.tryPlayDelayedTrick(
+          player,
+          CardKind.Lightning,
+          () => lightningCandidates(player),
+          (c, target) => attachLightning(this.makeContext(this.players.filter((p) => p.alive)), target, c),
+          () => card,
+        );
+        return false;
       case CardKind.ExNihilo:
         await this.tryPlayOnce(player, CardKind.ExNihilo, (alive) => alive, (_c, alive) => resolveExNihilo(this.makeContext(alive), player), card);
         return false;
@@ -1199,6 +1478,15 @@ export class Room {
           CardKind.SavageAssault,
           (alive) => alive,
           (_c, alive) => resolveSavageAssault(this.makeContext(alive), player),
+          card,
+        );
+        return false;
+      case CardKind.AwaitExhausted:
+        await this.tryPlayOnce(
+          player,
+          CardKind.AwaitExhausted,
+          () => awaitExhaustedCandidates(player),
+          (_c, alive) => resolveAwaitExhausted(this.makeContext(alive), player),
           card,
         );
         return false;
@@ -1265,16 +1553,18 @@ export class Room {
   }
 
   /** Judge phase: resolves every delayed trick currently in `player`'s own judge area, in
-   *  placement order, each removing itself before the next resolves (Indulgence never cycles
-   *  back in on this repo's ported revision -- see `resolveIndulgenceJudgment`). Stops early if
-   *  the game ends or `player` dies mid-resolution (e.g. a retrial-triggered self-damage
-   *  skill). */
+   *  placement order, each removing itself before the next resolves (Indulgence/SupplyShortage
+   *  never cycle back in on this repo's ported revision -- see their own resolve* functions;
+   *  Lightning is the one exception -- a "good" judgment re-attaches it to the NEXT alive
+   *  player's judge area instead, see `resolveLightningJudgment`). Stops early if the game ends
+   *  or `player` dies mid-resolution (e.g. a retrial-triggered self-damage skill). */
   private async runJudgePhase(player: GamePlayer): Promise<void> {
     const ctx = this.makeContext(this.players.filter((p) => p.alive));
     while (player.judgeArea.length > 0 && player.alive && !this.gameOver) {
       const card = player.judgeArea.shift()!;
       if (card.kind === CardKind.Indulgence) await resolveIndulgenceJudgment(ctx, player, card);
       else if (card.kind === CardKind.SupplyShortage) await resolveSupplyShortageJudgment(ctx, player, card);
+      else if (card.kind === CardKind.Lightning) await resolveLightningJudgment(ctx, player, card);
       this.onLiveUpdate?.();
     }
   }
@@ -1292,7 +1582,7 @@ export class Room {
       const ctx = this.makeContext(this.players.filter((p) => p.alive));
       const discarded = await ctx.askAnyHandCards(player, cost.min, cost.max);
       if (discarded.length < cost.min || discarded.length > cost.max) continue; // declined/invalid -- never forced
-      if (cost.equipOnly && discarded.some((c) => c.kind !== CardKind.Weapon && c.kind !== CardKind.Horse)) continue; // invalid choice -- decline
+      if (cost.equipOnly && discarded.some((c) => c.kind !== CardKind.Weapon && c.kind !== CardKind.Horse && c.kind !== CardKind.Armor)) continue; // invalid choice -- decline
       for (const c of discarded) player.hand.splice(player.hand.indexOf(c), 1);
       this.discardPile.push(...discarded);
       this.log.push(
