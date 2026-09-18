@@ -71,6 +71,17 @@ export class GamePlayer {
   /** Reset at the start of each turn; set by Luoyi's Draw-phase choice (draw 1 fewer, next
    *  damage +1) -- read back by Luoyi's own `drawPhaseBonus`. */
   luoyiArmedThisTurn = false;
+  /** Reset at the start of each turn; set true when Tianyi (Taishici) wins its pindian -- for
+   *  the rest of this turn, `player`'s Slash plays are rangeless (see `slashCandidates`'s
+   *  `slashRangelessThisTurn` check) and each may also hit a 2nd target (see room.ts's
+   *  `maybeResolveTianyiBonusTarget`); stays true all turn (not consumed after one use) --
+   *  matches the real "trong lượt này" (for this turn) duration, not a single-use buff. Also
+   *  read by Tianyi's own `slashLimit` hook (+1 total Slash plays this turn). */
+  tianyiWonThisTurn = false;
+  /** Reset at the start of each turn; set true when Tianyi (Taishici) loses its pindian --
+   *  `player` may not play ANY Slash (real or viewAs, including Spear's 2-card substitute) for
+   *  the rest of this turn. Checked by `tryPlaySlash`/`trySpearSlash`/`computeLegalActions`. */
+  tianyiLostThisTurn = false;
   /** Set by Shuangxiong's Draw-phase judgment (null = not armed); while non-null, a held card
    *  whose black-ness matches this flag may be played/discarded as Duel this turn (cleared each
    *  new turn). true = black cards unlocked, false = red cards unlocked. */

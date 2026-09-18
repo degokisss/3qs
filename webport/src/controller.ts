@@ -33,10 +33,15 @@ export type FreeAction =
 
 /** Alive players `actor` could legally Slash: not self, within `actor`'s effective attack range
  *  (weapon range, or 1 unequipped, plus SixSwords' ally bonus -- see combat.ts's
- *  effectiveAttackRange), not immune (Kongcheng). */
+ *  effectiveAttackRange), not immune (Kongcheng). Distance is skipped entirely while
+ *  `actor.tianyiWonThisTurn` is set (Taishici's Tianyi: rangeless Slash for the rest of the turn
+ *  after winning its pindian). */
 export function slashCandidates(alive: GamePlayer[], actor: GamePlayer): GamePlayer[] {
   return alive.filter(
-    (p) => p !== actor && effectiveDistance(alive, actor, p) <= effectiveAttackRange(alive, actor) && !isImmuneToSlashAndDuel(p),
+    (p) =>
+      p !== actor &&
+      (actor.tianyiWonThisTurn || effectiveDistance(alive, actor, p) <= effectiveAttackRange(alive, actor)) &&
+      !isImmuneToSlashAndDuel(p),
   );
 }
 

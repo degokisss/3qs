@@ -32,6 +32,7 @@ import {
   findSupplyShortageLikeCard,
   heal,
   resolveSlash,
+  resolveSlashBonusTarget,
 } from "./combat.js";
 import { GENERALS, GeneralDef, SKILLS, routeDiscard } from "./skill.js";
 import { Controller, FreeAction, makeBotController, pickLeastImportantCards, slashCandidates } from "./controller.js";
@@ -255,8 +256,20 @@ export class Room {
   private drawOne(): Card | null {
     if (this.drawPile.length === 0) {
       // Room::getCardFromPile -> swapPile(): reshuffle discard pile back into the draw pile.
-      this.drawPile = shuffle(this.discardPile, this.rng);
-      this.discardPile = [];
+      // Mutated IN PLACE (never reassigned) -- `makeContext()` snapshots `discardPile:
+      // this.discardPile` as a plain array REFERENCE once per call, and that same reference is
+      // held for the rest of whatever resolution is in flight (e.g. `judge()` calling
+      // `ctx.drawTop()` -- which reaches here -- then `disposeJudgmentCard`/
+      // `resolveSupplyShortageJudgment` pushing onto that SAME `ctx.discardPile` afterward). A
+      // naive `this.discardPile = []` reassignment here orphans any such in-flight reference:
+      // every card later pushed through it lands in a detached array nobody else can see,
+      // silently vanishing from the game forever. Real bug, found by Milestone 26's
+      // card-conservation regression test (seed 1, turn 13: a SupplyShortage Judge-phase
+      // judgment drew the pile's last card, triggering a reshuffle mid-resolution, losing both
+      // the judgment card and the delayed-trick card itself -- 87 cards counted instead of 89).
+      const reshuffled = shuffle(this.discardPile, this.rng);
+      this.discardPile.length = 0;
+      this.drawPile.push(...reshuffled);
       if (this.drawPile.length === 0) return null; // both piles exhausted
     }
     return this.drawPile.pop()!;
@@ -765,7 +778,7 @@ export class Room {
   }
 
   private async tryPlaySlash(player: GamePlayer, explicitCard?: Card): Promise<boolean> {
-    if (this.gameOver || !player.alive) return false;
+    if (this.gameOver || !player.alive || player.tianyiLostThisTurn) return false;
     const slashCard = explicitCard ?? findSlashLikeCard(player, this.aoChienActive);
     // Spear (weapon): no real/viewAs Slash card in hand -- fall back to sacrificing 2 hand
     // cards as one, if equipped. Never reached when `explicitCard` is set (a human proactively
@@ -780,6 +793,7 @@ export class Room {
     player.hand.splice(player.hand.indexOf(slashCard), 1);
     await this.checkHandEmptied(player);
     await resolveSlash(this.makeContext(alive), player, target, slashCard);
+    await this.maybeResolveTianyiBonusTarget(player, target);
     this.onLiveUpdate?.();
     return true;
   }
@@ -792,7 +806,9 @@ export class Room {
    *  -- between the two, both real physical cards end up accounted for, preserving card
    *  conservation. */
   private async trySpearSlash(player: GamePlayer): Promise<boolean> {
-    if (this.gameOver || !player.alive || player.weapon?.weaponName !== "Spear" || player.hand.length < 2) return false;
+    if (this.gameOver || !player.alive || player.tianyiLostThisTurn || player.weapon?.weaponName !== "Spear" || player.hand.length < 2) {
+      return false;
+    }
     const alive = this.players.filter((p) => p.alive);
     const candidates = slashCandidates(alive, player);
     if (candidates.length === 0) return false;
@@ -808,8 +824,27 @@ export class Room {
     this.log.push(`${player.id} dùng Trượng Bát Xà Mâu: 2 lá bài như 1 Sát`);
     await this.checkHandEmptied(player);
     await resolveSlash(this.makeContext(alive), player, target, slashCard);
+    await this.maybeResolveTianyiBonusTarget(player, target);
     this.onLiveUpdate?.();
     return true;
+  }
+
+  /** Tianyi (Taishici): if `player` won a pindian this turn, the Slash they just played
+   *  (`primaryTarget`) may also hit a 2nd, rangeless target -- see `combat.ts`'s
+   *  `resolveSlashBonusTarget` doc comment for the simplified-pipeline rationale. The buff
+   *  itself is NOT consumed here (`tianyiWonThisTurn` only clears at next turn's start) --
+   *  every Slash `player` plays for the rest of this turn gets this same offer, matching the
+   *  real "trong lượt này" (for this turn) duration. */
+  private async maybeResolveTianyiBonusTarget(player: GamePlayer, primaryTarget: GamePlayer): Promise<void> {
+    if (!player.tianyiWonThisTurn || this.gameOver || !player.alive) return;
+    const candidates = this.players.filter((p) => p.alive && p !== player && p !== primaryTarget);
+    if (candidates.length === 0) return;
+    const controller = this.controllers.get(player.id)!;
+    if (!(await controller.wantsToUseSelfAction(player, "tianyi-bonus"))) return;
+    const target = await controller.chooseAnyPlayerTarget(player, candidates);
+    if (!target) return;
+    await resolveSlashBonusTarget(this.makeContext(this.players.filter((p) => p.alive)), player, target);
+    this.onLiveUpdate?.();
   }
 
   /** Real Sanguosha slash limit: 1 per turn by default, raised by e.g. Paoxiao (skill.ts), or
@@ -993,7 +1028,7 @@ export class Room {
       for (const c of cards) actions.push({ kind: "playCard", cardId: c.id, cardKind });
     };
 
-    if (slashesRemaining > 0 && slashCandidates(alive, player).length > 0) {
+    if (slashesRemaining > 0 && !player.tianyiLostThisTurn && slashCandidates(alive, player).length > 0) {
       addPlayCard(allSlashLikeCards(player, this.aoChienActive), CardKind.Slash);
     }
     if (dismantlementCandidates(player, alive).length > 0) {
@@ -1017,7 +1052,13 @@ export class Room {
     addPlayCard(player.hand.filter((c) => c.kind === CardKind.GodSalvation), CardKind.GodSalvation);
     // Spear (weapon): offered independently of whether a real/viewAs Slash is also held --
     // real Sanguosha lets you choose either, not just fall back to this when out of Slashes.
-    if (slashesRemaining > 0 && player.weapon?.weaponName === "Spear" && player.hand.length >= 2 && slashCandidates(alive, player).length > 0) {
+    if (
+      slashesRemaining > 0 &&
+      !player.tianyiLostThisTurn &&
+      player.weapon?.weaponName === "Spear" &&
+      player.hand.length >= 2 &&
+      slashCandidates(alive, player).length > 0
+    ) {
       actions.push({ kind: "spearSlash" });
     }
     addPlayCard(player.hand.filter((c) => c.kind === CardKind.AmazingGrace), CardKind.AmazingGrace);
@@ -1241,6 +1282,28 @@ export class Room {
   private async runPhase(player: GamePlayer, phase: Phase): Promise<void> {
     player.phase = phase;
     await this.runOtherPhaseActions(player, phase);
+    // Discard-to-skip-a-phase (e.g. Xiahouyuan's Shensu, Zhang He's Qiaobian): checked
+    // generically here so any future skill of this shape needs no runPhase changes of its own.
+    // First matching skill wins (never 2 generals share this shape in practice).
+    for (const skill of player.skills) {
+      const cost = skill.skipsPhaseForDiscard?.(phase);
+      if (!cost || player.handcardNum < cost.min) continue;
+      if (!(await this.controllers.get(player.id)!.wantsToUseSelfAction(player, `${skill.name}-skip`))) continue;
+      const ctx = this.makeContext(this.players.filter((p) => p.alive));
+      const discarded = await ctx.askAnyHandCards(player, cost.min, cost.max);
+      if (discarded.length < cost.min || discarded.length > cost.max) continue; // declined/invalid -- never forced
+      if (cost.equipOnly && discarded.some((c) => c.kind !== CardKind.Weapon && c.kind !== CardKind.Horse)) continue; // invalid choice -- decline
+      for (const c of discarded) player.hand.splice(player.hand.indexOf(c), 1);
+      this.discardPile.push(...discarded);
+      this.log.push(
+        discarded.length > 0
+          ? `${player.id} bỏ ${discarded.length} lá, bỏ qua giai đoạn này (${skill.name})`
+          : `${player.id} bỏ qua giai đoạn này (${skill.name})`,
+      );
+      await skill.onPhaseSkippedForDiscard?.(ctx, player, phase);
+      this.onLiveUpdate?.();
+      return; // the whole phase is genuinely skipped -- the switch below never runs
+    }
     switch (phase) {
       case Phase.RoundStart:
         if (this.mode === GameMode.Hegemony) await this.runHegemonyReveal(player);
@@ -1335,6 +1398,8 @@ export class Room {
     }
     player.playedSlashThisTurn = false;
     player.luoyiArmedThisTurn = false;
+    player.tianyiWonThisTurn = false; // Tianyi (Taishici): any buff/ban from a PRIOR turn expires
+    player.tianyiLostThisTurn = false;
     player.duelViewAsBlackAllowed = null;
     player.fixedDistanceTo.clear(); // Fenxun (Ding Feng): any distance override from a PRIOR turn expires
     for (const phase of PHASE_ORDER) {

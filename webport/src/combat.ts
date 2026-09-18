@@ -653,6 +653,48 @@ export async function resolveSlash(
   }
 }
 
+/** A 2nd Slash "hit" against `target`, granted by a temporary buff (Taishici's Tianyi: after
+ *  winning a pindian, the rest of this turn's Slash plays may also hit an extra, rangeless
+ *  target). Simplified from the real engine's single multi-target CardUseStruct (this engine's
+ *  `resolveSlash` is strictly 1 attacker : 1 primary target) into an independent 2nd Jink-dodge
+ *  + damage check reusing the same reduced-pipeline shape Triblade's splash-damage precedent
+ *  above already established: no onIncomingSlash redirect/nullify, no weapon-specific bonus
+ *  re-triggers (KylinBow/IceSword/Axe/DoubleSword/another Triblade splash), no Analeptic bonus
+ *  damage, no `onSlashDamageDealt`/`onSomeoneSlashDamaged` broadcasts -- those all read as
+ *  "effects of THE slash card being played", which this bonus hit deliberately isn't (the real
+ *  rule frames it as an extra TARGET of the same card-use, but this engine has no shared
+ *  card-use object to hang that on). Unlike Triblade's splash, this respects a real Jink dodge
+ *  (including `responseCountRequired`, e.g. against a Wushuang holder), matching Tianyi's
+ *  "extra Slash target" semantics more closely than an undodgeable flat hit would. */
+export async function resolveSlashBonusTarget(ctx: EngineContext, attacker: GamePlayer, target: GamePlayer): Promise<void> {
+  ctx.log.push(`${attacker.id} dùng Sát nhắm thêm mục tiêu ${target.id}`);
+  const requiredJinks = Math.max(1, ...target.skills.map((s) => s.responseCountRequired?.("dodge", target) ?? 1));
+  const firstJink = findJinkLikeCard(target, ctx.aoChienActive);
+  if (firstJink && (await ctx.askDodge(target))) {
+    const spent = [firstJink];
+    target.hand.splice(target.hand.indexOf(firstJink), 1);
+    let allFound = true;
+    for (let i = 1; i < requiredJinks; i++) {
+      const next = findJinkLikeCard(target, ctx.aoChienActive);
+      if (!next) {
+        allFound = false;
+        break;
+      }
+      target.hand.splice(target.hand.indexOf(next), 1);
+      spent.push(next);
+    }
+    if (!allFound) {
+      target.hand.push(...spent);
+      ctx.log.push(`${target.id} không đủ ${requiredJinks} lá Thiểm nên chịu đòn`);
+    } else {
+      ctx.discardPile.push(...spent);
+      ctx.log.push(`${target.id} né bằng Thiểm${spent.length > 1 ? ` (x${spent.length})` : ""}`);
+      return;
+    }
+  }
+  await applyDamage(ctx, target, 1, attacker);
+}
+
 /**
  * Shared by Slash/Duel/AOE resolution: apply damage, then run the dying/Peach-rescue loop.
  * `source.pendingBonusDamage` (armed by e.g. Luoyi) adds on top of `amount` once, then resets;

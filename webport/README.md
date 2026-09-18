@@ -1929,9 +1929,8 @@ all, as a first batch; the other 11 are analyzed and documented below, not silen
   Cai Wenji renders the 5 new ones identically) with no broken images or layout, all the way
   through picking a general and entering the table.
 
-**Remaining 6 of the 16 real gaps (after Milestone 25 ported 5 more below), each genuinely
-blocked on a specific new subsystem (checked directly against the real upstream C++ source, not
-guessed):**
+**Remaining 3 of the 16 real gaps (after Milestone 26 ported the other 3 below), each still
+genuinely blocked on a specific unbuilt subsystem:**
 
 - **Wolong (Khổng Minh, shu, 3hp; Zhuge Liang's alternate persona card, `wolong` != `zhugeliang`
   -- a real, distinct Standard-package general with 3 different skills).** Huoji needs the Fire
@@ -1940,24 +1939,6 @@ guessed):**
   to Nullify it, chainable); Bazhen needs an Armor equip CATEGORY (Eight Diagram specifically) --
   a 3rd equip slot this engine's `player.ts` doesn't have (only `weapon`/`defenseHorse`/
   `offenseHorse`). All 3 of his skills independently need a different unbuilt subsystem.
-- **Xiahouyuan (wei, 4hp).** Shensu: discard cards during Judge OR Play phase to skip that phase
-  (plus the next, for Judge) and immediately use a Slash with no distance limit at up to 2
-  targets -- needs both a "discard to skip a phase, then act outside the normal flow" mechanic
-  AND multi-target Slash resolution (this engine's `resolveSlash` is strictly 1 attacker : 1
-  target).
-- **Zhang He (wei, 4hp).** Qiaobian, his only Standard skill: discard 1 card during ANY phase to
-  skip it, then (for Draw/Play specifically) use an extra card outside the normal flow -- needs
-  the same "act outside the normal flow" mechanic Xiahouyuan's Shensu needs. **Correction: an
-  earlier draft of this section swapped Zhang He and Xu Huang's skills -- Duanliang (the
-  tractable SupplyShortage-viewAs one) is actually XU HUANG's, not Zhang He's; Xu Huang is now
-  ported below, Zhang He (Qiaobian) genuinely still needs the harder mechanic.**
-- **Taishici (wu, 4hp).** Tianyi needs Pindian -- which, unlike every other gap here, THIS
-  ENGINE ALREADY HAS (`skill.ts`'s shared `pindian()` helper, built for Lieren/Quhu back in
-  Milestone 2.6/2.9) -- but its WIN effect grants a temporary "+1 extra Slash target, ignore
-  distance limit" buff, needing the same multi-target-Slash extension Xiahouyuan needs. Jiling's
-  own Shuangren (the other Pindian-gated skill) turned out to need a DIFFERENT, more tractable
-  missing piece (a free virtual bonus Slash, not multi-target) -- see Milestone 25 below, now
-  ported.
 - **Zhou Tai (wu).** Buqu -- a private hidden card-pile "secretly survive at <=0 hp" mechanic
   (draw N cards face-down into a pile; if no 2 share a rank, silently treat as not-dying; the
   pile clears on recovery or gets checked again after a failed rescue) -- among the most
@@ -1971,14 +1952,13 @@ guessed):**
   subsystem per se. Qingcheng (discard an equip to re-hide one of a fully-shown target's 2
   generals) needs the ability to RE-HIDE an already-revealed general, which Milestone 23's
   reveal-timing system doesn't support (`mainRevealed`/`deputyRevealed` only ever go
-  false->true) -- a genuinely different gap than Cao Ren's Jushou (below) turned out to need,
-  once Jushou's real effect was traced precisely (a simple single-turn auto-skip, not an
+  false->true) -- a genuinely different gap than Cao Ren's Jushou (Milestone 25) turned out to
+  need, once Jushou's real effect was traced precisely (a simple single-turn auto-skip, not an
   indefinite re-hide at all).
 
-Subsystem tally across these final 6: Nullification+counter-play-stack (1: Wolong), Iron Chain
+Subsystem tally across these final 3: Nullification+counter-play-stack (1: Wolong), Iron Chain
 (1: Wolong's companion Pang Tong still needs it for Lianhuan), Fire Attack (1: Wolong),
-Armor equip category (1: Wolong), discard-to-skip-a-phase (2: Xiahouyuan/Zhanghe), multi-target
-Slash (2: Xiahouyuan/Taishici), private hidden-pile dying mechanic (1: Zhoutai),
+Armor equip category (1: Wolong), private hidden-pile dying mechanic (1: Zhoutai),
 re-hide-a-revealed-general (1: Zoushi's Qingcheng), reveal-ask-timing architecture (1: Zoushi's
 Huoshui) -- each a real, separately-scoped piece of future work, not a single "port the rest"
 task.
@@ -2084,6 +2064,105 @@ predate it, confirmed by reproducing them in isolation):**
   loads with zero JS errors (this milestone needed no new client UI at all -- every new skill
   reuses existing ask types: `activeAction`/`selfAction`/`otherPhaseAction`/the new
   broadcast-only `onSomeoneSlashDamaged`, none of which need a dedicated prompt component).
+
+## Milestone 26 — DONE (3 more generals: Xiahouyuan/Zhang He/Taishici, 54→57 of 60)
+
+User asked to continue porting toward full completeness (`Tiếp đi`). Investigated the remaining
+3's exact skill implementations against the real upstream `dev`-branch C++ and found the
+multi-target-Slash gap was smaller than Milestone 24's addendum assumed -- only Taishici's
+Tianyi genuinely needs it; Xiahouyuan's Shensu turned out to be single-target after all (rangeless,
+not multi-target) once traced precisely:
+
+- **Xiahouyuan (Hạ Hầu Uyên, wei, 4hp).** Shensu: **correction to Milestone 24's addendum** --
+  re-reading the real upstream `Shensu`/`ShensuCard` class shows it's single-target throughout
+  (via ordinary Slash's own `targetFilter`), just rangeless and phase-skip-triggered; no
+  multi-target Slash needed after all, only the "discard to skip a phase, then act outside the
+  normal flow" piece. New generic `Skill.skipsPhaseForDiscard`/`onPhaseSkippedForDiscard` hook
+  pair (`skill.ts`), wired ONCE into `Room.runPhase` (checked right after `runOtherPhaseActions`,
+  before the phase `switch`) so any future skill of this shape needs no `room.ts` changes of its
+  own: at Judge-phase start, may (0-cost ask) skip Judge AND Draw (`player.forcedSkipDrawPhase`,
+  reusing SupplyShortage's own flag) and immediately fire a rangeless free Slash
+  (`makeVirtualSlash()`, reusing Milestone 25's Shuangren factory) at 1 target; at Play-phase
+  start, may discard exactly 1 Weapon/Horse card to skip Play phase and fire the same rangeless
+  free Slash. Real `Slash::IsAvailable` precondition (must still be able to normally Slash right
+  now) simplified out -- the bonus Slash is untracked against the normal per-turn cap anyway,
+  matching the real engine's own `"_shensu"`-tagged bypass, so this may rarely offer the skill
+  slightly more often than the exact real rule allows.
+- **Zhang He (Trương Cáp, wei, 4hp).** Qiaobian, his only Standard skill (`lang/vi_VN`'s text for
+  this one actually MATCHES the real `dev`-branch class exactly, a rare exception to this
+  session's usual mismatch pattern): may discard exactly 1 card to skip ANY of Judge/Draw/Play/
+  Discard phase, via the same generic `skipsPhaseForDiscard` hook above. Draw-phase skip's real
+  compensation (pick up to 2 OTHER players with cards, take 1 hand card -- their choice which --
+  from EACH) is ported faithfully. Play-phase skip's real compensation (move 1 equip/delayed-
+  trick card between 2 OTHER chosen players, with equip-slot/trick-name matching on both ends) is
+  **NOT ported** -- a genuinely separate, more involved 3-party-transfer mechanic than anything
+  else this port models (no existing "move a card between 2 players, neither the actor"
+  precedent); Judge/Play/Discard-phase skips themselves still work (no compensation needed for
+  Judge/Discard either, matching the real rule) -- documented as a deliberate partial port,
+  consistent with this repo's existing "1 of 2 clauses ported, other documented" precedent.
+- **Taishici (Thái Sử Từ, wu, 4hp).** Tianyi -- the one skill that genuinely needed multi-target
+  Slash. Once, at Play-phase start (`Skill.otherPhaseAction`), may pindian (reusing the existing
+  `pindian()` helper -- Pindian itself was never the blocker, confirmed again this milestone):
+  win arms `player.tianyiWonThisTurn` for the REST of the turn (not single-use) -- Slash becomes
+  rangeless (new check in `controller.ts`'s `slashCandidates`), the Slash-use limit +1 (`Skill.
+  slashLimit`), and every Slash play for the rest of the turn may also hit a 2nd, rangeless
+  target via a new scoped `combat.ts` helper `resolveSlashBonusTarget` (independent Jink-dodge +
+  damage check reusing the same reduced-pipeline shape Milestone 20's Triblade-splash precedent
+  established: no weapon-specific bonus re-triggers, no onIncomingSlash redirect/nullify, no
+  Analeptic bonus damage -- those all read as "effects of THE slash card", which this bonus hit
+  deliberately isn't, since this engine has no shared multi-target card-use object to hang them
+  on); loss arms `player.tianyiLostThisTurn` instead -- may not play ANY Slash (real or viewAs,
+  including Spear's 2-card substitute) for the rest of the turn, gated in `Room.tryPlaySlash`/
+  `trySpearSlash`/`computeLegalActions`.
+
+**1 real, pre-existing engine bug found and fixed while chasing ANOTHER card-conservation test
+failure this milestone's larger roster exposed (predates this milestone's own new code, confirmed
+by reproducing it in isolation and tracing it back to `Room.drawOne`, unrelated to any of the 3
+skills above):**
+
+1. **A mid-resolution draw-pile reshuffle silently orphaned an already-captured
+   `EngineContext.discardPile` reference, permanently losing every card later pushed through it.**
+   `Room.makeContext()` snapshots `discardPile: this.discardPile` as a plain array REFERENCE, once
+   per call -- and that same reference is held for the rest of whatever resolution is in flight
+   (e.g. `judge()` calling `ctx.drawTop()`, which internally reshuffles when the draw pile is
+   empty, then `disposeJudgmentCard`/`resolveIndulgenceJudgment`/`resolveSupplyShortageJudgment`
+   pushing onto that SAME `ctx.discardPile` afterward, all within the one still-in-flight call).
+   `Room.drawOne()`'s reshuffle used to do `this.discardPile = shuffle(this.discardPile, this.rng);
+   this.drawPile = ...; this.discardPile = [];` -- a plain REASSIGNMENT, which orphans any
+   in-flight snapshot reference: every card later pushed through it lands in a detached array
+   nobody else can see, silently vanishing from the game forever. Caught by
+   `testPhaseCyclingConservesCards` (89 -> 87, exactly 2 cards) once this milestone's larger
+   57-general roster shifted seed 1's random draft onto a game that happened to run the draw pile
+   dry exactly during a SupplyShortage Judge-phase judgment (turn 13: judging drew the pile's
+   LAST card, triggering the reshuffle mid-resolution, losing both the freshly-drawn judgment
+   card and the SupplyShortage card itself). Fixed by mutating `this.discardPile`/`this.drawPile`
+   IN PLACE (`.length = 0` + `.push(...)`) instead of reassigning them -- any snapshot reference
+   anyone is already holding keeps observing the SAME live arrays. This bug was NOT specific to
+   SupplyShortage -- it could equally have hit Indulgence's judgment (present since Milestone 21),
+   just needed the exact "draw pile empties out mid-judgment" timing to ever surface; this is the
+   first roster/seed combination in this port's history to hit it.
+
+- **Test:** `testTianyiWinArmsRangelessBonusLossBansSlash` (dedicated, pure -- isolates the
+  deterministic pindian win/loss branch that log-mining can't reliably force either way; the Slash
+  BAN itself is private to `Room` and is instead exercised end-to-end by `testGeneralSkillsAppearInPlay`,
+  which also verifies Shensu/Qiaobian/Tianyi's log markers all fire naturally -- no rarity issues
+  this batch); `testGeneralSkillsAppearInPlay` expanded to 57 generals + 5 new markers
+  (`shensu`/`qiaobianDraw`/`qiaobianSkip`/`tianyiWin`/`tianyiBonus`, 71 of 71 total markers
+  observed).
+- **Verification, three layers:** (1) `npx tsc --noEmit` clean; `npm run sim` 82/82 passing (81
+  pre-existing + 1 new dedicated test; the roster-size-triggered card-conservation failure was
+  root-caused to the 1 real bug above, not a new-code issue, now fixed AND regression-tested by
+  the existing `testPhaseCyclingConservesCards`). (2) Live `ws` server: 10 parallel real Hegemony
+  games (auto-created rooms, 8 bots each, driven over real WebSocket) found and confirmed all 5
+  target markers firing for real (`"P6 phát động Thần Tốc, xuất Sát không giới hạn khoảng cách
+  vào P8 (shensu)"`, `"P5 lấy 1 lá của P7 (qiaobian)"`, `"P7 thắng đấu điểm, Sát lượt này không
+  giới hạn khoảng cách, +1 lần dùng và +1 mục tiêu (tianyi)"`, `"P7 dùng Sát nhắm thêm mục tiêu
+  P3"`), with no server-side errors. (3) Real headless-browser run: library search confirmed all
+  3 new generals' catalog entries render correctly (name/kingdom/hp/skill text, avatar image
+  loads) via the actual client UI; zero JS console/page errors observed across the whole session
+  (library browsing, room creation, seat toggling). This milestone needed no new client UI --
+  every new skill reuses existing ask types (`selfAction`/`otherPhaseAction`/the new
+  `wantsToUseSelfAction("<skill>-skip")`/`askAnyHandCards` combo for the generic phase-skip ask).
 
 ## Deploy
 

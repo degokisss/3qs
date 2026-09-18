@@ -293,6 +293,16 @@ export interface Skill {
    *  hook, since Kuangfu's real trigger condition depends on the TARGET's equip, not either
    *  combatant's own skill. */
   onSomeoneSlashDamaged?(ctx: EngineContext, self: GamePlayer, target: GamePlayer): Promise<void>;
+  /** Declares this skill CAN offer to skip `phase` by discarding some cards (e.g. Xiahouyuan's
+   *  Shensu, Zhang He's Qiaobian) -- returns the cost (`[min,max]` count, `equipOnly` if the
+   *  discarded cards must be Weapon/Horse-kind), or null/undefined if this skill doesn't apply
+   *  to `phase`. Checked generically at the top of `Room.runPhase`, gated by the usual
+   *  `wantsToUseSelfAction` ask -- `min` may be 0 (a pure ask, no real discard cost). */
+  skipsPhaseForDiscard?(phase: Phase): { min: number; max: number; equipOnly?: boolean } | null;
+  /** Fired once the cost above is actually paid and `phase` is genuinely being skipped -- lets
+   *  the skill do its own compensation (e.g. Shensu: force a rangeless bonus Slash; Qiaobian:
+   *  take a card from up to 2 chosen players during a skipped Draw phase). */
+  onPhaseSkippedForDiscard?(ctx: EngineContext, player: GamePlayer, phase: Phase): Promise<void>;
 }
 
 function isRed(card: Card): boolean {
@@ -1258,6 +1268,74 @@ async function shuangrenSelfAction(ctx: EngineContext, jiling: GamePlayer): Prom
   await resolveSlash(ctx, jiling, target, makeVirtualSlash());
 }
 
+/** Shensu (Xiahouyuan): compensation for `skipsPhaseForDiscard`'s Judge/Play-phase skip --
+ *  immediately use a free bonus Slash (`makeVirtualSlash`, matching the real upstream `Slash
+ *  (Card::NoSuit, 0)`) with NO distance limit at any other alive player. Real rule also skips
+ *  the Draw phase specifically when the Judge-phase clause fires (reusing `forcedSkipDrawPhase`,
+ *  the same flag SupplyShortage's failed judgment sets). Real rule additionally requires
+ *  `Slash::IsAvailable` (this player must still be able to play an ordinary Slash right now,
+ *  e.g. not already at their per-turn cap) as a precondition for even OFFERING the skill --
+ *  simplified out (the bonus Slash here is untracked against the normal per-turn cap anyway,
+ *  same "_shensu"-tagged-bypass the real engine itself uses), so this may rarely fire slightly
+ *  more often than the exact real rule allows. */
+async function shensuOnPhaseSkipped(ctx: EngineContext, xiahouyuan: GamePlayer, phase: Phase): Promise<void> {
+  if (phase === Phase.Judge) xiahouyuan.forcedSkipDrawPhase = true;
+  const candidates = ctx.alivePlayers.filter((p) => p !== xiahouyuan);
+  if (candidates.length === 0) return;
+  const target = await ctx.askChooseAnyPlayer(xiahouyuan, candidates);
+  if (!target) return;
+  ctx.log.push(`${xiahouyuan.id} phát động Thần Tốc, xuất Sát không giới hạn khoảng cách vào ${target.id} (shensu)`);
+  await resolveSlash(ctx, xiahouyuan, target, makeVirtualSlash());
+}
+
+/** Qiaobian (Zhang He): compensation for `skipsPhaseForDiscard`'s Judge/Draw/Play/Discard-phase
+ *  skip. Real rule's Draw-phase compensation (pick up to 2 OTHER players with cards, take 1
+ *  hand card from EACH) is ported faithfully below. Real rule's Play-phase compensation (move 1
+ *  equip/delayed-trick card between 2 OTHER chosen players, with equip-slot/trick-name matching
+ *  on both ends) is NOT ported -- a genuinely separate, substantially more involved mechanic
+ *  than everything else this port already models (no existing "move a card between 2 OTHER
+ *  players, neither of them the actor" precedent) -- Judge/Play/Discard-phase skips themselves
+ *  still work (no compensation needed for Judge/Discard either, matches the real rule). */
+async function qiaobianOnPhaseSkipped(ctx: EngineContext, zhanghe: GamePlayer, phase: Phase): Promise<void> {
+  if (phase !== Phase.Draw) return;
+  const chosen: GamePlayer[] = [];
+  for (let i = 0; i < 2; i++) {
+    const candidates = ctx.alivePlayers.filter((p) => p !== zhanghe && p.handcardNum > 0 && !chosen.includes(p));
+    if (candidates.length === 0) break;
+    const to = await ctx.askChooseAnyPlayer(zhanghe, candidates);
+    if (!to) break;
+    chosen.push(to);
+  }
+  for (const from of chosen) {
+    const taken = await ctx.askPickPlayerCard(zhanghe, from, from.hand);
+    from.hand.splice(from.hand.indexOf(taken), 1);
+    zhanghe.hand.push(taken);
+    ctx.log.push(`${zhanghe.id} lấy 1 lá của ${from.id} (qiaobian)`);
+  }
+}
+
+/** Tianyi (Taishici): once, at the start of Play phase, may pindian with someone. Win: for the
+ *  rest of this turn, Slash is rangeless, +1 total Slash-use limit, and each Slash may also hit
+ *  a 2nd target (see `player.tianyiWonThisTurn`'s doc comment and room.ts's
+ *  `maybeResolveTianyiBonusTarget`/`computeSlashLimit`/`controller.ts`'s `slashCandidates`).
+ *  Loss: cannot play any Slash for the rest of this turn (`player.tianyiLostThisTurn`, checked
+ *  by `tryPlaySlash`/`trySpearSlash`/`computeLegalActions`). */
+async function tianyiOtherPhaseAction(ctx: EngineContext, taishici: GamePlayer): Promise<void> {
+  if (taishici.handcardNum === 0) return;
+  const candidates = ctx.alivePlayers.filter((p) => p !== taishici && p.handcardNum > 0);
+  if (candidates.length === 0 || !(await ctx.askUseSelfAction(taishici, "tianyi"))) return;
+  const victim = await ctx.askChooseAnyPlayer(taishici, candidates);
+  if (!victim) return;
+  const won = await pindian(ctx, taishici, victim, "tianyi");
+  if (won) {
+    taishici.tianyiWonThisTurn = true;
+    ctx.log.push(`${taishici.id} thắng đấu điểm, Sát lượt này không giới hạn khoảng cách, +1 lần dùng và +1 mục tiêu (tianyi)`);
+  } else {
+    taishici.tianyiLostThisTurn = true;
+    ctx.log.push(`${taishici.id} thua đấu điểm, không thể dùng Sát lượt này (tianyi)`);
+  }
+}
+
 export const SKILLS: Record<string, Skill> = {
   paoxiao: {
     name: "paoxiao",
@@ -1753,6 +1831,35 @@ export const SKILLS: Record<string, Skill> = {
     canViewAsSupplyShortage: (card) => card.kind !== CardKind.SupplyShortage && isBlack(card),
     extraTrickDistance: (kind) => (kind === CardKind.SupplyShortage ? 1 : 0),
   },
+  shensu: {
+    name: "shensu",
+    displayName: "Thần Tốc",
+    description:
+      "Đầu giai đoạn phán xét: có thể bỏ qua giai đoạn phán xét VÀ rút bài, lập tức xuất Sát không giới hạn khoảng cách vào 1 người. Đầu giai đoạn ra bài: có thể bỏ 1 lá trang bị để bỏ qua giai đoạn ra bài, lập tức xuất Sát không giới hạn khoảng cách vào 1 người.",
+    skipsPhaseForDiscard: (phase) => {
+      if (phase === Phase.Judge) return { min: 0, max: 0 };
+      if (phase === Phase.Play) return { min: 1, max: 1, equipOnly: true };
+      return null;
+    },
+    onPhaseSkippedForDiscard: shensuOnPhaseSkipped,
+  },
+  qiaobian: {
+    name: "qiaobian",
+    displayName: "Xảo Biến",
+    description:
+      "Khi vào giai đoạn phán xét/rút bài/ra bài/bỏ bài của bạn, có thể bỏ 1 lá để bỏ qua giai đoạn đó; nếu bỏ qua giai đoạn rút bài, lấy 1 lá bài của tối đa 2 người khác có bài trên tay.",
+    skipsPhaseForDiscard: (phase) =>
+      phase === Phase.Judge || phase === Phase.Draw || phase === Phase.Play || phase === Phase.Discard ? { min: 1, max: 1 } : null,
+    onPhaseSkippedForDiscard: qiaobianOnPhaseSkipped,
+  },
+  tianyi: {
+    name: "tianyi",
+    displayName: "Thiên Nghĩa",
+    description:
+      "Một lần trong giai đoạn ra bài, có thể đấu điểm với 1 người: thắng thì [Sát] lượt này không giới hạn khoảng cách, giới hạn dùng [Sát] và số mục tiêu +1; thua thì không thể dùng [Sát] lượt này.",
+    otherPhaseAction: { phase: Phase.Play, run: tianyiOtherPhaseAction },
+    slashLimit: (player) => (player.tianyiWonThisTurn ? 2 : 1),
+  },
 };
 
 export interface GeneralDef {
@@ -1834,4 +1941,9 @@ export const GENERALS: GeneralDef[] = [
   { name: "panfeng", displayName: "Phan Phụng", kingdom: "qun", maxHp: 4, skillNames: ["kuangfu"] },
   { name: "jiling", displayName: "Kỷ Linh", kingdom: "qun", maxHp: 4, skillNames: ["shuangren"] },
   { name: "xuhuang", displayName: "Từ Hoảng", kingdom: "wei", maxHp: 4, skillNames: ["duanliang"] },
+  // Milestone 26: user asked to continue toward full completeness -- see webport/README.md's
+  // Milestone 26 section for the new subsystems (discard-to-skip-a-phase, multi-target Slash).
+  { name: "xiahouyuan", displayName: "Hạ Hầu Uyên", kingdom: "wei", maxHp: 4, skillNames: ["shensu"] },
+  { name: "zhanghe", displayName: "Trương Cáp", kingdom: "wei", maxHp: 4, skillNames: ["qiaobian"] },
+  { name: "taishici", displayName: "Thái Sử Từ", kingdom: "wu", maxHp: 4, skillNames: ["tianyi"] },
 ];

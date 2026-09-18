@@ -973,6 +973,11 @@ async function testGeneralSkillsAppearInPlay(): Promise<void> {
     ["kuangfu", "(kuangfu)"],
     ["shuangren", "(shuangren)"],
     ["duanliang", "phán Binh Lương Thốn Đoạn"],
+    ["shensu", "phát động Thần Tốc"],
+    ["qiaobianDraw", "(qiaobian)"],
+    ["qiaobianSkip", "bỏ qua giai đoạn này (qiaobian)"],
+    ["tianyiWin", "(tianyi)"],
+    ["tianyiBonus", "nhắm thêm mục tiêu"],
   ];
   const seen = new Set<string>();
 
@@ -1000,11 +1005,12 @@ async function testGeneralSkillsAppearInPlay(): Promise<void> {
       "erzhang", "ganfuren", "ganning", "guanyu", "guojia", "huanggai", "huangyueying",
       "huangzhong", "huatuo", "jiaxu", "jiling", "kongrong", "liubei", "liushan", "lusu", "luxun",
       "lvbu", "lvmeng", "machao", "mateng", "menghuo", "panfeng", "pangde", "pangtong", "simayi",
-      "sunjian", "sunquan", "sunshangxiang", "tianfeng", "weiyan", "xiahoudun", "xiaoqiao",
-      "xuchu", "xuhuang", "xunyu", "yanliangwenchou", "yuanshao", "yuejin", "zhangfei",
-      "zhangjiao", "zhangliao", "zhaoyun", "zhenji", "zhouyu", "zhugeliang", "zhurong",
+      "sunjian", "sunquan", "sunshangxiang", "taishici", "tianfeng", "weiyan", "xiahoudun",
+      "xiahouyuan", "xiaoqiao", "xuchu", "xuhuang", "xunyu", "yanliangwenchou", "yuanshao",
+      "yuejin", "zhangfei", "zhanghe", "zhangjiao", "zhangliao", "zhaoyun", "zhenji", "zhouyu",
+      "zhugeliang", "zhurong",
     ],
-    "all 54 ported generals must appear across 150 seeds of 8-player games",
+    "all 57 ported generals must appear across 150 seeds of 8-player games",
   );
   strict.ok(sawMultiSlashTurn, "paoxiao (zhangfei) never allowed >1 slash in a single turn");
   const missing = markers.map(([name]) => name).filter((name) => !seen.has(name));
@@ -3117,6 +3123,62 @@ async function testHegemonyRevealCompletionBonuses(): Promise<void> {
   );
 }
 
+/**
+ * Tianyi (Taishici) proof: winning the pindian arms `tianyiWonThisTurn` (rangeless Slash target
+ * selection -- `slashCandidates` -- and +1 `slashLimit`, both pure and directly checkable here);
+ * losing arms `tianyiLostThisTurn` instead (the actual Slash BAN is enforced deep inside
+ * `Room.tryPlaySlash`/`trySpearSlash`/`computeLegalActions`, all private -- exercised
+ * end-to-end and log-mined by `testGeneralSkillsAppearInPlay`; this test isolates the
+ * deterministic win/loss branch that log-mining can't reliably force either way).
+ */
+async function testTianyiWinArmsRangelessBonusLossBansSlash(): Promise<void> {
+  const deck = buildStandardDeck();
+  const highCard = deck.reduce((a, b) => (b.point > a.point ? b : a));
+  const lowCard = deck.find((c) => c.point < highCard.point)!;
+
+  // Win case: taishici's own drawn card outranks the opponent's.
+  const taishici = new GamePlayer("TSC");
+  taishici.skills = [SKILLS.tianyi];
+  taishici.hand = [highCard];
+  const victim = new GamePlayer("V");
+  victim.hand = [lowCard];
+
+  // 6-seat table so a normal (non-rangeless) Slash would exclude a distance-3 target -- proves
+  // the win buff's rangeless effect actually matters, not just that a trivially-close target
+  // stays included regardless. Checked BEFORE the buff arms, while tianyiWonThisTurn is still
+  // its default false.
+  const seats = [taishici, ...Array.from({ length: 5 }, (_, i) => new GamePlayer(`S${i}`))];
+  strict.ok(
+    !slashCandidates(seats, taishici).includes(seats[3]),
+    "sanity: without the buff, a distance-3 seat must be OUT of range at the default attack range 1",
+  );
+
+  const log: string[] = [];
+  const ctx = makeTestContext([taishici, victim], log);
+  await SKILLS.tianyi.otherPhaseAction!.run(ctx, taishici, Math.random);
+  strict.equal(taishici.tianyiWonThisTurn, true, "winning the pindian must arm tianyiWonThisTurn");
+  strict.equal(taishici.tianyiLostThisTurn, false, "a win must not also arm the loss ban");
+  strict.equal(SKILLS.tianyi.slashLimit!(taishici), 2, "a win must grant +1 to the Slash-use limit");
+  strict.ok(
+    slashCandidates(seats, taishici).length === 5,
+    "the win buff must make Slash rangeless -- every other seat becomes a valid candidate, including the distance-3 one",
+  );
+
+  // Loss case: fresh players, taishici's card is now the LOWER one.
+  const taishici2 = new GamePlayer("TSC2");
+  taishici2.skills = [SKILLS.tianyi];
+  taishici2.hand = [lowCard];
+  const victim2 = new GamePlayer("V2");
+  victim2.hand = [highCard];
+  const log2: string[] = [];
+  const ctx2 = makeTestContext([taishici2, victim2], log2);
+  await SKILLS.tianyi.otherPhaseAction!.run(ctx2, taishici2, Math.random);
+  strict.equal(taishici2.tianyiWonThisTurn, false, "losing the pindian must not arm the win buff");
+  strict.equal(taishici2.tianyiLostThisTurn, true, "losing the pindian must arm the Slash ban");
+  strict.equal(SKILLS.tianyi.slashLimit!(taishici2), 1, "a loss must leave the Slash-use limit at its default 1");
+
+  console.log("PASS testTianyiWinArmsRangelessBonusLossBansSlash: win armed rangeless+extra-target+limit, loss armed the Slash ban");
+}
 await testZhijianEquipsAnotherPlayer();
 await testWanshaBlocksAllyRescueDuringOwnTurn();
 await testPindianTieBreakFavorsOpponent();
@@ -3136,6 +3198,7 @@ await testEmergentHegemonyGameReachesWinCondition();
 await testHegemonyRevealTiming();
 testHegemonySkillsGatedByReveal();
 await testHegemonyRevealCompletionBonuses();
+await testTianyiWinArmsRangelessBonusLossBansSlash();
 console.log(
-  "\nAll Milestone 0-3.9 smoke tests passed, plus Luoshen/Fanjian/Lieren/Quhu/Jieyin/Dimeng/Zhijian/Lijian/Wansha/Luanwu/Xiongyi/Guidao/Lirang/Duoshi/Fangquan/Indulgence/Tiandu/Guose, plus Milestone 23 Hegemony (Quốc Chiến) mode.",
+  "\nAll Milestone 0-3.9 smoke tests passed, plus Luoshen/Fanjian/Lieren/Quhu/Jieyin/Dimeng/Zhijian/Lijian/Wansha/Luanwu/Xiongyi/Guidao/Lirang/Duoshi/Fangquan/Indulgence/Tiandu/Guose, plus Milestone 23 Hegemony (Quốc Chiến) mode, plus Milestone 26 (Shensu/Qiaobian/Tianyi).",
 );
