@@ -217,11 +217,12 @@ export function combineHegemonyHp(soloHp1: number, soloHp2: number): { maxHp: nu
 
 /**
  * 珠联璧合 (companion) pairs -- read directly off the real upstream source's `addCompanion()`
- * calls (`src/package/standard-{shu,wei,wu,qun}-generals.cpp`), filtered to the 9 pairs where
- * BOTH generals are actually in this port's 44-general roster (a companion bonus needs both
- * halves of your OWN drafted main+deputy pair to be companions with each other -- many more
- * companion links exist upstream between a ported general and an unported one, e.g. Liu Bei,
- * which are correctly excluded here since the other half can never be drafted). Symmetric --
+ * calls (`src/package/standard-{shu,wei,wu,qun}-generals.cpp`, plus `momentum.cpp`/
+ * `formation.cpp` for the Milestone 32/36 Hegemony-specific generals), filtered to the pairs
+ * where BOTH generals are actually in this port's roster (a companion bonus needs both halves
+ * of your OWN drafted main+deputy pair to be companions with each other -- many more companion
+ * links exist upstream between a ported general and an unported one, e.g. Liu Bei, which are
+ * correctly excluded here since the other half can never be drafted). Symmetric --
  * `isCompanionPair` checks both directions, matching upstream `General::getCompanions()`'s own
  * bidirectional search.
  */
@@ -235,6 +236,19 @@ export const COMPANION_PAIRS: [string, string][] = [
   ["caopi", "zhenji"],
   ["zhouyu", "huanggai"],
   ["lvbu", "diaochan"],
+  ["zhangliao", "zangba"],
+  ["lidian", "yuejin"],
+  ["xusheng", "dingfeng"],
+  ["madai", "machao"],
+  ["sunce", "zhouyu"],
+  ["sunce", "taishici"],
+  ["sunce", "daqiao"],
+  ["caohong", "caoren"],
+  ["jiangqin", "zhoutai"],
+  ["xunyou", "xunyu"],
+  ["liguo", "jiaxu"],
+  ["lingtong", "ganning"],
+  ["bianhuanghou", "caocao"],
 ];
 
 export function isCompanionPair(mainGeneral: string, deputyGeneral: string): boolean {

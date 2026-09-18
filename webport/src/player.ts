@@ -19,6 +19,11 @@ export class GamePlayer {
   weapon: Card | null = null;
   defenseHorse: Card | null = null; // +1 delta: seatDistance(attacker -> me) is increased by 1
   offenseHorse: Card | null = null; // -1 delta: seatDistance(me -> target) is decreased by 1
+  /** Milestone 34: the 4th equip slot (Weapon/DefenseHorse/OffenseHorse being the other 3) --
+   *  one of the 4 Standard armors (EightDiagram/RenwangShield/Vine/SilverLion), all "Tỏa định
+   *  kỹ" (locked skill -- always active, no ask) except EightDiagram's own optional judge. See
+   *  combat.ts's `applyDamage`/`resolveSlash` headers for exactly how each one hooks in. */
+  armor: Card | null = null;
   general = ""; // set by Room from skill.ts's GENERALS; empty until assigned (pinyin id, e.g. "caocao" -- drives asset filenames)
   generalName = ""; // Vietnamese display name (e.g. "Tào Tháo"), set alongside `general` from GeneralDef.displayName
   kingdom = ""; // "wei"/"shu"/"wu"/"qun", set alongside general
@@ -112,6 +117,60 @@ export class GamePlayer {
    *  after that resumes completely normally, matching the real "auto-flip back up, no player
    *  choice involved" rule confirmed against gamerule.cpp's RoundStart handling). */
   faceDown = false;
+  /** Zhou Tai's Buqu (Milestone 27): "Sang" (scar) cards accumulated across repeated dying
+   *  attempts -- see skill.ts's `buquPreventsDeath` for how the pile grows and is checked, and
+   *  `buquOnRecover` for when it's discarded (the instant hp recovers back above 0). Never used
+   *  by any other general. */
+  buquPile: Card[] = [];
+  /** Iron Chain (Milestone 30): while true, this player takes/splashes chain damage -- see
+   *  combat.ts's `applyDamage` header for the exact real "any Fire/Thunder-natured hit on a
+   *  chained player unchains them and splashes the SAME damage to every OTHER still-chained
+   *  player" rule. Toggled by `trick.ts`'s `resolveIronChain`; never reset elsewhere (matches
+   *  the real rule -- stays chained indefinitely until either an elemental hit or another Iron
+   *  Chain use clears it). */
+  chained = false;
+  /** Hengjiang (Zang Ba, momentum.cpp -- a Hegemony-specific supplementary general, NOT one of
+   *  the 60 Standard generals): stacking -1 to THIS player's `maxCards` for the rest of THEIR
+   *  OWN current turn, applied by Zang Ba's `onDamaged` hook against whoever `EngineContext.
+   *  currentPlayer` is at the moment he's damaged. Reset to 0 at the start of each of this
+   *  player's own turns (Room.playTurn) and again unconditionally at that same turn's end
+   *  (Room.playTurn, right after the Finish phase) -- matches the real rule's TurnStart/
+   *  HengjiangFail resets; never carries across turns. */
+  hengjiangMark = 0;
+  /** Hengjiang (Zang Ba) only: set true the instant `Room.discardDownToLimit` actually forces
+   *  THIS player to discard during their own Discard phase this turn (i.e. `hengjiangMark` > 0
+   *  really bit). Checked once at that same turn's end: if `hengjiangMark` > 0 but this stayed
+   *  false, the debuff never actually cost them a discard, so Zang Ba draws 1 card as
+   *  compensation (Room.playTurn) -- matches the real rule's HengjiangDraw reward. Reset
+   *  alongside `hengjiangMark` at the start of each of this player's own turns. */
+  hengjiangDiscardedThisTurn = false;
+  /** Shengxi (Jiang Wan/Fei Yi combined general, formation.cpp -- a Hegemony-specific
+   *  supplementary general, NOT one of the 60 Standard generals): set true by Shengxi's own
+   *  `onDamageDealt` hook the instant this player deals ANY damage; checked once at the start
+   *  of their own Discard phase (Room's `otherPhaseAction` runs before that phase's own
+   *  handling) -- still false means "dealt no damage during this Play phase", so Shengxi may
+   *  draw 2. Reset at the start of each of this player's own turns. */
+  dealtDamageInPlayPhase = false;
+  /** Tiềm Tập/Qianxi (Ma Dai, momentum.cpp -- Hegemony-specific, NOT Standard): while non-null,
+   *  this player may not USE or RESPOND WITH any HAND card of this color (equipped cards are
+   *  unrestricted) -- enforced by combat.ts's `usableHand` helper, consulted at every card-
+   *  availability check throughout combat.ts/room.ts (real upstream's `setPlayerCardLimitation`
+   *  "use,response" scope). `handColorForbiddenBy` tracks who cast it -- `Room.playTurn`
+   *  clears both fields on every player whose restriction was cast BY the just-finished turn
+   *  owner (matches the real rule's "until the casting player's OWN turn ends" duration, not
+   *  the restricted player's). */
+  handColorForbidden: "red" | "black" | null = null;
+  handColorForbiddenBy: GamePlayer | null = null;
+  /** Sanyao (Ma Su, transformation.cpp -- Hegemony-specific, NOT Standard): once true, Sanyao's
+   *  `activeAction` never offers candidates again -- the real skill is once-per-GAME (`!player-
+   *  >hasUsed("SanyaoCard")`), not the usual once-per-Play-phase every other `activeAction`
+   *  above already gets for free from the engine's own per-phase loop. */
+  sanyaoUsed = false;
+  /** Zhiman (Ma Su, transformation.cpp -- Hegemony-specific, NOT Standard): the id of the Ma Su
+   *  who most recently damaged THIS player and marked them (null if unmarked). The NEXT time
+   *  the SAME Ma Su damages this player again, Zhiman's payoff fires and this clears -- see
+   *  skill.ts's `zhimanOnDamageDealt`. */
+  zhimanMarkedBy: string | null = null;
 
   constructor(id: string, maxHp = 4) {
     this.id = id;
@@ -149,9 +208,10 @@ export class GamePlayer {
     return this._skills;
   }
 
-  // Player::getMaxCards(MaxCardsType::Normal) simplifies (absent skills/equip) to current HP.
+  // Player::getMaxCards(MaxCardsType::Normal) simplifies (absent skills/equip) to current HP,
+  // minus any active Hengjiang (Zang Ba) debuff.
   get maxCards(): number {
-    return Math.max(0, this.hp);
+    return Math.max(0, this.hp - this.hengjiangMark);
   }
 
   isWounded(): boolean {

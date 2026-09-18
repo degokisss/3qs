@@ -16,6 +16,7 @@
 
 import { Card, CardKind, Suit } from "./card.js";
 import { GamePlayer } from "./player.js";
+import { DamageNature } from "./types.js";
 import { isAlly } from "./gamerule.js";
 
 /**
@@ -63,9 +64,18 @@ export async function detachCardFrom(ctx: EngineContext, owner: GamePlayer, card
     return;
   }
   if (owner.weapon === card) owner.weapon = null;
+  else if (owner.armor === card) owner.armor = null;
   else if (owner.defenseHorse === card) owner.defenseHorse = null;
   else if (owner.offenseHorse === card) owner.offenseHorse = null;
   else return; // defensive no-op: not actually one of owner's cards
+  // SilverLion (armor, Milestone 34): heals 1 hp on leaving the equip zone while alive+wounded --
+  // fires for ANY equip-zone departure (Dismantlement/Snatch/IceSword alike), matching the real
+  // rule's unconditional "after it leaves your equip zone" trigger, not just being replaced by a
+  // new armor (see room.ts's `equip` for that other departure path).
+  if (card.armorName === "SilverLion" && owner.alive && owner.isWounded()) {
+    await heal(ctx, owner, 1);
+    ctx.log.push(`${owner.id} hồi 1 máu do Bạch Ngân Sư Tử rời trang bị`);
+  }
   for (const skill of owner.skills) await skill.onEquipLost?.(ctx, owner);
 }
 
@@ -75,20 +85,46 @@ function takeCard(hand: Card[], kind: CardKind): Card | null {
   return hand.splice(idx, 1)[0];
 }
 
+/** Tiềm Tập/Qianxi (Ma Dai, Milestone 40 -- Hegemony-specific, NOT Standard): hand cards
+ *  `player` may currently USE or RESPOND WITH -- excludes any card whose suit color matches
+ *  `player.handColorForbidden`. Consulted by every find/all "which hand cards are eligible"
+ *  helper below instead of raw `player.hand`, so the restriction applies uniformly everywhere
+ *  those helpers are already the single source of truth (Slash/Jink/Peach/Analeptic rescue/
+ *  Duel/Dismantlement/Snatch/Indulgence/SupplyShortage/FireAttack, and by extension Savage
+ *  Assault/Archery Attack's discard-to-avoid choices, which route through `findSlashLikeCard`/
+ *  `findJinkLikeCard`). Equipped cards, hand COUNT (`maxCards`), and discard-phase/skill-cost
+ *  picks are NOT filtered -- only actual card use/response candidate-building goes through
+ *  this (matches real Sanguosha's own "use,response"-scoped card limitation, not a blanket
+ *  possession ban). */
+export function usableHand(player: GamePlayer): Card[] {
+  if (!player.handColorForbidden) return player.hand;
+  const forbidden = player.handColorForbidden;
+  return player.hand.filter((c) => (c.suit === Suit.Heart || c.suit === Suit.Diamond ? "red" : "black") !== forbidden);
+}
+
+/** Single-card version of `usableHand`, for the handful of call sites that inline-scan
+ *  `player.hand` by index instead of building a filtered list first (Peach/Analeptic proactive
+ *  self-play, equip, Nullification/HegNullification response). */
+export function isCardUsable(player: GamePlayer, card: Card): boolean {
+  if (!player.handColorForbidden) return true;
+  return (card.suit === Suit.Heart || card.suit === Suit.Diamond ? "red" : "black") !== player.handColorForbidden;
+}
+
 /** A real Jink card, or (e.g. Longdan/Qingguo) the first card some skill allows viewing as
  *  Jink, or (Ao Chiến, Hegemony's late-game rule) a held Peach -- once Ao Chiến disables
  *  Peach's rescue/heal effect (see `findRescueCard`'s own `aoChienActive` gate), the real rule
  *  lets it substitute for Slash or Jink instead. */
 export function findJinkLikeCard(player: GamePlayer, aoChienActive = false): Card | null {
-  const real = player.hand.find((c) => c.kind === CardKind.Jink);
+  const hand = usableHand(player);
+  const real = hand.find((c) => c.kind === CardKind.Jink);
   if (real) return real;
   for (const skill of player.skills) {
     if (!skill.canViewAsJink) continue;
-    const viewed = player.hand.find((c) => skill.canViewAsJink!(c, player));
+    const viewed = hand.find((c) => skill.canViewAsJink!(c, player));
     if (viewed) return viewed;
   }
   if (aoChienActive) {
-    const peach = player.hand.find((c) => c.kind === CardKind.Peach);
+    const peach = hand.find((c) => c.kind === CardKind.Peach);
     if (peach) return peach;
   }
   return null;
@@ -101,12 +137,13 @@ export function findJinkLikeCard(player: GamePlayer, aoChienActive = false): Car
  *  canViewAsPeach substitution -- both are the same "played as Peach" rescue) no longer rescues
  *  at all; Analeptic's rescue is untouched (the real rule only restricts 桃/Peach specifically). */
 function findRescueCard(player: GamePlayer, aoChienActive: boolean): Card | null {
-  const real = player.hand.find((c) => c.kind === CardKind.Analeptic || (!aoChienActive && c.kind === CardKind.Peach));
+  const hand = usableHand(player);
+  const real = hand.find((c) => c.kind === CardKind.Analeptic || (!aoChienActive && c.kind === CardKind.Peach));
   if (real) return real;
   if (aoChienActive) return null;
   for (const skill of player.skills) {
     if (!skill.canViewAsPeach) continue;
-    const viewed = player.hand.find((c) => skill.canViewAsPeach!(c, player));
+    const viewed = hand.find((c) => skill.canViewAsPeach!(c, player));
     if (viewed) return viewed;
   }
   return null;
@@ -125,15 +162,16 @@ function rescueCardLabel(card: Card): "peach" | "analeptic" | null {
 /** A real Slash card, or (e.g. Wusheng/Longdan) the first card some skill allows viewing as
  *  Slash, or (Ao Chiến) a held Peach -- see `findJinkLikeCard`'s doc comment for why. */
 export function findSlashLikeCard(player: GamePlayer, aoChienActive = false): Card | null {
-  const real = player.hand.find((c) => c.kind === CardKind.Slash);
+  const hand = usableHand(player);
+  const real = hand.find((c) => c.kind === CardKind.Slash);
   if (real) return real;
   for (const skill of player.skills) {
     if (!skill.canViewAsSlash) continue;
-    const viewed = player.hand.find((c) => skill.canViewAsSlash!(c, player));
+    const viewed = hand.find((c) => skill.canViewAsSlash!(c, player));
     if (viewed) return viewed;
   }
   if (aoChienActive) {
-    const peach = player.hand.find((c) => c.kind === CardKind.Peach);
+    const peach = hand.find((c) => c.kind === CardKind.Peach);
     if (peach) return peach;
   }
   // Fan (weapon): any ONE held non-Slash card may be played/discarded as if it were a Slash --
@@ -141,7 +179,7 @@ export function findSlashLikeCard(player: GamePlayer, aoChienActive = false): Ca
   // skill-gated, so it plugs into every existing consumer of this function (Duel exchanges,
   // Savage Assault's discard-a-slash choice, etc.) for free.
   if (player.weapon?.weaponName === "Fan") {
-    const nonSlash = player.hand.find((c) => c.kind !== CardKind.Slash);
+    const nonSlash = hand.find((c) => c.kind !== CardKind.Slash);
     if (nonSlash) return nonSlash;
   }
   return null;
@@ -152,20 +190,21 @@ export function findSlashLikeCard(player: GamePlayer, aoChienActive = false): Ca
  *  just the first, for a freeform Play phase's legal-action list (see room.ts's
  *  `computeLegalActions`). */
 export function allSlashLikeCards(player: GamePlayer, aoChienActive = false): Card[] {
-  const cards = player.hand.filter((c) => c.kind === CardKind.Slash);
+  const hand = usableHand(player);
+  const cards = hand.filter((c) => c.kind === CardKind.Slash);
   for (const skill of player.skills) {
     if (!skill.canViewAsSlash) continue;
-    for (const c of player.hand) {
+    for (const c of hand) {
       if (c.kind !== CardKind.Slash && skill.canViewAsSlash(c, player) && !cards.includes(c)) cards.push(c);
     }
   }
   if (aoChienActive) {
-    for (const c of player.hand) {
+    for (const c of hand) {
       if (c.kind === CardKind.Peach && !cards.includes(c)) cards.push(c);
     }
   }
   if (player.weapon?.weaponName === "Fan") {
-    for (const c of player.hand) {
+    for (const c of hand) {
       if (c.kind !== CardKind.Slash && !cards.includes(c)) cards.push(c);
     }
   }
@@ -174,11 +213,12 @@ export function allSlashLikeCards(player: GamePlayer, aoChienActive = false): Ca
 
 /** A real Dismantlement card, or (e.g. Qixi) the first card some skill allows viewing as one. */
 export function findDismantlementLikeCard(player: GamePlayer): Card | null {
-  const real = player.hand.find((c) => c.kind === CardKind.Dismantlement);
+  const hand = usableHand(player);
+  const real = hand.find((c) => c.kind === CardKind.Dismantlement);
   if (real) return real;
   for (const skill of player.skills) {
     if (!skill.canViewAsDismantlement) continue;
-    const viewed = player.hand.find((c) => skill.canViewAsDismantlement!(c, player));
+    const viewed = hand.find((c) => skill.canViewAsDismantlement!(c, player));
     if (viewed) return viewed;
   }
   return null;
@@ -187,10 +227,11 @@ export function findDismantlementLikeCard(player: GamePlayer): Card | null {
 /** Every real Dismantlement card plus every card a skill allows viewing as one (e.g. Qixi) --
  *  see `allSlashLikeCards`'s header for why this exists alongside `findDismantlementLikeCard`. */
 export function allDismantlementLikeCards(player: GamePlayer): Card[] {
-  const cards = player.hand.filter((c) => c.kind === CardKind.Dismantlement);
+  const hand = usableHand(player);
+  const cards = hand.filter((c) => c.kind === CardKind.Dismantlement);
   for (const skill of player.skills) {
     if (!skill.canViewAsDismantlement) continue;
-    for (const c of player.hand) {
+    for (const c of hand) {
       if (c.kind !== CardKind.Dismantlement && skill.canViewAsDismantlement(c, player) && !cards.includes(c)) cards.push(c);
     }
   }
@@ -199,11 +240,12 @@ export function allDismantlementLikeCards(player: GamePlayer): Card[] {
 
 /** A real Duel card, or (e.g. Shuangxiong) the first card some skill allows viewing as one. */
 export function findDuelLikeCard(player: GamePlayer): Card | null {
-  const real = player.hand.find((c) => c.kind === CardKind.Duel);
+  const hand = usableHand(player);
+  const real = hand.find((c) => c.kind === CardKind.Duel);
   if (real) return real;
   for (const skill of player.skills) {
     if (!skill.canViewAsDuel) continue;
-    const viewed = player.hand.find((c) => skill.canViewAsDuel!(c, player));
+    const viewed = hand.find((c) => skill.canViewAsDuel!(c, player));
     if (viewed) return viewed;
   }
   return null;
@@ -212,10 +254,11 @@ export function findDuelLikeCard(player: GamePlayer): Card | null {
 /** Every real Duel card plus every card a skill allows viewing as one (e.g. Shuangxiong) -- see
  *  `allSlashLikeCards`'s header for why this exists alongside `findDuelLikeCard`. */
 export function allDuelLikeCards(player: GamePlayer): Card[] {
-  const cards = player.hand.filter((c) => c.kind === CardKind.Duel);
+  const hand = usableHand(player);
+  const cards = hand.filter((c) => c.kind === CardKind.Duel);
   for (const skill of player.skills) {
     if (!skill.canViewAsDuel) continue;
-    for (const c of player.hand) {
+    for (const c of hand) {
       if (c.kind !== CardKind.Duel && skill.canViewAsDuel(c, player) && !cards.includes(c)) cards.push(c);
     }
   }
@@ -225,11 +268,12 @@ export function allDuelLikeCards(player: GamePlayer): Card[] {
 /** A real Indulgence card, or (e.g. Daqiao's Guose) the first card some skill allows viewing
  *  as one. */
 export function findIndulgenceLikeCard(player: GamePlayer): Card | null {
-  const real = player.hand.find((c) => c.kind === CardKind.Indulgence);
+  const hand = usableHand(player);
+  const real = hand.find((c) => c.kind === CardKind.Indulgence);
   if (real) return real;
   for (const skill of player.skills) {
     if (!skill.canViewAsIndulgence) continue;
-    const viewed = player.hand.find((c) => skill.canViewAsIndulgence!(c, player));
+    const viewed = hand.find((c) => skill.canViewAsIndulgence!(c, player));
     if (viewed) return viewed;
   }
   return null;
@@ -238,10 +282,11 @@ export function findIndulgenceLikeCard(player: GamePlayer): Card | null {
 /** Every real Indulgence card plus every card a skill allows viewing as one (e.g. Guose) --
  *  see `allSlashLikeCards`'s header for why this exists alongside `findIndulgenceLikeCard`. */
 export function allIndulgenceLikeCards(player: GamePlayer): Card[] {
-  const cards = player.hand.filter((c) => c.kind === CardKind.Indulgence);
+  const hand = usableHand(player);
+  const cards = hand.filter((c) => c.kind === CardKind.Indulgence);
   for (const skill of player.skills) {
     if (!skill.canViewAsIndulgence) continue;
-    for (const c of player.hand) {
+    for (const c of hand) {
       if (c.kind !== CardKind.Indulgence && skill.canViewAsIndulgence(c, player) && !cards.includes(c)) cards.push(c);
     }
   }
@@ -251,11 +296,12 @@ export function allIndulgenceLikeCards(player: GamePlayer): Card[] {
 /** A real SupplyShortage card, or (e.g. Xu Huang's Duanliang) the first card some skill allows
  *  viewing as one. */
 export function findSupplyShortageLikeCard(player: GamePlayer): Card | null {
-  const real = player.hand.find((c) => c.kind === CardKind.SupplyShortage);
+  const hand = usableHand(player);
+  const real = hand.find((c) => c.kind === CardKind.SupplyShortage);
   if (real) return real;
   for (const skill of player.skills) {
     if (!skill.canViewAsSupplyShortage) continue;
-    const viewed = player.hand.find((c) => skill.canViewAsSupplyShortage!(c, player));
+    const viewed = hand.find((c) => skill.canViewAsSupplyShortage!(c, player));
     if (viewed) return viewed;
   }
   return null;
@@ -265,11 +311,68 @@ export function findSupplyShortageLikeCard(player: GamePlayer): Card | null {
  *  Duanliang) -- see `allSlashLikeCards`'s header for why this exists alongside
  *  `findSupplyShortageLikeCard`. */
 export function allSupplyShortageLikeCards(player: GamePlayer): Card[] {
-  const cards = player.hand.filter((c) => c.kind === CardKind.SupplyShortage);
+  const hand = usableHand(player);
+  const cards = hand.filter((c) => c.kind === CardKind.SupplyShortage);
   for (const skill of player.skills) {
     if (!skill.canViewAsSupplyShortage) continue;
-    for (const c of player.hand) {
+    for (const c of hand) {
       if (c.kind !== CardKind.SupplyShortage && skill.canViewAsSupplyShortage(c, player) && !cards.includes(c)) cards.push(c);
+    }
+  }
+  return cards;
+}
+
+/** A real IronChain card, or (e.g. Pang Tong's Lianhuan) the first card some skill allows
+ *  viewing as one. */
+export function findIronChainLikeCard(player: GamePlayer): Card | null {
+  const hand = usableHand(player);
+  const real = hand.find((c) => c.kind === CardKind.IronChain);
+  if (real) return real;
+  for (const skill of player.skills) {
+    if (!skill.canViewAsIronChain) continue;
+    const viewed = hand.find((c) => skill.canViewAsIronChain!(c, player));
+    if (viewed) return viewed;
+  }
+  return null;
+}
+
+/** Every real IronChain card plus every card a skill allows viewing as one (e.g. Lianhuan) --
+ *  see `allSlashLikeCards`'s header for why this exists alongside `findIronChainLikeCard`. */
+export function allIronChainLikeCards(player: GamePlayer): Card[] {
+  const hand = usableHand(player);
+  const cards = hand.filter((c) => c.kind === CardKind.IronChain);
+  for (const skill of player.skills) {
+    if (!skill.canViewAsIronChain) continue;
+    for (const c of hand) {
+      if (c.kind !== CardKind.IronChain && skill.canViewAsIronChain(c, player) && !cards.includes(c)) cards.push(c);
+    }
+  }
+  return cards;
+}
+
+/** A real FireAttack card, or (e.g. Wolong's Huoji) the first card some skill allows viewing
+ *  as one. */
+export function findFireAttackLikeCard(player: GamePlayer): Card | null {
+  const hand = usableHand(player);
+  const real = hand.find((c) => c.kind === CardKind.FireAttack);
+  if (real) return real;
+  for (const skill of player.skills) {
+    if (!skill.canViewAsFireAttack) continue;
+    const viewed = hand.find((c) => skill.canViewAsFireAttack!(c, player));
+    if (viewed) return viewed;
+  }
+  return null;
+}
+
+/** Every real FireAttack card plus every card a skill allows viewing as one (e.g. Huoji) --
+ *  see `allSlashLikeCards`'s header for why this exists alongside `findFireAttackLikeCard`. */
+export function allFireAttackLikeCards(player: GamePlayer): Card[] {
+  const hand = usableHand(player);
+  const cards = hand.filter((c) => c.kind === CardKind.FireAttack);
+  for (const skill of player.skills) {
+    if (!skill.canViewAsFireAttack) continue;
+    for (const c of hand) {
+      if (c.kind !== CardKind.FireAttack && skill.canViewAsFireAttack(c, player) && !cards.includes(c)) cards.push(c);
     }
   }
   return cards;
@@ -285,9 +388,27 @@ export function isImmuneToSnatch(player: GamePlayer): boolean {
   return player.skills.some((skill) => skill.immuneToSnatch?.(player));
 }
 
+/** KnownBoth's private reveal payload (Milestone 31) -- either the target's full hand, or the
+ *  name of one of their still-hidden generals (Hegemony mode). Delivered to exactly ONE viewer
+ *  via `EngineContext.revealPrivately` below -- never touches `ctx.log`, which every player/
+ *  spectator sees identically. */
+export type PrivateReveal =
+  | { kind: "hand"; ownerId: string; cards: Card[] }
+  | { kind: "general"; ownerId: string; generalName: string; slot: "main" | "deputy" };
+
+/** KnownBoth's own choice of what to view about a target -- see `revealPrivately`/`PrivateReveal`
+ *  above. "head_general"/"deputy_general" are only ever offered in Hegemony mode (Identity mode
+ *  never leaves a general hidden). */
+export type KnownBothOption = "handcards" | "head_general" | "deputy_general";
+
 /** Shared engine-callback surface for combat.ts and trick.ts card resolution. */
 export interface EngineContext {
   alivePlayers: GamePlayer[];
+  /** Whoever's turn it currently is (Room.playTurn's own `player`) -- consulted by skills whose
+   *  real trigger targets "the active player" rather than the attacker/defender/self (e.g. Zang
+   *  Ba's Hengjiang, skill.ts). Stays the SAME player for the whole duration of one turn,
+   *  including reactive damage that happens to land on someone else mid-turn. */
+  currentPlayer: GamePlayer;
   discardPile: Card[];
   log: string[];
   /** Shared PRNG, for skill hooks that need randomness without threading an `rng` param through
@@ -312,6 +433,30 @@ export interface EngineContext {
   onDamageDealt?: (source: GamePlayer, target: GamePlayer, amount: number) => Promise<void> | void;
   /** Does `player` want to play a held Jink against an incoming Slash? Only called when they hold one. */
   askDodge: (player: GamePlayer) => Promise<boolean>;
+  /** Nullification/HegNullification counter-play window (Milestone 31): offered once before
+   *  `kind` (played by `source`) takes effect against `target` -- `blocked: true` means it got
+   *  cancelled (the caller must skip applying the effect to `target`); `shieldFaction`
+   *  (Hegemony HegNullification "all" scope only, always null otherwise) means every OTHER
+   *  still-untouched target sharing that faction in the SAME AOE resolution should be
+   *  auto-skipped too, no new ask. See room.ts's `resolveNullificationWindow` for the actual
+   *  recursive chain (a played Nullification is itself counter-nullifiable) -- lives on Room,
+   *  not here, since it needs discard-pile/controller access this context already threads
+   *  through; this is just the thin callback trick.ts's 2 AOE resolvers (SavageAssault/
+   *  ArcheryAttack, the only ones with real per-target granularity -- every other trick kind is
+   *  offered a single whole-card-use window directly at room.ts's `tryPlayOnce`/
+   *  `tryPlayTargeted`/`tryPlayDelayedTrick`, not through this context at all) actually call. */
+  askNullification: (source: GamePlayer, target: GamePlayer, kind: CardKind) => Promise<{ blocked: boolean; shieldFaction: string | null }>;
+  /** KnownBoth (Milestone 31): privately reveals `reveal` to `viewer` ONLY -- see
+   *  `PrivateReveal`'s own doc comment. A no-op for a bot-controlled seat (nobody is listening
+   *  on the other end); wired by `Room.setPrivateRevealCallback` (mirrors the existing
+   *  `setLiveUpdateCallback` hook) straight to a one-way message sent to just that viewer's own
+   *  socket (server.ts's `notifyClient`), entirely bypassing the shared broadcast snapshot. */
+  revealPrivately: (viewer: GamePlayer, reveal: PrivateReveal) => void;
+  /** KnownBoth (Milestone 31): `player` picks what to privately view about `target` -- their
+   *  hand, or (Hegemony) one of their still-hidden generals. `options` is always non-empty
+   *  (trick.ts's `resolveKnownBoth` only calls this when there's something to offer). An
+   *  invalid/missing response falls back to `options[0]`. */
+  askKnownBothChoice: (player: GamePlayer, target: GamePlayer, options: KnownBothOption[]) => Promise<KnownBothOption>;
   /** Does `player` want to play a held Peach (or Analeptic, which heals identically during a
    *  rescue -- see its OTHER, unrelated Play-phase damage-boost use below) to recover while
    *  dying? Only called when they hold one. */
@@ -355,6 +500,10 @@ export interface EngineContext {
   /** Axe (weapon): after your Slash gets dodged, you may discard 2 of your OWN cards to force
    *  it to hit anyway. Only called when you actually hold >=2 cards. */
   askUseAxe: (player: GamePlayer) => Promise<boolean>;
+  /** EightDiagram (armor, Milestone 34): `player` holds no real/viewAs Jink and is about to
+   *  take Slash damage -- invoke the armor's own optional judgment-based backup dodge (red =
+   *  dodged)? Only called when they actually have EightDiagram equipped and no Jink was found. */
+  askUseEightDiagram: (player: GamePlayer) => Promise<boolean>;
   /** DoubleSword (weapon): after a Slash you wielded it with deals damage to a target of the
    *  OPPOSITE gender, you (the wielder) may invoke it. */
   askUseDoubleSword: (player: GamePlayer) => Promise<boolean>;
@@ -387,6 +536,20 @@ export interface EngineContext {
    *  skill.ts's header for why). Returns the ids of cards to bury; an empty result leaves the
    *  pile exactly as `peekTop` found it. */
   askGuanxingBottom: (player: GamePlayer, revealed: Card[]) => Promise<Set<number>>;
+  /** Xunxun (Li Dian, momentum.cpp -- Milestone 47, Hegemony-specific, NOT Standard): peeks the
+   *  top 4 cards of the draw pile (reuses `peekTop`, non-destructive), then `player` picks
+   *  EXACTLY 2 of `revealed` to keep into hand -- the other 2 get buried at the bottom via
+   *  `resolveXunxunSplit`. Distinct from Guanxing's own arrange-ask above: Guanxing never sends
+   *  cards to hand (only rearranges the pile), so its fixed top/bottom split doesn't fit this
+   *  skill's "exactly 2 to hand, exactly 2 buried" shape. An invalid/missing response falls
+   *  back to the first 2 of `revealed`. */
+  askXunxunKeep: (player: GamePlayer, revealed: Card[]) => Promise<Set<number>>;
+  /** Xunxun: commits `player`'s choice from `askXunxunKeep` -- every card in `revealed` whose
+   *  id is IN `keepIds` goes to hand immediately; the rest are buried at the bottom of the draw
+   *  (drawn last, in their `revealed` relative order). `revealed` must be exactly what the last
+   *  `peekTop` call for this same resolution returned (this removes exactly `revealed.length`
+   *  cards from the actual top of the pile, same invariant as `arrangeTop`). */
+  resolveXunxunSplit: (player: GamePlayer, revealed: Card[], keepIds: Set<number>) => void;
   /** Guicai (Sima Yi): `player` may replace an in-progress judgment's `currentCard` (owned by
    *  `judgeOwner`, for skill `reason`) with a card from their own hand (a "retrial" --
    *  bổ sung phán đoán). Returns the chosen replacement card (already confirmed present in
@@ -414,6 +577,16 @@ export interface EngineContext {
    *  `findRescueCard`'s own gate for the heal-disable half and `findSlashLikeCard`/
    *  `findJinkLikeCard`/`allSlashLikeCards`'s `aoChienActive` param for the substitution half. */
   aoChienActive: boolean;
+  /** True once `Room.gameOver` has been decided (win condition already fired) -- consulted by
+   *  SavageAssault/ArcheryAttack's per-target loop (the only 2 resolvers that can span MULTIPLE
+   *  sequential kills in one card use) so a later target's death, judgment-triggered reactive
+   *  damage (e.g. Ganglie), etc. can never happen AFTER the winners list was already frozen --
+   *  a real bug found live (seed 1, Hegemony, Milestone 34's larger deck shifting the RNG
+   *  stream onto a game where a Savage Assault's 3rd of 7 targets' death ended the match, but
+   *  its still-pending 4th-7th targets kept taking damage/triggering Ganglie afterward, killing
+   *  ANOTHER already-declared "winner" with nothing left to re-run checkWinCondition -- the
+   *  frozen winners list then no longer matched who was actually still alive). */
+  isGameOver: () => boolean;
 }
 
 /** Vietnamese card-suit names for judge-card log lines (Ganglie/Tieqi/Shuangxiong/Leiji/Beige/
@@ -481,6 +654,17 @@ export async function disposeJudgmentCard(ctx: EngineContext, judgeOwner: GamePl
   ctx.discardPile.push(card);
 }
 
+/** Milestone 45 (Sha Moke's JiliTM, transformation.cpp -- Hegemony-specific, NOT Standard): the
+ *  TOTAL number of distinct targets `player` may pick for a single Slash use right now (normal
+ *  1, plus every `extraSlashTargets` skill hook's contribution). Consulted by room.ts's
+ *  `tryPlaySlash`/`trySpearSlash` right after the normal single target is chosen, to decide
+ *  whether to also offer extra targets via `maybeResolveExtraSlashTargets`. */
+export function maxSlashTargets(ctx: EngineContext, player: GamePlayer): number {
+  let extra = 0;
+  for (const skill of player.skills) extra += skill.extraSlashTargets?.(ctx, player) ?? 0;
+  return 1 + extra;
+}
+
 /** Resolves one Slash from `attacker` at `target`: Jink cancels it, otherwise 1 damage + dying check. */
 export async function resolveSlash(
   ctx: EngineContext,
@@ -514,6 +698,32 @@ export async function resolveSlash(
     }
   }
 
+  // RenwangShield/Vine (Milestone 34, both "Tỏa định kỹ" -- locked, no ask): a Slash whose
+  // effect is nullified outright by the target's own armor never even reaches the Jink-ask --
+  // matches the real engine's Global_NonSkillNullify short-circuit (checked against
+  // `effectiveTarget`, not `target`, so a Liushan/Daqiao redirect above correctly checks the
+  // NEW target's own armor). RenwangShield blocks any BLACK-suited Slash; Vine blocks any
+  // Normal-nature Slash (Fire/Thunder still connect -- see applyDamage's own +1 Fire penalty).
+  // Known gap: QinggangSword's real "ignores the target's armor" ability isn't ported -- an
+  // attacker wielding it should bypass this whole check, but doesn't (see library.ts's
+  // WEAPON_DESCRIPTION for the same note surfaced in-client).
+  if (
+    (effectiveTarget.armor?.armorName === "RenwangShield" && (slashCard.suit === Suit.Spade || slashCard.suit === Suit.Club)) ||
+    (effectiveTarget.armor?.armorName === "Vine" && (slashCard.nature ?? DamageNature.Normal) === DamageNature.Normal)
+  ) {
+    ctx.log.push(
+      `${effectiveTarget.id} miễn nhiễm Sát này (${effectiveTarget.armor.armorName === "RenwangShield" ? "nhân vương thuẫn" : "đằng giáp"})`,
+    );
+    return;
+  }
+
+  // Yicheng (Xu Sheng, Milestone 36 -- a Hegemony-specific supplementary general, NOT one of the
+  // 60 Standard generals): broadcast the finalized target to every alive player's skills, still
+  // BEFORE the Jink-dodge exchange below -- matches upstream's TargetConfirmed timing.
+  for (const p of ctx.alivePlayers) {
+    for (const skill of p.skills) await skill.onAllySlashTargeted?.(ctx, p, effectiveTarget, attacker, slashCard);
+  }
+
   let dodgeBlocked = false;
   for (const skill of attacker.skills) {
     if (skill.onSlashTargeted && (await skill.onSlashTargeted(ctx, attacker, effectiveTarget))) dodgeBlocked = true;
@@ -525,6 +735,10 @@ export async function resolveSlash(
     ? 0
     : Math.max(1, ...effectiveTarget.skills.map((s) => s.responseCountRequired?.("dodge", effectiveTarget) ?? 1));
   const firstJink = requiredJinks > 0 ? findJinkLikeCard(effectiveTarget, ctx.aoChienActive) : null;
+  // `dodgedVia` unifies the 2 ways a dodge can succeed (a real/viewAs Jink, or EightDiagram's
+  // own judgment-based backup below) so the shared post-dodge steps (onSlashDodged broadcast,
+  // Axe's force-through offer) only need to be written once, regardless of which one fired.
+  let dodgedVia: "jink" | "eightDiagram" | null = null;
   if (firstJink && (await ctx.askDodge(effectiveTarget))) {
     const spent = [firstJink];
     effectiveTarget.hand.splice(effectiveTarget.hand.indexOf(firstJink), 1);
@@ -549,21 +763,47 @@ export async function resolveSlash(
         if (c.kind !== CardKind.Jink) ctx.log.push(`${effectiveTarget.id} biến 1 lá bài thành Thiểm (kỹ năng biến hóa)`);
       }
       ctx.log.push(`${effectiveTarget.id} né bằng Thiểm${spent.length > 1 ? ` (x${spent.length})` : ""}`);
-      for (const skill of attacker.skills) await skill.onSlashDodged?.(ctx, attacker, effectiveTarget);
-      for (const skill of effectiveTarget.skills) await skill.onSlashDodged?.(ctx, attacker, effectiveTarget);
-      // Axe (weapon): may discard 2 of your OWN cards to force this dodged slash through anyway.
-      if (attacker.weapon?.weaponName === "Axe" && attacker.hand.length >= 2 && (await ctx.askUseAxe(attacker))) {
-        for (let i = 0; i < 2; i++) {
-          const idx = Math.floor(ctx.rng() * attacker.hand.length);
-          ctx.discardPile.push(attacker.hand.splice(idx, 1)[0]);
-        }
-        ctx.log.push(`${attacker.id} bỏ 2 lá bài, buộc Sát trúng đòn (axe)`);
-      } else {
-        return;
+      dodgedVia = "jink";
+    }
+  } else if (
+    requiredJinks > 0 &&
+    effectiveTarget.armor?.armorName === "EightDiagram" &&
+    (await ctx.askUseEightDiagram(effectiveTarget))
+  ) {
+    // EightDiagram (Bát Quái Trận): optional -- offered only once no real/viewAs Jink was found
+    // (a real simplification: the true rule lets a player invoke it even while HOLDING a real
+    // Jink, to save the Jink for later; here it's strictly a backup, same "faithful behavior,
+    // simplified interaction" precedent as this port's other single-choice-instead-of-a-genuine-
+    // strategic-tradeoff simplifications, e.g. IronChain's dropped recast). Judges a card (same
+    // shared `judge()` helper as every other judgment, so Guicai retrial etc. still applies);
+    // red counts as a successful dodge, matching the real card text exactly.
+    const judgeCard = await judge(ctx, effectiveTarget, "eight_diagram");
+    if (judgeCard) {
+      ctx.log.push(`${effectiveTarget.id} phán Bát Quái Trận: ${SUIT_LABEL_VI[judgeCard.suit]} ${judgeCard.point}`);
+      const isRed = judgeCard.suit === Suit.Heart || judgeCard.suit === Suit.Diamond;
+      await disposeJudgmentCard(ctx, effectiveTarget, judgeCard);
+      if (isRed) {
+        ctx.log.push(`${effectiveTarget.id} né bằng Bát Quái Trận`);
+        dodgedVia = "eightDiagram";
       }
     }
   }
 
+  if (dodgedVia) {
+    for (const skill of attacker.skills) await skill.onSlashDodged?.(ctx, attacker, effectiveTarget);
+    for (const skill of effectiveTarget.skills) await skill.onSlashDodged?.(ctx, attacker, effectiveTarget);
+    // Axe (weapon): may discard 2 of your OWN cards to force this dodged slash through anyway
+    // (a real, EightDiagram-dodged, or viewAs Jink alike -- the real rule doesn't distinguish).
+    if (attacker.weapon?.weaponName === "Axe" && attacker.hand.length >= 2 && (await ctx.askUseAxe(attacker))) {
+      for (let i = 0; i < 2; i++) {
+        const idx = Math.floor(ctx.rng() * attacker.hand.length);
+        ctx.discardPile.push(attacker.hand.splice(idx, 1)[0]);
+      }
+      ctx.log.push(`${attacker.id} bỏ 2 lá bài, buộc Sát trúng đòn (axe)`);
+    } else {
+      return;
+    }
+  }
   // IceSword (weapon): may cancel this slash's damage entirely and, in its place, let the
   // attacker pick up to 2 of the target's cards (hand or equip) to discard -- resolved BEFORE
   // applyDamage since it replaces the hit outright, not a reaction to it.
@@ -585,7 +825,7 @@ export async function resolveSlash(
     return;
   }
 
-  const damageDealt = await applyDamage(ctx, effectiveTarget, 1 + analepticBonus, attacker);
+  const damageDealt = await applyDamage(ctx, effectiveTarget, 1 + analepticBonus, attacker, slashCard.nature ?? DamageNature.Normal);
   // Lieren (Zhurong): fired on the ATTACKER's skills specifically after a SLASH (not
   // Duel/AOE/skill-inflicted) they played deals damage -- distinct from the generic
   // `onDamageDealt` (which also fires for every other damage source) for the same reason
@@ -700,8 +940,28 @@ export async function resolveSlashBonusTarget(ctx: EngineContext, attacker: Game
  * `source.pendingBonusDamage` (armed by e.g. Luoyi) adds on top of `amount` once, then resets;
  * `target`'s `reduceDamage` skills (e.g. Kongrong's Mingshi) run after that, and can floor the
  * final amount at or below 0 to cancel the hit entirely (no `onDamage`/`onDamageDealt`/dying).
+ *
+ * `nature` (Milestone 30, defaults `Normal`): Fire/Thunder-natured damage (FireSlash/
+ * ThunderSlash's own `.nature`, or Fire Attack's flat 1) unchains ITS OWN target if they were
+ * chained -- the original hit AND every recursive splash hit alike (matches the real
+ * `DamageComplete`'s unconditional per-instance unchain check). Only the ORIGINAL (non-splash)
+ * hit additionally splashes the SAME base `amount` (not `finalAmount` -- each splash target's
+ * OWN `reduceDamage` skills apply fresh, matching the real engine copying the original
+ * `DamageStruct` and only overwriting `.to`) to every OTHER still-`chained` alive player, via a
+ * recursive `applyDamage` call tagged `isChainSplash: true` so a splash hit never re-triggers
+ * its own further splash (matches the real `chain_damage.chain = true` / `!damage.chain` guard
+ * -- traced into `src/server/gamerule.cpp`'s global `DamageDone`/`DamageComplete` handling, NOT
+ * IronChain's own card class). See `player.chained`'s doc comment and `trick.ts`'s
+ * `resolveIronChain` for how the chain state itself is toggled.
  */
-export async function applyDamage(ctx: EngineContext, target: GamePlayer, amount: number, source: GamePlayer): Promise<boolean> {
+export async function applyDamage(
+  ctx: EngineContext,
+  target: GamePlayer,
+  amount: number,
+  source: GamePlayer,
+  nature: DamageNature = DamageNature.Normal,
+  isChainSplash = false,
+): Promise<boolean> {
   let finalAmount = amount + source.pendingBonusDamage;
   source.pendingBonusDamage = 0;
   for (const skill of target.skills) {
@@ -712,10 +972,42 @@ export async function applyDamage(ctx: EngineContext, target: GamePlayer, amount
     return false;
   }
 
+  // Vine/SilverLion (Milestone 34, both "Tỏa định kỹ" -- locked, no ask, mutually exclusive
+  // since a player can only equip 1 armor at a time): Vine adds +1 to any Fire-natured hit
+  // (its own downside, paired with the Normal-Slash/AOE immunity in resolveSlash/
+  // resolveSavageAssault/resolveArcheryAttack); SilverLion caps any single damage instance
+  // >1 down to exactly 1 -- applies to EVERY damage source (Slash/Duel/AOE/skill-inflicted/
+  // chain-splash alike), matching the real DamageInflicted event's universal scope, which is
+  // exactly why this lives in the shared `applyDamage` choke point rather than resolveSlash.
+  if (target.armor?.armorName === "Vine" && nature === DamageNature.Fire) {
+    finalAmount += 1;
+    ctx.log.push(`${target.id} nhận thêm 1 sát thương Hỏa (đằng giáp)`);
+  } else if (target.armor?.armorName === "SilverLion" && finalAmount > 1) {
+    ctx.log.push(`${target.id} giảm ${finalAmount} sát thương còn 1 (bạch ngân sư tử)`);
+    finalAmount = 1;
+  }
+
   target.hp -= finalAmount;
   ctx.log.push(`${target.id} chịu ${finalAmount} sát thương (máu ${target.hp}/${target.maxHp})`);
   await ctx.onDamage?.(target, source);
   await ctx.onDamageDealt?.(source, target, finalAmount);
+
+  // Iron Chain (Milestone 30): ANY Fire/Thunder-natured hit unchains its own target -- original
+  // hit OR a splash hit alike (matches the real `DamageComplete`'s unconditional unchain check,
+  // which runs once per damage instance including recursive splash instances). Only the
+  // ORIGINAL (non-splash) hit additionally splashes the SAME base `amount` to every OTHER
+  // still-chained player -- gated on `wasChained` (the state BEFORE this unchain), so a lone
+  // chained target correctly triggers no splash at all.
+  const wasChained = target.chained;
+  if (nature !== DamageNature.Normal && wasChained) target.chained = false;
+  if (!isChainSplash && nature !== DamageNature.Normal && wasChained) {
+    const splashTargets = ctx.alivePlayers.filter((p) => p !== target && p.chained);
+    for (const p of splashTargets) {
+      ctx.log.push(`${p.id} cũng chịu sát thương do liên hoàn (iron_chain)`);
+      await applyDamage(ctx, p, amount, source, nature, true);
+    }
+  }
+
   if (target.hp <= 0) await resolveDying(ctx, target, source);
   return true;
 }
@@ -805,5 +1097,17 @@ async function resolveDying(ctx: EngineContext, player: GamePlayer, killer?: Gam
     }
     if (!rescued) break; // nobody could or would help this round -- give up
   }
-  if (player.hp <= 0) ctx.onDying(player, killer);
+  if (player.hp <= 0) {
+    // Buqu (Zhou Tai, Milestone 27): checked only once every normal self/ally Peach-rescue
+    // attempt above has already been exhausted -- see Skill.preventsDeath's doc comment for why
+    // this is distinct from `cheatsDeath` (always heals, once-per-game).
+    let saved = false;
+    for (const skill of player.skills) {
+      if (skill.preventsDeath && (await skill.preventsDeath(ctx, player))) {
+        saved = true;
+        break;
+      }
+    }
+    if (!saved) ctx.onDying(player, killer);
+  }
 }

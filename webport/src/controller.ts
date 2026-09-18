@@ -18,7 +18,8 @@
 import { Card, CardKind, Suit } from "./card.js";
 import { GamePlayer } from "./player.js";
 import { GeneralDef } from "./skill.js";
-import { effectiveAttackRange, effectiveDistance, isImmuneToSlashAndDuel } from "./combat.js";
+import { KnownBothOption, effectiveAttackRange, effectiveDistance, isImmuneToSlashAndDuel } from "./combat.js";
+import { isAlly } from "./gamerule.js";
 
 /** One legal thing a player could do right now during a freeform Play phase, computed fresh by
  *  `Room.computeLegalActions` before each `chooseFreeAction` ask. `playCard`'s `cardKind` is
@@ -58,18 +59,51 @@ const DISCARD_IMPORTANCE: Record<CardKind, number> = {
   [CardKind.Analeptic]: 60,
   [CardKind.Slash]: 50,
   [CardKind.Weapon]: 45,
+  [CardKind.Armor]: 45, // same tier as Weapon -- a real, permanent equip-slot upgrade, not a one-shot trick
   [CardKind.Horse]: 40,
   [CardKind.Duel]: 35,
   [CardKind.Snatch]: 35,
   [CardKind.Dismantlement]: 35,
   [CardKind.SavageAssault]: 30,
+  [CardKind.FireAttack]: 30, // single-target, situational (needs a matching-suit card of your own too) -- same tier as SavageAssault/ArcheryAttack/ExNihilo
   [CardKind.ArcheryAttack]: 30,
   [CardKind.ExNihilo]: 30,
   [CardKind.GodSalvation]: 25,
   [CardKind.AmazingGrace]: 25,
   [CardKind.Indulgence]: 20, // delayed trick, no immediate value -- lowest of the trick kinds
   [CardKind.SupplyShortage]: 20, // same reasoning as Indulgence -- another delayed trick
+  [CardKind.Lightning]: 15, // delayed trick with a genuine downside (3 damage, or gets passed on to circulate) -- lowest of all, the bot would rather not be holding it
+  [CardKind.Collateral]: 30, // single-target, situational (needs a weapon-holding target AND a legal victim within their range) -- same tier as SavageAssault/ArcheryAttack/FireAttack
+  [CardKind.BefriendAttacking]: 20, // Hegemony-only in practice (needs a determined enemy faction) -- often simply unplayable, same tier as the delayed tricks
+  [CardKind.AwaitExhausted]: 25, // self+allies AOE draw/discard, no target choice needed -- same tier as GodSalvation/AmazingGrace
+  [CardKind.IronChain]: 30, // single-target, situational value (only synergizes with Fire/Thunder damage already in play) -- same tier as Collateral/SavageAssault
+  [CardKind.Nullification]: 40, // reactive counter-play -- a genuinely scarce answer card, kept longer than most one-shot tricks
+  [CardKind.HegNullification]: 40, // same reasoning as Nullification
+  [CardKind.KnownBoth]: 20, // pure information, no combat/resource swing -- lowest non-delayed tier, alongside BefriendAttacking
 };
+
+/** Trick kinds the bot considers worth spending a Nullification/HegNullification on when they'd
+ *  land on itself or an ally (gamerule.ts's isAlly) -- see `wantsToNullify` below. Deliberately
+ *  excludes every BENEFICIAL trick (GodSalvation/AmazingGrace/BefriendAttacking/AwaitExhausted/
+ *  ExNihilo/KnownBoth's own use against an ally -- wait, KnownBoth genuinely IS information
+ *  leakage worth blocking, so it's included) -- this is a coarse approximation, not full
+ *  situational awareness (e.g. it can't distinguish an IronChain USE from an IronChain UNCHAIN,
+ *  and nullifies both the same way), matching this file's other "beats the no-choice-at-all
+ *  baseline, not real strategy" bot precedents. */
+const HARMFUL_TRICK_KINDS = new Set<CardKind>([
+  CardKind.Duel,
+  CardKind.Snatch,
+  CardKind.Dismantlement,
+  CardKind.Collateral,
+  CardKind.IronChain,
+  CardKind.FireAttack,
+  CardKind.KnownBoth,
+  CardKind.SavageAssault,
+  CardKind.ArcheryAttack,
+  CardKind.Indulgence,
+  CardKind.SupplyShortage,
+  CardKind.Lightning,
+]);
 
 /** Picks exactly `count` cards to discard from `hand` when nobody made a real choice: the
  *  LEAST important cards (by DISCARD_IMPORTANCE) go first, ties broken by original hand order
@@ -86,8 +120,10 @@ export interface Controller {
   /** Milestone 6: `candidates` is always non-empty (never returns null -- every player must end
    *  up with a general; Room falls back to `candidates[0]` if this somehow returns a falsy value).
    *  `role` (Hegemony mode only, see `Room.pickGenerals`'s Hegemony branch): `"main"` for the
-   *  first of the pair, `"deputy"` for the second (already filtered to the main's kingdom) --
-   *  purely informational, lets a human ask show which slot is being picked; bots ignore it. */
+   *  first pick (dealt 5 candidates, any kingdom -- the real 国战 "phát 5, chọn 2" rule),
+   *  `"deputy"` for the second (dealt the 4 that remain from that same 5, filtered to the
+   *  main's kingdom) -- purely informational, lets a human ask show which slot is being picked;
+   *  bots ignore it. */
   chooseGeneral(candidates: GeneralDef[], role?: "main" | "deputy"): Promise<GeneralDef>;
   /** Hegemony mode only (Milestone 23 addendum "暗置/明置" reveal system), asked at the start of
    *  `player`'s own turn while anything is still hidden (`Room.runHegemonyReveal`, `Phase.
@@ -110,6 +146,12 @@ export interface Controller {
   wantsHalfMaxHpBonusDraw(player: GamePlayer): Promise<boolean>;
   /** `candidates` is always non-empty (Room checks first). Return null to decline/pass. */
   chooseSlashTarget(actor: GamePlayer, candidates: GamePlayer[]): Promise<GamePlayer | null>;
+  /** Milestone 45 (Sha Moke's JiliTM): when `combat.ts`'s `maxSlashTargets` says `actor` may
+   *  Slash more than 1 person right now, asks for 0..`maxExtra` ADDITIONAL distinct targets
+   *  beyond `primary` (already chosen via `chooseSlashTarget` above), pulled from `candidates`
+   *  (never includes `primary`). The SAME played Slash card resolves against every returned
+   *  target too. Return `[]` to Slash only `primary`. */
+  chooseExtraSlashTargets(actor: GamePlayer, primary: GamePlayer, candidates: GamePlayer[], maxExtra: number): Promise<GamePlayer[]>;
   /** Room already confirmed `card` is a legal Weapon/Horse to equip right now. */
   wantsToEquip(player: GamePlayer, card: Card): Promise<boolean>;
   /** Dismantlement/Snatch/Duel: `candidates` is always non-empty. Return null to decline. */
@@ -151,6 +193,10 @@ export interface Controller {
    *  the pile; everything else stays on top in its original relative order. Returns the ids of
    *  cards to bury -- an empty set leaves the pile untouched. */
   chooseGuanxingBottom(player: GamePlayer, revealed: Card[]): Promise<Set<number>>;
+  /** Xunxun (Li Dian, Milestone 47): `player` looked at `revealed` (`peekTop(4)`, in draw order)
+   *  and picks EXACTLY 2 to keep into hand -- the other 2 get buried at the bottom of the pile
+   *  via `resolveXunxunSplit`. An invalid/missing response falls back to the first 2. */
+  chooseXunxunKeep(player: GamePlayer, revealed: Card[]): Promise<Set<number>>;
   /** Guicai (Sima Yi): `player` may replace an in-progress judgment's `currentCard` (owned by
    *  `judgeOwner`, for skill `reason`) with a card from their own hand (a "retrial"). Return
    *  the chosen card (must be present in `player.hand`) or null to decline. Only ever called
@@ -174,6 +220,10 @@ export interface Controller {
   /** Axe (weapon): `player` (the attacker)'s Slash just got dodged and they hold >=2 cards --
    *  discard 2 to force it to hit anyway? */
   wantsToUseAxe(player: GamePlayer): Promise<boolean>;
+  /** EightDiagram (armor, Milestone 34): `player` holds no real/viewAs Jink and is about to
+   *  take Slash damage -- invoke the armor's own optional judgment-based backup dodge? Only
+   *  called when they actually have EightDiagram equipped and no Jink was found. */
+  wantsToUseEightDiagram(player: GamePlayer): Promise<boolean>;
   /** DoubleSword (weapon): `player` (the attacker) just dealt Slash damage to an opposite-gender
    *  target -- invoke it? */
   wantsToUseDoubleSword(player: GamePlayer): Promise<boolean>;
@@ -208,6 +258,18 @@ export interface Controller {
    *  legal any more. Left undefined by `makeBotController` -- bots always keep using the
    *  original fixed-order pass, byte-for-byte unchanged. */
   chooseFreeAction?(player: GamePlayer, legalActions: FreeAction[]): Promise<FreeAction | null>;
+  /** Nullification/HegNullification counter-play window (Milestone 31): `player` holds a
+   *  Nullification-kind card and `kind` (played by `source`) is about to take effect against
+   *  `target` -- play it to cancel? Only called when `player` actually holds one. */
+  wantsToNullify(player: GamePlayer, kind: CardKind, source: GamePlayer, target: GamePlayer): Promise<boolean>;
+  /** HegNullification only: having chosen to nullify, block just `target` ("single") or extend
+   *  the block to every other still-untouched player sharing `target`'s Hegemony faction, for
+   *  THIS SAME card's remaining AOE hits too ("all")? Only asked when relevant (Hegemony mode,
+   *  `target.faction !== ""`). */
+  chooseHegNullificationScope(player: GamePlayer, target: GamePlayer): Promise<"single" | "all">;
+  /** KnownBoth: `player` picks what to privately view about `target` -- their hand, or
+   *  (Hegemony) one of their still-hidden generals. `options` is always non-empty. */
+  chooseKnownBothOption(player: GamePlayer, target: GamePlayer, options: KnownBothOption[]): Promise<KnownBothOption>;
 }
 
 /** The naive greedy policy every seat used before human control existed: always act when legal. */
@@ -232,6 +294,15 @@ export function makeBotController(rng: () => number): Controller {
     },
     async chooseSlashTarget(_actor, candidates) {
       return pickRandom(candidates);
+    },
+    async chooseExtraSlashTargets(_actor, primary, candidates, maxExtra) {
+      const pool = candidates.filter((p) => p !== primary);
+      const picks: GamePlayer[] = [];
+      while (picks.length < maxExtra && pool.length > 0) {
+        const idx = Math.floor(rng() * pool.length);
+        picks.push(pool.splice(idx, 1)[0]);
+      }
+      return picks;
     },
     async wantsToEquip() {
       return true;
@@ -281,7 +352,7 @@ export function makeBotController(rng: () => number): Controller {
       // Prefer a known equip card over a blind random hand card -- a visible, usually-valuable
       // resource is worth denying/taking over an unseen one, matching this policy's other
       // "known/valuable resource" preferences (e.g. wantsToDiscardForGanglie).
-      return candidates.find((c) => c.kind === CardKind.Weapon || c.kind === CardKind.Horse) ?? candidates[0];
+      return candidates.find((c) => c.kind === CardKind.Weapon || c.kind === CardKind.Horse || c.kind === CardKind.Armor) ?? candidates[0];
     },
     async chooseGuanxingBottom(_player, revealed) {
       // Bury the least valuable half (see pickLeastImportantCards/DISCARD_IMPORTANCE) so the
@@ -289,6 +360,14 @@ export function makeBotController(rng: () => number): Controller {
       // "known/valuable resource" preferences instead of leaving the pile untouched.
       const buryCount = Math.floor(revealed.length / 2);
       return new Set(pickLeastImportantCards(revealed, buryCount).map((c) => c.id));
+    },
+    async chooseXunxunKeep(_player, revealed) {
+      // Keep the most valuable 2 (bury the rest via pickLeastImportantCards) -- matches
+      // chooseGuanxingBottom's own "known/valuable resource" preference, just inverted (this
+      // skill sends the KEPT half to hand, not the buried half).
+      const buryCount = Math.max(0, revealed.length - 2);
+      const buried = pickLeastImportantCards(revealed, buryCount);
+      return new Set(revealed.filter((c) => !buried.includes(c)).map((c) => c.id));
     },
     async wantsToUseGuicai() {
       // No alignment-aware AI to judge whether flipping a given judgment helps or hurts
@@ -335,6 +414,10 @@ export function makeBotController(rng: () => number): Controller {
     async wantsToUseAxe() {
       return true;
     },
+    async wantsToUseEightDiagram() {
+      return true; // matches the greedy policy's other free-advantage defaults -- a judged
+      // backup dodge is strictly better than certain damage
+    },
     async wantsToUseDoubleSword() {
       return true;
     },
@@ -347,6 +430,26 @@ export function makeBotController(rng: () => number): Controller {
     },
     async wantsToDrawNow() {
       // bots draw immediately, no pause
+    },
+    // Nullification/HegNullification (Milestone 31): the bot has no real threat-assessment --
+    // it simply protects itself/its allies (gamerule.ts's isAlly) from anything in
+    // HARMFUL_TRICK_KINDS, and never bothers spending a scarce answer card on a BENEFICIAL
+    // trick (GodSalvation/AmazingGrace/BefriendAttacking/AwaitExhausted/ExNihilo -- none of
+    // those are in the set below) even when it's the one playing it. A coarse approximation
+    // (e.g. it can't tell an IronChain USE from an IronChain UNCHAIN apart, and nullifies both
+    // the same way), matching this policy's other "no deep situational strategy, just beats
+    // the no-choice-at-all baseline" precedent (see this file's header on DISCARD_IMPORTANCE).
+    async wantsToNullify(player, kind, _source, target) {
+      return (target === player || isAlly(player, target)) && HARMFUL_TRICK_KINDS.has(kind);
+    },
+    async chooseHegNullificationScope() {
+      return "all"; // free extra value, matches the greedy policy's other free-advantage defaults
+    },
+    async chooseKnownBothOption(_player, _target, options) {
+      // Prefer revealing a still-hidden general (strictly more strategically useful than a
+      // hand peek -- resolves lingering Hegemony fog-of-war) over the hand, matching this
+      // policy's other "known/valuable resource" preferences.
+      return options.find((o) => o === "head_general" || o === "deputy_general") ?? options[0];
     },
   };
 }

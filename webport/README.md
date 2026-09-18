@@ -2164,6 +2164,1189 @@ skills above):**
   every new skill reuses existing ask types (`selfAction`/`otherPhaseAction`/the new
   `wantsToUseSelfAction("<skill>-skip")`/`askAnyHandCards` combo for the generic phase-skip ask).
 
+## Milestone 27 — DONE (final 3 generals: Wolong/Zhou Tai/Zoushi, 57→60 of 60 -- full Standard roster)
+
+User asked to check the real upstream repo for any generals still missing, then to port all of
+them plus "whatever else is missing" (`Port luôn 3 tướng đó và những thứ còn thiếu đi`). Verified
+directly against the live upstream `dev`-branch source (`standard-{shu,wei,wu,qun}-generals.cpp`,
+not just this file's own tracking) that exactly 3 of the real 60-general Standard roster remained
+unported: Wolong, Zhou Tai, Zoushi.
+
+- **Wolong (Ngọa Long -- Zhuge Liang's alternate identity, shu, 3hp).** Huoji: any held red card
+  may be played/discarded as Fire Attack (lang/vi_VN's `:huoji` text matches the real `dev`-branch
+  class exactly, a rare exception to this session's usual mismatch pattern). This needed porting
+  Fire Attack itself -- previously excluded (card.ts's header) alongside IronChain/Collateral/
+  Nullification as "needs the delayed-trick/judge-area system or a reactive counter-play stack" --
+  but re-reading its real `onEffect` showed neither is actually required: it's an ordinary
+  single-target trick (target reveals 1 of their own hand cards; the attacker may then discard a
+  card of the SAME suit to deal 1 Fire damage), both steps expressible through the existing
+  generic `askAnyHandCards` ask (min/max 1 for the target's forced reveal, min/max [0,1] for the
+  attacker's optional suit-matched discard, validated against the revealed suit afterward --
+  same "never forced, mismatch = decline" precedent `controller.ts` documents for Luanji's
+  same-suit requirement). New `card.ts` kind (2 copies, Heart 2/Heart 3, verified against the
+  real `trickCards()`), new `Skill.canViewAsFireAttack` hook + `combat.ts`'s
+  `findFireAttackLikeCard`/`allFireAttackLikeCards` (mirrors Indulgence/SupplyShortage's viewAs
+  pair exactly), new `trick.ts`'s `fireAttackCandidates`/`resolveFireAttack`, wired into
+  `room.ts`'s bot fixed pass/`computeLegalActions`/freeform dispatch the same 3 places every
+  other single-target trick already is.
+- **Zhou Tai (Chu Thái, wu, 4hp).** Buqu ("Bất Khuất"): real `dev`-branch behavior (confirmed
+  against the actual `Buqu`/`BuquRemove` C++ classes, not lang/vi_VN -- its `:buqu` text
+  describes a different, simpler single-general revision: reveal exactly 1 card per dying
+  attempt, heal straight to 1 hp on a non-matching point, discard-and-fail on a match -- not
+  ported, same "real C++ wins over a mismatched vi_VN revision" precedent set by Longdan/
+  Kongcheng/Tieqi/Kurou). The REAL rule: whenever he'd otherwise die (every self/ally Peach
+  rescue this dying episode already exhausted), he may draw enough face-down "Sang" (scar) cards
+  -- accumulated in a new `player.buquPile` field across repeated dying attempts, never shrinking
+  on its own -- to match his current hp deficit; if no two Sang share a point value, he survives
+  at his current (possibly negative) hp instead of dying. A shared point value ends the streak
+  for real. New `Skill.preventsDeath` hook, consulted by `combat.ts`'s `resolveDying` only once
+  every normal rescue attempt has already failed (distinct from the existing once-per-game
+  `cheatsDeath` hook, which always heals -- this can fire every single time, never heals, and
+  reuses the existing generic `onRecover` hook to discard the whole Sang pile the instant hp
+  actually recovers back above 0, matching the real `HpRecover` clear).
+- **Zoushi (Trâu Thị, qun, 3hp, female).** Two skills investigated; 1 ported, 1 correctly left
+  unported for a genuine engine-architecture reason (not an oversight):
+  - **Qingcheng** (ported): once per Play phase, discard 1 held equip card and choose another
+    player who has revealed BOTH their generals (Hegemony-mode-only in practice) -- hides their
+    main general again (real rule lets the attacker pick which of the 2; this port always
+    targets the main slot, same "faithful behavior, simplified interaction" precedent as
+    Guanxing's top/bottom split). lang/vi_VN's `:qingcheng` describes a richer 2-stage version
+    (discard any black card, with a BONUS 2nd hide if that card happened to be an equip) --
+    the real `dev`-branch `Qingcheng` class only implements the simpler single-stage equip-only
+    version; ported as the real class implements it. Reuses the existing `selfAction` hook
+    shape (same as Zhijian) -- no new Skill/EngineContext plumbing needed.
+  - **Huoshui** (NOT ported): the real skill locks every OTHER player out of voluntarily
+    revealing a hidden general during Zoushi's own turn. This engine's own reveal-TIMING
+    simplification (Milestone 23's addendum, `Room.runHegemonyReveal`) only ever asks a player
+    to reveal at the START of THEIR OWN RoundStart -- never during anyone else's turn -- so the
+    exact action Huoshui restricts never has an opportunity to happen for anyone but the
+    currently active player in the first place. Confirmed by tracing `runHegemonyReveal`'s only
+    call site (`room.ts`'s `runPhase`, gated to the player whose own phase is running): there is
+    no code path where implementing Huoshui's restriction would ever change observable behavior.
+    Same class of genuine unfixable-without-a-bigger-rearchitecture gap as Dingfeng's Duanbing
+    (Milestone 26's correction) -- not a subsystem this port lacks, but a real consequence of an
+    earlier deliberate simplification this port already made.
+- **Test:** `testBuquSurvivesUntilADuplicateScarAppears` (dedicated, pure -- scripts `drawTop()`
+  to prove the pile-growth/duplicate-check math exactly: 2 distinct-point scars save him, a 3rd
+  matching an existing point kills him for real) and `testQingchengHidesARevealedMainGeneral`
+  (dedicated, pure -- Hegemony-pair-fully-revealed-on-both-sides is far too rare an intersection
+  to log-mine from ordinary bot play). `testGeneralSkillsAppearInPlay` expanded to all 60
+  generals plus a `huojiViewAs` log marker (Fire Attack's viewAs conversion log line, reliably
+  observed like every other viewAs skill); its seed range widened 150->200 (`200-399`, from
+  `200-349`) after the larger 60-general/91-card roster shifted which existing rare markers a
+  fixed seed range happens to hit (a real RNG-stream-shift consequence of adding new drafted
+  content, same phenomenon Milestone 26 already documented for its own card-conservation bug,
+  not a regression in any of this milestone's own new code).
+- **Verification, three layers:** (1) `npx tsc --noEmit` clean; `npm run sim` 84/84 passing (82
+  pre-existing + 2 new dedicated tests). (2) Live production redeploy: restarted the actual
+  running server process with this code, confirmed HTTP 200 both locally and through the public
+  ngrok tunnel. (3) Real headless-browser run against the live deployed `public/index.html`:
+  library search confirmed all 3 new generals' catalog entries (Ngọa Long/Chu Thái/Trâu Thị --
+  name/kingdom/hp/skill text, avatar art including Trâu Thị's female portrait) AND the new Fire
+  Attack card entry (art/count/rules text) all render correctly with no broken images.
+
+## Milestone 28 — DONE (Lightning/Thiểm Điện, the 3rd delayed trick card)
+
+User asked what's still missing for Hegemony/Quốc Chiến mode specifically (`Còn thiếu những lá
+bài nào cho chế độ quốc chiến không?`). Investigated all 13 still-unported trick cards + 4
+armors against the real upstream `dev`-branch source AND `lang/vi_VN/Package/StandardPackage.lua`
+(recovered from this repo's own git history, same source Milestone 2.6's general-skill text
+came from) -- found 3 of the 13 (HegNullification/KnownBoth/BefriendAttacking) are specifically
+Hegemony-relevant (their real effects reference "cùng thế lực"/faction or an unrevealed
+main/deputy general, concepts that only exist in Hegemony mode), and confirmed IronChain's real
+"chain splash" rule lives in `src/server/gamerule.cpp`'s global damage handling (not IronChain's
+own card class) -- Fire/Thunder-natured damage to a chained player unchains them and splashes
+the SAME damage to every other still-chained player table-wide; this port's `applyDamage` has
+never threaded damage nature through at all (Fire/ThunderSlash's `.nature` field is cosmetic
+only), so IronChain needs that threading built first -- correctly identified as needing new
+plumbing, not attempted this milestone. User then asked to continue porting (`Port tiếp`).
+
+Of the 13, Lightning (Thiểm Điện) turned out to fit the EXISTING judge-area system exactly, the
+same discovery pattern as Fire Attack (Milestone 27) and Indulgence/SupplyShortage before it:
+
+- **Lightning (Thiểm Điện).** A delayed trick with `target_fixed = true` in the real source --
+  always attaches to whoever plays it, no target choice at all (modeled as a 1-candidate list
+  through the existing `tryPlayDelayedTrick` machinery rather than a dedicated no-target path).
+  At the owner's own Judge phase: judges a card; Spade 2~9 (verified exactly against the real
+  `judge.pattern = ".|spade|2~9"`) deals 3 Thunder damage and discards the card; any other result
+  moves the SAME card on to the next alive player's judge area instead of discarding, to be
+  judged again at THEIR next Judge phase -- Lightning circulates the table until someone finally
+  rolls Spade 2~9. New `trick.ts` `resolveLightningJudgment` is the first of the 3 judge-area
+  resolvers that can re-attach instead of always discarding. The 3-damage hit is modeled via
+  `loseHp` (not `applyDamage`) -- the real `DamageStruct(this, NULL, target, 3, Thunder)` has NO
+  attacking player at all (a natural-disaster hit), which `applyDamage`'s mandatory
+  `source: GamePlayer` parameter can't express; `loseHp`'s existing "no source, no
+  onDamage/onDamageDealt reactive triggers, still runs the dying/rescue check" shape is the
+  closest honest match already in this engine (same precedent as Kurou's self-inflicted hp
+  loss). Known deviation: a real target-side `reduceDamage` skill (Kongrong's Mingshi, the only
+  one ported) would still apply to a sourceless `DamageStruct` in the true engine; `loseHp`
+  bypasses `reduceDamage` entirely -- a narrow, deliberate simplification rather than a broader
+  `applyDamage` refactor for one card's edge case. New `card.ts` kind (1 copy, placeholder
+  Spade/0 suit/point -- real source constructs it with none either, same precedent as
+  AmazingGrace/GodSalvation/ArcheryAttack), wired into `room.ts`'s bot fixed pass/
+  `computeLegalActions`/freeform dispatch/`runJudgePhase` the same way Indulgence/SupplyShortage
+  already are.
+- **Test:** log-mined via `testGeneralSkillsAppearInPlay`'s existing 200-seed loop (2 new
+  markers: the judge itself, and specifically the 3-damage hit branch) -- no dedicated test
+  needed, unlike Buqu/Qingcheng last milestone, since Lightning is a real deck card every bot
+  automatically plays/attaches with no ask gate, making both branches naturally common across
+  200 seeds.
+- **Verification, three layers:** (1) `npx tsc --noEmit` clean; `npm run sim` 84/84 passing (all
+  pre-existing, `testGeneralSkillsAppearInPlay` now confirms 74/74 markers including both new
+  Lightning ones; `testPhaseCyclingConservesCards` confirms the updated 92-card deck total is
+  conserved across turns). (2) Live production redeploy: restarted the actual running server
+  process with this code, confirmed HTTP 200 both locally and through the public ngrok tunnel.
+  (3) Direct catalog inspection (`library.ts`'s `CARD_CATALOG`, the same data the client's card
+  library view renders from) confirmed the new Lightning entry -- correct label, count (1), and
+  rules text -- alongside the full 32-entry card catalog and 60-general roster staying intact.
+- **Still missing, unchanged from this milestone's own investigation above:** IronChain(x3,
+  needs damage-nature threading through `applyDamage` first), Collateral(x1, needs a genuinely
+  new 2-stage/2-target trick-targeting flow this engine's single-target `chooseTrickTarget`
+  contract doesn't have), Nullification(x1)/HegNullification(x2) (need a reactive
+  respond-to-a-trick-in-flight counter-play stack), AwaitExhausted(x2, the real card itself --
+  Duoshi's viewAs conversion already covers its effect), KnownBoth(x2)/BefriendAttacking(x1)
+  (Hegemony-relevant, both also need pieces of the above), and the 4 Standard armors (need the
+  judgment-trigger/locked-damage-immunity armor subsystem).
+
+## Milestone 29 — DONE (Collateral/BefriendAttacking, 2 more trick cards)
+
+User asked to continue porting (`Port tiếp`). Milestone 28's own "still missing" list had
+classified Collateral as needing "a genuinely new 2-stage/2-target trick-targeting flow this
+engine's single-target `chooseTrickTarget` contract doesn't have" and BefriendAttacking as
+"Hegemony-relevant, needs pieces of the [Nullification counter-play] above" -- re-investigating
+both against the real upstream source found BOTH classifications were too pessimistic:
+
+- **Collateral (Tá Đao Sát Nhân).** Real rule: player picks "A" (another player holding a
+  weapon) then "B" (someone within A's own attack range) when playing the card; A is then asked
+  to Slash B, and forfeits their equipped weapon straight to the card's player if they decline
+  or can't. This DOES need 2 target picks, but not a dedicated 2-stage trick-targeting UI: "A"
+  is picked via the existing single-target `chooseTrickTarget` ask (unchanged), and "B" is
+  picked with an ordinary `ctx.askChooseAnyPlayer` call NESTED inside the `resolve` callback --
+  the same generic ask many skills already use for arbitrary player selection. New
+  `trick.ts` `collateralCandidates`/`resolveCollateral`, reusing `findSlashLikeCard`/
+  `effectiveAttackRange`/`effectiveDistance`/`detachCardFrom`/`resolveSlash` (all pre-existing).
+- **Befriend Attacking (Viễn Giao Cận Công).** Real rule: target must be another player with a
+  DETERMINED faction (`hasShownOneGeneral()`) different from the actor's own -- turned out to be
+  an ORDINARY single-target trick (target draws 1, then the actor draws 3), just gated on
+  Hegemony's `player.faction` field, which already existed since Milestone 23. Hegemony-only in
+  practice (Identity mode never assigns `faction`), same "vacuous outside Hegemony, no special
+  casing needed" shape as several Hegemony-flavored skills before it. New `trick.ts`
+  `befriendAttackingCandidates`/`resolveBefriendAttacking`.
+- **1 real, pre-existing bug found and fixed while chasing a card-conservation test failure this
+  milestone's larger deck (94 cards) exposed (predates this milestone's own new code -- same
+  "newly exposed by a roster/deck-size change" pattern Milestone 26 already hit for a real engine
+  bug):** `simulate.ts`'s `totalCardsInPlay` test helper excluded Jiling's virtual Shuangren
+  Slash (`card.ts`'s `makeVirtualSlash`, no backing physical card) from the discard pile count
+  only -- but a reshuffle (`Room.drawOne`) sweeps the ENTIRE discard pile, virtual cards
+  included, back into the draw pile, from which the virtual card could then be drawn into a real
+  hand (indistinguishable from a real card at that point) exactly like any other. The helper
+  then double-counted it: once via a real bucket (hand/draw pile) it had legitimately entered,
+  and it was never excluded from THOSE buckets in the first place. Root-caused by bisecting the
+  exact seed/turn against a version of the deck without Collateral/BefriendAttacking (clean),
+  then instrumented card-ID-level snapshots around the leaking `selfAction` call (Lu Xun's
+  Duoshi, whose multi-target draw/discard loop happened to run right as the pile emptied and
+  reshuffled) to trace the extra card down to its exact identity and location. Fixed by
+  excluding virtual cards from EVERY bucket the helper sums (hand, judge area, Zhou Tai's Buqu
+  pile, draw pile, discard pile), not just discard pile -- this is a test-helper-only fix, not an
+  engine change (the real game state was never actually wrong; only the test's accounting was).
+  Also fixed, while in the area: `resolveCollateral`'s Slash-card lookup is now re-resolved AFTER
+  the `askUseSelfAction` ask (not reused from before it), matching `tryPlayOnce`'s own documented
+  "resolve validity after awaits, not before" precedent -- a latent correctness risk for a
+  human-controlled seat (never actually exercised by bot-only testing, since bot asks resolve
+  immediately with no real interleaving).
+- **Test:** `collateralSlash`/`collateralForfeit` markers added to `testGeneralSkillsAppearInPlay`
+  (Collateral works in both modes, reliably log-mined across the existing 200-seed Identity-mode
+  loop). `testBefriendAttackingRequiresEnemyFactionAndDrawsCards` (dedicated, pure -- Hegemony-
+  only in practice, same "too rare an intersection to log-mine" precedent as
+  `testQingchengHidesARevealedMainGeneral`).
+- **Verification, three layers:** (1) `npx tsc --noEmit` clean; `npm run sim` 85/85 passing (83
+  pre-existing + 1 new dedicated test + `testGeneralSkillsAppearInPlay`'s marker count growing to
+  76/76 without a new dedicated test; `testPhaseCyclingConservesCards` confirms the updated
+  94-card deck total is conserved across turns, including the virtual-card fix). (2) Live
+  production redeploy: restarted the actual running server process with this code, confirmed
+  HTTP 200 both locally and through the public ngrok tunnel. (3) Direct catalog inspection
+  (`library.ts`'s `CARD_CATALOG`) confirmed both new card entries -- correct label, count (1
+  each), and rules text -- alongside the full 34-entry card catalog and 60-general roster staying
+  intact.
+- **Still missing:** IronChain(x3, needs damage-nature threading through `applyDamage` first --
+  see Milestone 28's investigation), Nullification(x1)/HegNullification(x2) (need a reactive
+  respond-to-a-trick-in-flight counter-play stack), AwaitExhausted(x2, the real card itself --
+  Duoshi's viewAs conversion already covers its effect), KnownBoth(x2) (needs a private
+  per-player info channel -- this engine's `ctx.log` is a single shared public channel), and the
+  4 Standard armors (need the judgment-trigger/locked-damage-immunity armor subsystem).
+
+## Milestone 30 — DONE (AwaitExhausted/IronChain, closing out Milestone 28's "still missing" list)
+
+User asked to keep porting and also add a rules/how-to-play section per game mode (`Port luôn
+đi, thêm phần luật chơi cho từng chế độ nữa`). This entry covers the porting half; the rules UI
+is Milestone 31 below. Both remaining cards from Milestone 29's "still missing" list turned out
+tractable:
+
+- **Await Exhausted (Dĩ Dật Đãi Lao).** Milestone 29 had wrongly classified this as already
+  fully covered by Lu Xun's Duoshi viewAs conversion -- re-checked against the real card class
+  (`src/package/standard-tricks.cpp`'s `AwaitExhausted`) and it's a genuinely separate DEALT
+  card (Heart 11, Diamond 4) with the identical self+allies-draw-2-discard-2 effect, just never
+  reachable as a real hand card before this milestone. New `trick.ts`
+  `awaitExhaustedCandidates`/`resolveAwaitExhausted`, reusing Duoshi's already-ported effect
+  shape verbatim but wired as a real `tryPlayOnce` card.
+- **Iron Chain (Thiết Tác Liên Hoàn).** Needed damage-nature threading through `applyDamage`
+  first, exactly as Milestone 28 predicted. Added a `nature` parameter (`combat.ts`, defaulting
+  to `DamageNature.Normal`) and a `chained` boolean field on `GamePlayer`. Real rule: 1-2
+  targets or discard-1-to-draw-1 recast; simplified to always-exactly-1-target with no recast
+  (same "faithful behavior, simplified interaction" precedent as Guanxing's top/bottom split) --
+  toggles the target's `chained` state. The actual payoff is in `applyDamage`: any Fire/Thunder
+  (`DamageNature.Fire`/`DamageNature.Thunder`) hit against a chained player now unchains them
+  AND splashes the identical damage to every OTHER still-chained player, who each also unchain
+  from it. Traced a real bug mid-implementation against the actual upstream handler
+  (`src/server/gamerule.cpp`'s `DamageComplete`): the unchain check fires unconditionally per
+  damage instance (including splash-caused instances), but only the ORIGINAL, non-splash hit is
+  allowed to trigger a further splash -- an `isChainSplash` recursion guard gates only the
+  latter, not the former (an earlier draft wrongly gated both on the same flag, which would have
+  left splash recipients still marked "chained" after being hit, contradicting the card's own
+  name). `resolveSlash` now threads `slashCard.nature` through; `resolveFireAttack` (Milestone
+  27's Fire Attack) now correctly passes `DamageNature.Fire` for the first time -- previously
+  landed as ordinary `Normal` damage, a latent gap this milestone's nature-threading closed as a
+  side effect, not a new deliberate scope item.
+- **1 real, pre-existing test bug found and fixed** (same "newly exposed by this milestone's own
+  new code" pattern as the last two milestones): `testExpandedControllerHooksRespected` started
+  failing because Panfeng's Kuangfu skill (Milestone 26) can call `ctx.equipPlayer()` to hand an
+  equip card to ANY player -- including the test's "declined every equip" seat -- entirely
+  bypassing `wantsToEquip`, the same class of gap Erzhang's Zhijian already needed a carve-out
+  for. `Room.equip()`'s own "X trang bị Y" log line fires BEFORE the assigning skill's own
+  summary line (opposite order from the existing Lijian/Luanji "compelled trick" carve-out,
+  which looks at the PREVIOUS line), so the fix checks the NEXT log line for a `(kuangfu)`/
+  `(zhijian)` suffix instead.
+- **Test:** `awaitExhaustedUse`/`ironChainToggle` markers added to `testGeneralSkillsAppearInPlay`.
+  New dedicated `testIronChainSplashesElementalDamageAndUnchainsEveryoneHit`, driven directly
+  through `applyDamage` (too specific an interaction -- elemental damage landing while 2+
+  players are simultaneously chained -- to reliably log-mine from ordinary bot play): confirms
+  the original target unchains+splashes, the splash recipient takes identical damage and ALSO
+  unchains but does NOT re-splash, an unchained bystander is untouched, and `Normal`-nature
+  damage never triggers any of it.
+- **Verification, three layers:** (1) `npx tsc --noEmit` clean; `npm run sim` 86/86 passing (84
+  pre-existing + 1 new dedicated test + `testGeneralSkillsAppearInPlay`'s marker count growing to
+  78/78 without a new dedicated test); `testPhaseCyclingConservesCards` confirms the updated
+  99-card deck total is conserved across turns. (2) Live production redeploy: restarted the
+  actual running server process with this code, confirmed HTTP 200 both locally and through the
+  public ngrok tunnel. (3) Direct catalog inspection (`library.ts`'s `CARD_CATALOG`) confirmed
+  both new card entries -- correct label, count (2 and 3 respectively), and rules text --
+  alongside the full 36-entry card catalog and 60-general roster staying intact.
+- **Still missing:** Nullification(x1)/HegNullification(x2) (need a reactive
+  respond-to-a-trick-in-flight counter-play stack), KnownBoth(x2) (needs a private per-player
+  info channel -- this engine's `ctx.log` is a single shared public channel), and the 4 Standard
+  armors (need the judgment-trigger/locked-damage-immunity armor subsystem). With this
+  milestone, every OTHER Standard trick/equip card that doesn't need one of those 3 subsystems is
+  now ported.
+
+## Milestone 31 — DONE (Luật chơi: a rules/how-to-play panel for each game mode)
+
+The other half of the same request above (`thêm phần luật chơi cho từng chế độ nữa`): a
+reachable-anytime reference panel explaining each mode's actual rules, mirroring the existing
+"Thư viện" (Library) panel's UX so it needed no new interaction pattern:
+
+- **New header button + overlay** (`public/index.html`): "Luật chơi" sits next to "Thư viện",
+  opening `#rulesOverlay`/`#rulesPanel` -- same `libraryOverlay`/`libraryHeader`/`libraryTab` CSS
+  classes as the Library panel (zero new overlay/tab chrome needed), 2 tabs ("Vai Trò" for
+  Identity mode, "Quốc Chiến" for Hegemony mode). Unlike the Library, this content is entirely
+  STATIC (2 template-literal constants, `RULES_IDENTITY_HTML`/`RULES_HEGEMONY_HTML`) -- no new
+  WebSocket message type, since the rules text never depends on game/server state.
+- **Content is written to match this port's ACTUAL implemented rules, not the full upstream
+  ruleset** -- cross-checked line-by-line against `gamerule.ts`'s real logic, not paraphrased
+  from memory: the exact `ROLE_COUNTS` table (5-10 players) and `checkWinCondition`'s 3-case
+  precedence order for Identity mode; the exact Ambitionist `floor(playerCount/2)` quota rule,
+  the hidden/reveal timing mechanic (`runHegemonyReveal`), the companion-pair +
+  leftover-half-HP reveal bonuses (`resolveHegemonyRevealBonuses`, `combineHegemonyHp`), the Ao
+  Chiến trigger condition and its Peach-disable/Peach-as-Slash-or-Jink substitution, and the
+  single-faction win condition for Hegemony mode. Each panel ends with a note pointing to the
+  Library for full per-card/per-general detail rather than duplicating it.
+- **Verification:** `npx tsc --noEmit` clean (script embedded in `index.html` re-parsed
+  standalone via `new Function()` to confirm no syntax error, since it isn't part of the
+  TypeScript build); live browser check (Playwright via `browser.open` against the redeployed
+  production server) confirmed: the button opens the overlay, both tabs render their distinct
+  intended Vietnamese content (spot-checked full text length + opening paragraph of each), the
+  close button restores the overlay to hidden, and the pre-existing Library panel still opens
+  and closes independently afterward (no shared-state regression from reusing its CSS classes).
+
+## Milestone 32 — DONE (Hegemony: 12-player cap + real "phát 5, chọn 2" general draft)
+
+User reported the real Quốc Chiến rule: max table size is 12 (not 10), and each player drafts
+their pair from 5 dealt generals, not two separate 3-candidate rounds.
+
+- **`src/room.ts`** -- the constructor's player-count bound is now per-mode: Identity mode stays
+  5-10 (its `ROLE_COUNTS` role table, `gamerule.ts`, still only covers that range), Hegemony mode
+  is now 5-12 (it has no role table -- `hegemonyKingdomQuota` is `floor(playerCount/2)`, already
+  well-defined for any size). `pickGenerals`'s Hegemony branch now deals exactly 5 unfiltered
+  (any-kingdom) candidates in ONE `candidateGenerals(5)` call, asks for the main general from
+  those 5, then asks for the deputy from the 4 that remain -- filtered to the main's own kingdom
+  first (falls back to all 4 if none share it). The 3 (or more) never-picked generals are never
+  added to `takenGenerals`, so they return to the shared pool for later players, matching the
+  real rule's "trả lại" behavior. `candidateGenerals` gained an optional `pool` param so the
+  deputy round can deal from the SAME 5-card deal instead of re-sampling a fresh pool.
+- **`src/server.ts`** -- `MAX_PLAYERS` split into `MAX_PLAYERS_IDENTITY` (10) and
+  `MAX_PLAYERS_HEGEMONY` (12); `createRoom` and the `"new"` reset handler now size the
+  placeholder Room's display slots per the room's actual mode (and construct it WITH that mode,
+  since `Room`'s own validation is now per-mode too -- previously the placeholder was always
+  built Identity-typed regardless of the room's real mode, which only worked because both modes
+  shared one 5-10 bound).
+- **`public/index.html`** -- the seat table grows a `top5`/`bot5` slot pair (12 seats total),
+  toggled on via a `#table.mode-hegemony` CSS class (wider 7-column grid; the extra slots are
+  `display:none` outside it so they don't fall back to grid auto-placement) set from `render()`
+  based on `state.mode`. `SLOT_ORDER` split into `SLOT_ORDER_10`/`SLOT_ORDER_12`, chosen per
+  mode in `renderPlayers()`. The lobby's waiting-room ready-count (`0/10 -- cần tối thiểu 5`) is
+  now `${activeCount}/${state.players.length}`, so it reads `/12` in a Hegemony room instead of
+  a hardcoded `/10`. The general-pick hint text for the `"main"`/`"deputy"` roles now says "5
+  tướng được phát" / "trong các tướng còn lại" instead of the old "3 tướng" wording (Identity
+  mode's own single-pick hint is untouched -- it still deals 3). The Hegemony rules panel
+  (`RULES_HEGEMONY_HTML`) now states the 5-12 player range and the phát-5-chọn-2 draft mechanic.
+- **Verification:** a throwaway script confirmed the new per-mode bounds (`Room` constructs at
+  exactly 12 for Hegemony/10 for Identity, throws one past each) and that 10 seeds of a
+  12-player Hegemony draft always end with every player holding both a main AND a deputy
+  general. Live browser check (a real server instance, `browser.open`) against a freshly created
+  Hegemony room confirmed: the table renders all 12 named seat slots; claiming P1, bot-filling
+  the rest, and starting the match asked P1 for a main general from exactly 5 candidates (mixed
+  kingdoms); picking Tào Tháo (Ngụy) then asked for a deputy from exactly the 2 Ngụy generals
+  left in that same 5-card deal (Trương Liêu, Chân Cơ) -- confirming the "same 5, not a fresh
+  3+3 deal" mechanic end to end; the resulting player record showed
+  `general: caocao / deputyGeneral: zhangliao / kingdom: wei` with both generals' skills unioned
+  onto the player. `npx tsc --noEmit` shows the same pre-existing unrelated error count as
+  before this change (an in-progress Nullification feature elsewhere in the tree).
+
+## Milestone 33 — DONE (Nullification/HegNullification/KnownBoth: the last 3 Standard trick cards)
+
+User asked to check carefully whether any Quốc Chiến (Hegemony)-relevant cards were still
+missing (`Có những lá bài chức năng hay quân lệnh nào chưa được port cho quốc chiến không, check
+kỹ xem`). Investigation: cross-checked this port's own deck against the real upstream
+`trickCards()`/`equipCards()` lists directly (34 trick cards + 20 equip cards upstream vs. this
+port's 16 trick kinds + 16 equip kinds at the time) -- confirmed the gap was exactly
+Nullification(x1)/HegNullification(x2)/KnownBoth(x2) (all 3 trick cards) plus the 4 Standard
+armors (equip, unrelated to Hegemony specifically), nothing else. Also confirmed HegNullification
+is NOT just "more copies of Nullification" -- the real card (`lang/vi_VN`'s official text) adds a
+genuine Hegemony-exclusive choice: block just the target, or their WHOLE kingdom at once. User
+then asked to port all 3 (`Port cả 3 lá cùng lúc`).
+
+- **Nullification/HegNullification (Vô Giải Khả Kích / Vô Giải Khả Kích - Quốc).** Needed a
+  genuinely new subsystem: a reactive "respond to a trick in flight" counter-play window --
+  every trick card in this port up to now resolved immediately, with no interruption point.
+  Built as `Room.resolveNullificationWindow`/`offerNullification` (private, recursive): any
+  alive player holding a Nullification-kind card may play it right before a trick's effect
+  applies against a specific target; the played card is itself immediately counter-nullifiable
+  by a FURTHER Nullification (odd chain depth cancels the original effect, even depth --
+  including 0 responders -- doesn't), matching the real upstream `gamerule.cpp`'s
+  `isCanceled`/`_askForNullification` recursive shape. Confirmed directly against the real
+  source that every existing trick kind in `standard-tricks.cpp` is `cancelable` by default (no
+  card opts out) -- so the window applies UNIFORMLY: offered once per whole card use at
+  `tryPlayOnce`/`tryPlayTargeted`/`tryPlayDelayedTrick`'s single choke point for every trick kind
+  except the 2 AOE cards (SavageAssault/ArcheryAttack), which get REAL per-target granularity
+  instead (they already looped per-player in trick.ts) via a new `EngineContext.askNullification`
+  callback -- that's also where HegNullification's real "single target vs. their whole kingdom"
+  scope choice actually matters: choosing "all" auto-shields every other still-untouched
+  same-faction target from the rest of that SAME AOE resolution, no new ask needed for each.
+- **KnownBoth (Tri Bỉ Tri Kỉ).** Needed the other genuinely new subsystem: a private per-player
+  info channel -- the whole point of the card is privately showing ONLY its user either the
+  target's hand or one of their still-hidden generals, and `ctx.log` is a single shared PUBLIC
+  channel every player/spectator sees identically, confirmed structurally incapable of this.
+  Built `Room.setPrivateRevealCallback` (mirrors the existing `setLiveUpdateCallback` hook
+  exactly) wired by server.ts straight to a new one-way `notifyClient` helper (like `askClient`
+  but no response/requestId expected) that sends a message to just the viewing player's own
+  socket, entirely bypassing the shared broadcast snapshot; the client renders it as a
+  short-lived corner toast. Real rule's recast (discard the card for 1 draw instead of
+  targeting) is dropped, same "faithful behavior, simplified interaction" precedent already used
+  for IronChain's own recast (Milestone 30).
+- **Full human-interactive support, not just the bot path**: `wantsToNullify`,
+  `chooseHegNullificationScope`, and `chooseKnownBothOption` are all wired into
+  `server.ts`'s `makeHumanController` with real client dialogs (`confirmNullification` reuses
+  the existing yes/no `showConfirm`; `chooseHegNullificationScope`/`chooseKnownBothOption` get
+  new 2-and-N-button choice prompts modeled on the existing companion-bonus prompt) -- a claimed
+  human seat gets the real decision, not a silent bot-policy fallback, matching every other
+  Controller method this port has ported so far.
+- **1 real TS compiler quirk found and worked around** (not a bug in this port's logic): a
+  discriminated union (`PrivateReveal`, `{kind:"hand";cards:Card[]}|{kind:"general";...}`) whose
+  "hand" variant nests an ARRAY of objects that ALSO happen to have their own unrelated `kind`
+  field (`Card.kind: CardKind`) makes TypeScript's discriminant-narrowing collapse the outer
+  union to `never` at the exact `payload.kind === "hand"` check -- confirmed via a minimal
+  standalone repro (isolated down to the literal field-name collision, independent of this
+  port's own code). Worked around in the one test that hit it with an explicit
+  `as Extract<PrivateReveal, {kind:"hand"}>` cast instead of relying on inline narrowing.
+- **1 real, pre-existing test bug found and fixed** (same "newly exposed by this milestone's own
+  deck-size/RNG-stream shift" pattern as the last several milestones):
+  `testHegemonyDraftPicksSameKingdomPairWithCombinedStats` asserted every drafted main+deputy
+  pair must share a kingdom -- but `Room.candidateGenerals`'s own doc comment already documents
+  a real fallback (falls back to the full unfiltered 4 leftover candidates if NONE of them share
+  the main's kingdom, so no player is ever left with zero deputy choices); this port's larger
+  104-card deck shifted seed 1's RNG stream just enough to make P2 hit that exact documented
+  fallback for the first time (confirmed directly: seed 1's P2 drafts menghuo/Thục then falls
+  back to zhanghe/Ngụy). The test's invariant was too strict relative to the real algorithm's
+  own contract -- fixed to assert the always-true parts (`player.kingdom` follows the MAIN
+  general specifically; distinct generals; correct combined stats/skill union/gender) plus an
+  aggregate check that the primary same-kingdom rule still fires for the clear majority of
+  pairs (30/48 across the 8 seeds), not the real engine code, which was already correct.
+- **Test:** 3 new dedicated tests (too rare/specific an intersection -- a SPECIFIC responder
+  holding a SPECIFIC 1-in-104 card at exactly the right moment -- to reliably log-mine from
+  ordinary bot play, same precedent as `testBefriendAttackingRequiresEnemyFactionAndDrawsCards`):
+  `testNullificationCancelsATrickCardsEffect` (a real Room turn, rigged hands, proves a Duel
+  never resolves and both cards end up discarded+logged), `testHegNullificationCanShieldAWhole
+  FactionFromAoe` (a real Hegemony Room turn, seat order guarantees allyA's SavageAssault hit
+  resolves before allyB's, proving the "all" scope auto-shields allyB with no new ask while a
+  different-faction enemy still takes the hit normally), `testKnownBothRevealsPrivatelyNotIn
+  PublicLog` (pure, driven directly through `resolveKnownBoth`, proves the reveal reaches
+  `ctx.revealPrivately` addressed to the actor and NEVER appears in `ctx.log`).
+- **Verification, three layers:** (1) `npx tsc --noEmit` clean; `npm run sim` 89/89 passing (86
+  pre-existing + 3 new dedicated tests, including the 1 test-brittleness fix above);
+  `testPhaseCyclingConservesCards` confirms the updated 104-card deck total is conserved across
+  turns. (2) Live production redeploy: restarted the actual running server process with this
+  code, confirmed HTTP 200 both locally and through the public ngrok tunnel. (3) Live browser
+  check (Playwright via `browser.open` against the redeployed production server): opened the
+  in-client Library, confirmed all 3 new cards render with their correct Vietnamese
+  labels/descriptions among a 39-entry card catalog (23 basic/trick kinds + 10 weapons + 6
+  horses) and the full 60-general roster staying intact.
+- **Still missing:** the 4 Standard armors (EightDiagram/RenwangShield/Vine/SilverLion -- need
+  the judgment-trigger/locked-damage-immunity armor subsystem, unrelated to Hegemony
+  specifically). With this milestone, every Standard trick card is now ported -- the ENTIRE
+  Standard card pool (basics + tricks) matches the real upstream source exactly, with only the
+  4 armors remaining in the whole `standard-equips.cpp`/`standard-tricks.cpp` pool.
+
+## Milestone 34 — DONE (EightDiagram/RenwangShield/Vine/SilverLion: the 4 Standard armors)
+
+User asked to check for any remaining missing trick/functional cards for Quốc Chiến
+(`Check xem còn bài cẩm nang hay chức năng nào thiếu bên chế độ quốc chiến không`) -- confirmed
+all 19 trick kinds now match upstream exactly (Milestone 33 closed the last gap); only the 4
+Standard armors (equip, not trick) remained unported. User then said to build them
+(`Xây luôn`).
+
+- **Real upstream mechanics researched directly from source** (`src/package/standard-equips.h`/
+  `standard-equips.cpp`, `Mogara/QSanguosha-For-Hegemony` `dev` branch, cross-checked against
+  the official `lang/vi_VN` text): EightDiagram (Bát Quái Trận) is NOT compulsory -- when asked
+  to play Jink, may judge instead; red counts as a played Jink. RenwangShield (Nhân Vương Thuẫn)
+  is compulsory (locked) -- a black-suited Slash has NO effect on the wielder at all (full
+  nullify, no Jink needed). Vine (Đằng Giáp) is compulsory -- SavageAssault/ArcheryAttack and
+  ordinary Normal-nature Slash have no effect; Fire-natured damage taken instead +1. SilverLion
+  (Bạch Ngân Sư Tử) is compulsory -- any single damage instance >1 becomes 1; after it leaves
+  the wielder's equip zone (while alive), heal 1 hp.
+- **New `player.armor` equip slot** (`GamePlayer`, alongside the existing weapon/defenseHorse/
+  offenseHorse) plus `CardKind.Armor`/`Card.armorName` -- a player can equip at most 1 armor at
+  a time, which makes any "2 armors at once" ordering question moot (Vine and SilverLion, or
+  any pair, can never coexist on the same player).
+- **RenwangShield/Vine's Slash-nullify** lives in `resolveSlash` specifically (not
+  `applyDamage`) -- a `SlashEffected`-equivalent short-circuit that only fires for the actual
+  Slash card resolution (matches the real engine's `Global_NonSkillNullify`), checked against
+  `effectiveTarget` (not `target`) so a Liushan/Daqiao redirect still checks the NEW target's
+  own armor; confirmed this correctly excludes Triblade splash and Tianyi bonus-hit paths (which
+  call `applyDamage` directly, bypassing `resolveSlash` entirely).
+- **Vine's SavageAssault/ArcheryAttack immunity** lives in `trick.ts`'s per-target AOE loops --
+  the wearer is skipped outright (`continue`), never even offered the discard-a-card choice,
+  same short-circuit shape as the existing skill-based `immuneToSavageAssault` check.
+- **SilverLion/Vine's damage-amount effects** (cap to 1, +1 Fire) live in the shared
+  `applyDamage` choke point -- must apply to EVERY damage source (Slash/Duel/AOE/skill-inflicted/
+  chain-splash alike), not just Slash, matching the real `DamageInflicted` event's universal
+  scope (same architectural precedent as IronChain's own chain-splash logic already living
+  there).
+- **SilverLion's heal-on-loss** fires from BOTH real departure paths: `room.ts`'s `equip()`
+  (replaced by a newly-equipped armor) and `combat.ts`'s `detachCardFrom` (Dismantlement/Snatch/
+  IceSword) -- heals exactly 1 hp only while alive and still wounded, matching the real
+  "sau khi rời khỏi vùng trang bị của bạn, hồi 1 máu" wording exactly (no condition on HOW it
+  left).
+- **EightDiagram simplified to "backup dodge only"**: offered ONLY when no real/viewAs Jink was
+  found (not a full 3-way choice to also gamble away a held real Jink for value) -- a real,
+  deliberate simplification, documented in-code and in the library catalog entry, matching the
+  "faithful behavior, simplified interaction" precedent already used for IronChain's dropped
+  recast (Milestone 30). Gated on the same `dodgeBlocked`/`requiredJinks > 0` check real Jinks
+  use (Tieqi/Liegong's dodge-block also blocks EightDiagram, since the card's own text says it
+  "counts as playing a Jink"). Axe's force-through offer applies uniformly to any dodge method
+  (real Jink or EightDiagram alike), matching the real rule (no distinction by dodge source).
+- **Full human-interactive support**: new `askUseEightDiagram`/`wantsToUseEightDiagram` wired
+  into `server.ts`'s `makeHumanController` with a real client dialog (`confirmEightDiagram`,
+  reusing the existing `showConfirm` pattern) -- a claimed human seat gets the real choice, not
+  a silent bot-policy fallback.
+- **A real, pre-existing engine bug found and fixed** (same "newly exposed by this milestone's
+  own deck-size/RNG-stream shift" pattern as several prior milestones): `resolveSavageAssault`/
+  `resolveArcheryAttack`'s per-target AOE loop kept applying damage/reactive-skill effects to
+  LATER targets even after an EARLIER target's death had already ended the game -- e.g. a Savage
+  Assault's 3rd of 7 targets dying completed the Hegemony win condition (freezing the winners
+  list at that instant), but the loop's still-pending 4th-7th targets kept taking damage
+  afterward, and a Ganglie-triggered reactive hit killed ANOTHER already-declared "winner" with
+  nothing left to re-run `checkWinCondition` -- the frozen winners list no longer matched who
+  was actually still alive by the time the match truly settled. Found live via
+  `testEmergentHegemonyGameReachesWinCondition` (seed 1's larger 108-card deck shifted the RNG
+  stream onto exactly this scenario). Fixed with a new `EngineContext.isGameOver()` accessor,
+  consulted at the top of both AOE loops -- once the game has ended, no further target in the
+  SAME card's resolution is touched.
+- **Several other equip-zone-generic sites updated to recognize armor alongside weapon/horse**,
+  found by grepping every existing `weaponName ?? horseName`-shaped fallback and
+  `CardKind.Weapon || CardKind.Horse`-shaped check in the codebase: Niepan's full equip-zone
+  discard, Kuangfu's equip-pick candidates + own-slot-empty check, Shensu's `equipOnly` discard
+  cost, Qingcheng's equip-card-in-hand filter, `DISCARD_IMPORTANCE`/`choosePlayerCard`'s bot
+  policy, and every client-side `cardImageSrc`/`cardLabel`/`isEquip` check in `index.html`.
+- **Test:** 4 new dedicated tests (armor mechanics are too specific/locked to reliably
+  log-mine from ordinary bot play): `testEightDiagramJudgesABackupDodge` (red judgment dodges,
+  non-red takes the hit), `testRenwangShieldBlocksOnlyBlackSuitedSlash` (black slash fully
+  nullified with the jink-dodge ask never even firing, red slash connects normally),
+  `testVineBlocksNormalDamageAmplifiesFireDamage` (normal Slash/SavageAssault/ArcheryAttack all
+  nullified -- the discard-a-card ask never fires for SavageAssault -- fire Slash connects with
+  +1 damage), `testSilverLionCapsDamageAndHealsOnLoss` (a 3-damage hit caps to 1, leaving the
+  equip zone while wounded heals exactly 1 hp, no overheal at full hp).
+- **Verification, three layers:** (1) `npx tsc --noEmit` clean; `npm run sim` 93/93 passing (89
+  pre-existing + 4 new dedicated tests), including the win-condition-cascade bug fix above and
+  the updated 108-card `DECK_SIZE`/`totalCardsInPlay` (now counting the armor slot). (2) Live
+  production redeploy: restarted the actual running server process with this code, confirmed
+  HTTP 200 both locally and through the public ngrok tunnel, then drove a real bot-only game
+  over the live WebSocket API end to end and confirmed a bot actually equipped RenwangShield by
+  turn 3 with the `armor` field correctly present in the broadcast snapshot. (3) Live browser
+  check (against the redeployed production server): opened the in-client Library, confirmed all
+  4 new armors render with correct Vietnamese descriptions, real card art, and correct counts
+  among a 43-entry card catalog (23 basic/trick kinds + 10 weapons + 6 horses + 4 armors).
+- **Fully closed:** this was the last remaining gap in the whole Standard card pool -- every
+  basic, trick, AND equip card in the real upstream `standard-basics.cpp`/`standard-tricks.cpp`/
+  `standard-equips.cpp` now has a ported, playable equivalent in this port (108/108 cards).
+
+## Milestone 35 — DONE (Zang Ba/Tang Bá + Hengjiang, the first general ported OUTSIDE the 60-general Standard roster)
+
+User pointed out Zang Ba was missing; upon investigation he isn't a Standard-package general at
+all -- confirmed against upstream `src/package/momentum.cpp` (`WEI 023`), one of several
+Hegemony-specific supplementary general packs (alongside `formation.cpp`/`transformation.cpp`/
+`jiange-defense.cpp`/`strategic-advantage.cpp`) that ship extra generals/equips for Quốc Chiến
+specifically, never part of the 60-general Standard set this port completed at Milestone 27.
+User asked to port him anyway.
+
+- **`src/skill.ts`** -- `zangba` added to `GENERALS` (kingdom wei, 4 hp, companion Zhang Liao),
+  clearly commented as sourced from `momentum.cpp` rather than Standard so the roster's own
+  "60 Standard generals" claim stays accurate (Zang Ba is #61, explicitly outside that count).
+  His skill **Hengjiang (橫江/Hoành Giang)** is a real `MasochismSkill`: each time he takes
+  damage he may weaken whoever is CURRENTLY mid-turn by -1 max hand size for the rest of their
+  turn (stacks per hit); if that debuff never actually forces them to discard by the time their
+  turn ends, Zang Ba draws 1 card as compensation. Ported as `hengjiangOnDamaged`, gated by the
+  existing generic `askUseSelfAction` ask (bots always take it, matching every other optional
+  masochism-style skill's bot default). Real upstream fires once per POINT of damage
+  (`MasochismSkill`'s own per-point trigger loop); this port's `onDamaged` hook has no `amount`
+  parameter at all (same simplification every other masochism skill here already makes, e.g.
+  Fankui/Jianxiong), so it invokes at most once per hit -- a documented, not silent, scope line.
+- **`src/player.ts`** -- 2 new dedicated per-player fields (matching this file's existing
+  precedent of narrowly-scoped fields like `tianyiWonThisTurn`, not a generic marks bag):
+  `hengjiangMark` (the live -1-per-stack hand-limit debuff, now subtracted in the `maxCards`
+  getter) and `hengjiangDiscardedThisTurn` (set by `discardDownToLimit` the instant the debuff
+  actually forces a real discard -- read once at that same turn's end to decide the
+  compensation draw). Both reset at the start of each of that player's own turns and again
+  unconditionally when that turn ends, matching the real rule's TurnStart/HengjiangFail timing;
+  never carry across turns.
+- **`src/combat.ts`** -- `EngineContext` gained `currentPlayer` (whoever's turn it currently
+  is) -- the first skill hook here that needs "the active player" as a concept distinct from
+  attacker/defender/self, since Hengjiang's real target is whoever is mid-turn when Zang Ba
+  happens to take damage (which can be a completely different player's Slash/Duel/AOE).
+- **`src/room.ts`** -- `makeContext` now threads `this.players[this.currentIndex]` through as
+  `currentPlayer`; `playTurn` resets both new fields alongside the existing turn-scoped ones
+  (`tianyiWonThisTurn` etc.) and, right after the phase loop finishes (genuine turn-end, mirrors
+  upstream's `EventPhaseChanging` to `NotActive`), checks `hengjiangMark`/
+  `hengjiangDiscardedThisTurn` on the just-finished turn's owner: awards the alive Zang Ba
+  (found by general/deputyGeneral name -- he's unique, so no id needs threading through) exactly
+  1 draw when warranted, then always clears the mark.
+- **`src/gamerule.ts`** -- `COMPANION_PAIRS` gained `["zhangliao", "zangba"]` (confirmed against
+  upstream's own `zangba->addCompanion("zhangliao")`); the header comment's stale "9 pairs"/
+  "44-general roster" phrasing (never updated since an earlier milestone actually grew the
+  roster to 60) corrected in the same pass since this edit touched the exact same array.
+- **Verification:** a throwaway script confirmed (1) `zangba` is registered wei/4hp and
+  companion-paired with `zhangliao`; (2) a hand-built `EngineContext` + `combat.ts`'s real
+  `applyDamage` shows Zang Ba taking damage marks the CURRENT player (not the attacker, not Zang
+  Ba himself) with `hengjiangMark = 1` and `maxCards` drops by exactly 1; (3) replaying the
+  turn-end check draws Zang Ba exactly 1 card when no discard was forced, and (4) exactly 0 when
+  one was. A separate throwaway integration script ran 3 full bot-vs-bot Hegemony games (8
+  players, `runUntilGameOver`) where Zang Ba was actually drafted, each completing 29-49 turns
+  with no crash. `npx tsc --noEmit` clean.
+
+## Milestone 36 — DONE (4 more Hegemony-specific generals: Li Dian/Chen Wu·Dong Xi/Jiang Wan·Fei Yi/Xu Sheng; full audit of all 5 supplementary packages)
+
+User asked to check for and port every remaining missing general, AND to re-check the skills of
+already-ported generals against the same "expansion pack" source files (`Check và port tất cả
+các tướng còn thiếu đi, check cả skill các tướng trong bảng mở rộng cho các tướng hiện tại
+luôn`). Read all 5 upstream Hegemony-specific supplementary packages in full
+(`momentum.cpp`/`formation.cpp`/`transformation.cpp`/`jiange-defense.cpp`/
+`strategic-advantage.cpp`, ~8700 lines of real C++ total) to build a complete inventory before
+touching any code.
+
+- **Re-check of already-ported generals:** none of the 5 packages ADD or MODIFY a skill on any
+  general already in this port's roster -- each package only ever introduces brand-new
+  generals (or, for `strategic-advantage.cpp`, brand-new equipment). No existing general needed
+  a skill update.
+- **4 new generals ported**, each chosen because their FULL real kit maps onto hooks this engine
+  already has, or onto a small hook added following an exact existing precedent:
+  - **Li Dian (Lý Điển, Wei, 3hp, momentum.cpp, companion Nhạc Tiến)** -- Wangxi (Vong Khích):
+    whenever he deals OR takes damage, he and the other combatant may each draw 1 -- both
+    directions reuse the EXISTING `onDamaged`/`onDamageDealt` hooks, zero new engine surface.
+    His 1st skill Xunxun is deferred: real upstream reveals the top 4 draw-pile cards and splits
+    them into a FIXED 2-to-hand/2-to-bottom, which doesn't match this engine's existing Guanxing
+    ask (`askGuanxingBottom`, an arbitrary-count-to-bottom split) closely enough to reuse
+    faithfully.
+  - **Chen Wu·Dong Xi (Trần Vũ Đổng Tập, Wu, 4hp, momentum.cpp)** -- Duanxie (Đoạn Tiết): once
+    per Play phase, chain another not-yet-chained player AND himself (`activeAction`, reusing
+    the existing `chained` field from Milestone 30's Iron Chain). Fenming (Phấn Mệnh): at his
+    own Finish phase, if chained, force every currently-chained player (himself included) to
+    discard 1 card of his choosing (`otherPhaseAction` at `Phase.Finish` -- already fires for
+    every phase value, no wiring change needed -- plus a new `forcedDiscardOne` helper mirroring
+    Dismantlement/Snatch's own candidate-build-then-`askPickPlayerCard` pattern).
+  - **Jiang Wan·Fei Yi (Tưởng Uyển Phí Y, Shu, 3hp, formation.cpp)** -- Shengxi (Sinh Tức): if
+    you dealt no damage during your own Play phase, draw 2 at Discard-phase start (a new
+    `dealtDamageInPlayPhase` player field, set by a `onDamageDealt` hook and read by an
+    `otherPhaseAction` at `Phase.Discard` -- fires BEFORE that phase's own over-limit check,
+    matching upstream's "Play phase just ended" timing exactly). Shoucheng (Thủ Thành): when an
+    ALLY's hand hits 0 outside their own turn, may have them draw 1 -- needed a genuinely new
+    broadcast hook (`onAllyHandEmptied`, wired into `Room.checkHandEmptied` alongside the
+    existing self-only `onHandEmptied`, gated on the emptied player's last-recorded `.phase`
+    being `NotActive`), built on the exact same broadcast-to-every-ally pattern `onAllyDeath`/
+    `onAllyDying` already established.
+  - **Xu Sheng (Từ Thịnh, Wu, 4hp, formation.cpp, companion Đinh Phụng)** -- Yicheng (Nghĩa
+    Thành): whenever an ally (or himself) is targeted by a Slash, may have them draw 1 then
+    optionally discard 1 of their own choosing. Needed another new broadcast hook
+    (`onAllySlashTargeted`), wired into `combat.ts`'s `resolveSlash` right after the real target
+    is finalized (past any Liushan/Daqiao redirect and armor-nullify check) but BEFORE the
+    Jink-dodge exchange -- matching upstream's `TargetConfirmed` timing exactly. The optional
+    discard reuses the existing generic `askAnyHandCards(player, 0, 1)` ask verbatim.
+  - 2 new companion pairs added to `gamerule.ts`'s `COMPANION_PAIRS`: Li Dian/Nhạc Tiến, Xu
+    Sheng/Đinh Phụng (both already-ported generals).
+- **Everything else investigated stays deferred, each for a concrete, specific reason** (not a
+  blanket "too hard"):
+  - **`momentum.cpp` (Wei/Shu/Wu/Qun generals beyond Zang Ba/Li Dian):** Ma Dai's Qianxi needs a
+    card-USE-RESTRICTION subsystem (`setPlayerCardLimitation`) this engine has no equivalent
+    of. Mi Furen's Guixiu needs "hide a revealed general back down" (this port's reveal is
+    one-way by design -- Milestone 23); her Cunsi needs skill-transfer + voluntary self-general-
+    removal. Sun Ce's Yingyang needs **pindian** (card-number comparison duels) -- explicitly
+    listed since Milestone 2.6 as a subsystem this port doesn't have; his Hunshang needs dynamic
+    runtime skill acquire/detach (temporarily granting/revoking a DIFFERENT skill class). Dong
+    Zhuo's Baoling needs "voluntarily remove your OWN general mid-game" (a structural change to
+    the dual-general/reveal system). Zhang Ren's Fengshi is a `BattleArraySkill`
+    (阵法技/围攻/队列) -- the exact category already excluded in this README's "What's actually
+    implemented" section ("formation skills... a genuinely separate package of unported
+    generals"). `lord_zhangjiao`'s Hongfa is `attached_lord_skill` (a kingdom-wide skill only
+    the Identity-mode Lord seat gets) -- this Hegemony port has no "lord" role concept per
+    player at all.
+  - **`formation.cpp` (beyond Jiang Wan·Fei Yi/Xu Sheng):** Deng Ai's Tuntian is a 3-trigger-
+    skill chain (Tuntian/TuntianPostpone/TuntianGotoField) building a "field" card pile via a
+    reactive judge fired on losing cards during OTHER players' turns, with its own postpone/
+    timing bookkeeping -- a genuinely new subsystem disproportionate to one general. Cao Hong's
+    Heyi and Jiang Wei's Tianfu are both `BattleArraySkill`s (same excluded formation category
+    as Zhang Ren above); Jiang Wei also needs a per-general deputy-maxHp-adjustment override
+    (`setDeputyMaxHpAdjustedValue`). Jiang Qin's Niaoxiang is the same formation category. Yu
+    Ji's Qianhuan needs a new personal card pile PLUS a generic "cancel one specific target of
+    an in-flight card" hook (distinct from this port's existing Slash-only nullify/redirect
+    hooks). He Taihou's Zhendu needs "force ANOTHER player to use a specific card
+    (Analeptic) on themselves" -- no such compulsion mechanic exists. `lord_liubei`'s
+    Jizhao/Shouyue are lord-only, same reason as `lord_zhangjiao` above.
+  - **`transformation.cpp` (9 generals: Xun You, Empress Bian, Li Guo, Zuo Ci, Sha Moke, Ma Su,
+    Ling Tong, Lü Fan, `lord_sunquan`):** the ENTIRE package is built around
+    `room->transformDeputyGeneral(player)` -- randomly swapping a player's deputy general
+    mid-game -- a wholly new subsystem (new state, new UI, new interaction with the existing
+    face-down/face-up reveal-timing mechanic) that every one of its 9 generals depends on for at
+    least one skill. None are portable without building that subsystem first.
+  - **`jiange-defense.cpp` (13 `jg_`-prefixed characters, several literally named `_machine`
+    e.g. the 4 Divine Beast constructs):** this is an entirely separate SCENARIO game mode
+    (剑阁防线/Kiếm Các Phòng Tuyến), not standard draftable Quốc Chiến generals at all -- out of
+    scope regardless of any subsystem work, matching how this port never implemented the
+    scenario-mode system to begin with.
+  - **`strategic-advantage.cpp`:** contains ZERO generals -- 3 new weapons/armor only (Blade/
+    Halberd/Breastplate). Not applicable to "tướng còn thiếu" (missing generals); a distinct
+    future ask about missing equipment, not addressed here.
+- **Verification:** a throwaway script confirmed every mechanic in isolation (Wangxi's mutual
+  draw both directions via a real `applyDamage`/`onDamageDealt` call; Duanxie's `candidatesFor`
+  + chain-both-sides `run`; Fenming discarding from every chained player while sparing an
+  unchained bystander; Shengxi's gate correctly flips on `onDamageDealt`; Shoucheng drawing the
+  ally whose hand emptied; Yicheng's draw+optional-discard via a real `resolveSlash` call). A
+  separate throwaway integration script ran 8 full bot-vs-bot 8-player Hegemony games
+  (`runUntilGameOver`) covering all 4 new generals in various pairings (including a real Li
+  Dian/Nhạc Tiến companion draft), each completing 28-80 turns with no crash. `npx tsc --noEmit`
+  clean.
+
+## Milestone 37 — DONE (2 more Hegemony-specific generals, partial ports: Ma Dai/He Taihou)
+
+User asked to keep porting (`Port thêm đi`). Re-scanned the Milestone 36 deferred list for any
+general blocked by only ONE of their 2 skills, where the other skill was independently portable
+-- found 2, ported each keeping only the portable half (same "faithful behavior, simplified
+interaction" precedent Milestone 36 already applied to Li Dian: full general drafted, one real
+skill missing with the reason documented inline).
+
+- **Ma Dai (Mã Đại, Shu, 4hp, momentum.cpp, companion Mã Siêu)** -- ported with `mashu`
+  (Mã Thuật) alone, an already-shared reusable skill instance (Pang De/Ma Teng/Ma Chao all
+  already use the exact same skill object) -- zero new code, one `GENERALS` entry + one
+  `COMPANION_PAIRS` entry. His 2nd skill Qianxi stays deferred: needs a card-USE-RESTRICTION
+  subsystem (`setPlayerCardLimitation` -- forbid a specific suit/color pattern for a target
+  until end of turn) this engine has no equivalent of.
+- **He Taihou (Hà Thái Hậu, Qun, 3hp, formation.cpp)** -- ported with a NEW Qiluan (Khởi Loạn):
+  whenever she causes a kill, she may draw 3. This needed one genuinely new hook, `onKill(ctx,
+  self, killed, rng)`, fired on the credited killer's own skills from `Room.killPlayer` --
+  placed right alongside the existing Identity-only Rebel-kill-reward/Lord-punish-mistaken-kill
+  logic already living there, but deliberately mode-agnostic (fires in both Identity and
+  Hegemony, unlike its 2 neighbors). Real upstream actually delays the draw-offer until the end
+  of the killer's own NEXT turn; collapsed to an immediate offer right after the kill lands --
+  same precedent as collapsing Hengjiang/Wangxi's per-point-of-damage asks down to once per
+  event. Her 2nd skill Zhendu stays deferred: needs "force ANOTHER player to use a specific
+  card (Analeptic) on themselves", no such compulsion mechanic exists in this engine.
+- **Verification:** a throwaway script confirmed Qiluan draws exactly 3 on a credited kill, then
+  ran 6 full bot-vs-bot 8-player Hegemony games where Ma Dai or He Taihou was actually drafted
+  (including a real He Taihou-credited kill firing `onKill` through the genuine
+  `Room.killPlayer` path, not a mocked hook), each completing 28-80 turns with no crash. Live
+  Library check over a real WebSocket connection: 67 generals total, both new entries render
+  with correct kingdom/hp/skill text. `npx tsc --noEmit` clean.
+
+## Milestone 38 — DONE (2 more Hegemony-specific generals: Mi Furen/Sun Ce)
+
+User asked to keep porting (`Port thêm đi`). Re-scanned the Milestone 36/37 deferred list once
+more for skills blocked by a narrow, well-scoped gap rather than a genuinely new subsystem --
+found 2 more.
+
+- **Mi Furen (Mi Phu Nhân, Shu, 3hp, formation.cpp)** -- ported with a NEW Guixiu (Quy Tú):
+  draws 2 the instant either of her generals reveals. Needed one new hook,
+  `onGeneralRevealed(ctx, self)`, wired into `Room.runHegemonyReveal` right after the
+  main/deputy reveal flags flip -- computed as a set-difference of `player.skills` before vs.
+  after (so it correctly fires only for the skills whose visibility JUST changed, regardless of
+  whether Mi Furen was drafted as someone's main or deputy). Her 2nd skill Cunsi stays deferred
+  -- needs skill-transfer + voluntary self-general-removal, same reason Dong Zhuo's Baoling
+  stayed deferred at Milestone 36. Real upstream's OTHER Guixiu clause (heal 1 on her general
+  being forcibly removed) is a silent no-op here since this port has no general-removal
+  mechanic at all -- documented inline, not a bug.
+- **Sun Ce (Tôn Sách, Wu, 4hp, momentum.cpp, companions Chu Du/Thái Sử Từ/Đại Kiều)** -- ported
+  with a NEW Jiang (Cương): whenever he plays OR is targeted by a Duel or a RED Slash, he may
+  draw 1. Needed 2 hook changes: extended the existing `onAllySlashTargeted` (Milestone 36) with
+  the actual `slashCard` so a skill can check its suit, and added a brand-new
+  `onAllyDuelTargeted(ctx, self, target, source)` broadcast wired into `resolveDuel`'s very
+  start (Duel has no redirect/armor-nullify step to wait past, unlike Slash). His other 2 skills
+  stay deferred: Yingyang needs **pindian** (card-number comparison duels -- explicitly listed
+  as an unimplemented subsystem since Milestone 2.6); Hunshang needs dynamic runtime skill
+  acquire/detach (temporarily granting/revoking a DIFFERENT skill class mid-game).
+- 3 new companion pairs added to `gamerule.ts`'s `COMPANION_PAIRS`: Sun Ce/Chu Du, Sun Ce/Thái
+  Sử Từ, Sun Ce/Đại Kiều (all 3 already-ported Standard generals).
+- **Verification:** a throwaway script confirmed Guixiu draws exactly 2 via the real
+  `onGeneralRevealed` hook; Jiang draws exactly 1 when Sun Ce is targeted by a RED Slash or a
+  Duel (through the genuine `resolveSlash`/`resolveDuel` functions) but draws 0 on a BLACK
+  Slash -- proving the suit gate actually works, not just present. A separate integration
+  script ran 6 full bot-vs-bot 8-player Hegemony games with Mi Furen or Sun Ce drafted, each
+  completing 25-80 turns with no crash. Live Library check over a real WebSocket connection: 69
+  generals total, both new entries render with correct text. `npx tsc --noEmit` clean.
+
+## Milestone 39 — DONE (Yingyang/Zhendu round out Sun Ce/He Taihou's kits; fixed a real Identity-mode draft leak)
+
+User asked to keep porting (`Làm tiếp`). While researching, discovered `pindian` -- which
+Milestone 36-38's own README entries repeatedly cited as "unimplemented since Milestone 2.6" --
+was ACTUALLY added later (a shared `pindian()` helper already backs Zhurong's Lieren and Xun
+Yu's Quhu): that earlier claim was simply stale, never re-checked once the real implementation
+landed. This reopened Sun Ce's previously-deferred Yingyang. Also found and fixed a real
+regression while running the full `npm run sim` suite for the first time since Milestone 35
+(every milestone since had only been checked with this session's own scoped throwaway scripts,
+never the actual project test suite -- `testGeneralSkillsAppearInPlay` caught it immediately).
+
+- **Yingyang (Sun Ce's 2nd skill)** -- whenever Sun Ce is a party to ANY pindian (either side),
+  he may adjust his own effective comparison point by +3 or -3. Required generalizing the
+  shared `pindian()` helper itself with a new `onPindianVerifying(ctx, self, isInitiator)`
+  broadcast fired on both sides' skills right after cards are revealed but before the win/loss
+  compare -- Lieren/Quhu (the 2 existing pindian consumers) are unaffected since neither defines
+  the new hook. Sun Ce's kit is now 2 of his real 3 skills (Jiang from Milestone 38, Yingyang
+  now); Hunshang still deferred -- needs dynamic runtime skill acquire/detach.
+- **Zhendu (He Taihou's 1st skill, closing out her kit)** -- discard 1 of your own cards, choose
+  another player: they gain the real Analeptic Play-phase damage buff (reusing
+  `resolveAnalepticBuff`/`pendingSlashBonusDamage` directly), then immediately take 1 damage
+  from He Taihou. Previously deferred as needing "force another player to use a specific card";
+  on closer inspection, applying the buff directly and following with the damage is
+  behaviorally equivalent to upstream's forced-virtual-card-use approach (this port has no
+  card-limitation subsystem that could ever make the forced use fail anyway) -- no new engine
+  surface needed at all, just reusing an existing trick-card resolver. He Taihou's real 2-skill
+  kit is now fully ported.
+- **Real bug found+fixed: Hegemony-specific generals (Milestone 35-38's 9 additions) were
+  draftable in IDENTITY mode too.** `Room.candidateGenerals` never filtered by mode, so Zang
+  Ba/Li Dian/etc. could appear in a Vai Trò game's 3-candidate pick -- wrong, since upstream's
+  `momentum.cpp`/`formation.cpp` are Quốc Chiến-only content. Fixed with a new `GeneralDef.
+  hegemonyOnly` flag (set on all 9), filtered out of `candidateGenerals`'s pool whenever
+  `this.mode !== GameMode.Hegemony`. `testGeneralSkillsAppearInPlay`'s hardcoded 60-name
+  Identity-mode roster assertion (unrelated to this session's own work, never touched before)
+  is what caught it -- a reminder that this session's own throwaway verification scripts, while
+  each individually rigorous, never substituted for the real project regression suite.
+- **Verification:** a throwaway script confirmed `onPindianVerifying` actually fires through a
+  real `pindian()` call (exercised via Lieren's own real call site) and that Zhendu's discard→
+  buff→damage sequence lands exactly as designed. 6 full bot-vs-bot 8-player Hegemony games with
+  Sun Ce or He Taihou drafted (expanded kits) ran 33-80 turns with no crash. `npm run sim`
+  (the FULL existing regression suite, not just this session's own scripts) now passes clean --
+  `testGeneralSkillsAppearInPlay: 60 generals, 78 of 78 skill markers observed` confirms Identity
+  mode is back to exactly the 60 Standard generals, and `testPindianTieBreakFavorsOpponent`
+  confirms the `pindian()` refactor didn't disturb Lieren/Quhu's existing behavior. Live Library
+  check over a real WebSocket connection: still 69 generals total (this milestone only deepened
+  2 existing entries' kits, added none), Sun Ce/He Taihou both render their full 2-skill lists.
+  `npx tsc --noEmit` clean.
+
+## Milestone 40 — DONE (card-USE-restriction subsystem, closing out Ma Dai's Tiềm Tập/Qianxi)
+
+User explicitly asked to build this one (`Thêm cho đầy đủ đi` after being shown the full
+deferred-item scope assessment and offered "build the card-restriction subsystem, or stop
+here" as the choice). This is the first of the deferred blockers actually built rather than
+documented-and-skipped -- a real, if narrow, new subsystem, done deliberately (audited every
+call site rather than patching a few and hoping) precisely because a half-enforced restriction
+would be worse than none.
+
+- **`GamePlayer` gained `handColorForbidden`/`handColorForbiddenBy`** -- while set, the
+  restricted player may not USE or RESPOND WITH any HAND card of that color (equipped cards
+  stay usable, matching real Sanguosha's own "use,response" scope, not a blanket possession
+  ban). `handColorForbiddenBy` tracks who cast it so `Room.playTurn`'s own end-of-turn cleanup
+  can clear it on the right player at the right moment (the real rule's duration is "until the
+  CASTING player's own turn ends", not the restricted player's).
+- **`combat.ts` gained `usableHand(player)`/`isCardUsable(player, card)`** -- the actual
+  enforcement point. Audited and patched EVERY hand-card-availability helper in the file
+  (`findJinkLikeCard`, `findRescueCard`, `findSlashLikeCard`/`allSlashLikeCards`,
+  `findDismantlementLikeCard`/`allDismantlementLikeCards`, `findDuelLikeCard`/
+  `allDuelLikeCards`, `findIndulgenceLikeCard`/`allIndulgenceLikeCards`,
+  `findSupplyShortageLikeCard`/`allSupplyShortageLikeCards`, `findFireAttackLikeCard`/
+  `allFireAttackLikeCards`) to read through `usableHand` instead of raw `player.hand` -- this
+  alone covers Slash/Jink/Peach/Analeptic-as-rescue/Duel/Dismantlement/Snatch/Indulgence/
+  SupplyShortage/FireAttack, and by extension Savage Assault/Archery Attack's discard-to-avoid
+  choices (both already route through the same 2 finders). Then audited `room.ts` for every
+  OTHER direct `player.hand` scan used for "what can I use/respond with" and patched each:
+  Nullification/HegNullification's response find, `tryPlayOnce`/`tryPlayTargeted`'s default
+  `findCard` closures (covers Collateral/BefriendAttacking/IronChain/KnownBoth/Lightning/
+  AwaitExhausted/ExNihilo/SavageAssault/ArcheryAttack/GodSalvation/AmazingGrace, none of which
+  need a dedicated finder), the bot's own proactive equip/Peach-self-heal/Analeptic-buff loops,
+  and `computeLegalActions`'s entire legal-action list (both the equip loop and every direct
+  kind-filter) so the human freeform path shows the SAME restricted set the bot respects.
+  Deliberately NOT touched: hand count/`maxCards`, `discardDownToLimit`, and every proactive
+  SKILL-COST hand scan (Guidao/Duoshi/Zhijian/Qingcheng/Fanjian) -- real Sanguosha's own card
+  limitation system scopes to "use,response" of the matched card, not skill costs paid FROM
+  hand cards of that color, a different mechanic category entirely.
+- **Tiềm Tập/Qianxi (Ma Dai's 2nd skill, closing out his kit)**: at his own Start phase, may
+  judge a card (color only), then pick a player at EXACTLY distance 1 -- they're forbidden from
+  using/responding with any hand card of that color until Ma Dai's current turn ends.
+  `otherPhaseAction` at `Phase.Start`, reusing the existing `judge()`/`effectiveDistance`/
+  `askChooseAnyPlayer` helpers -- no new ask types needed, only the restriction machinery above.
+- **Verification:** a throwaway script confirmed the restriction end to end --
+  `findSlashLikeCard`/`findJinkLikeCard` correctly skip a forbidden-color card and find the
+  eligible one instead, `usableHand`/`isCardUsable` agree, and Qianxi's own judge+target+apply
+  sequence lands on the right victim. 6 full bot-vs-bot 8-player Hegemony games with Ma Dai
+  drafted (his full kit now live, including the restriction firing during real Play/Discard
+  phases against real opponents) ran 19-54 turns with no crash. Critically, **the FULL existing
+  `npm run sim` regression suite (94 tests) still passes clean** after this invasive multi-file
+  refactor touching ~25 call sites across `combat.ts`/`room.ts` -- including
+  `testGeneralSkillsAppearInPlay` (60/60 Standard generals + all 78 skill markers still fire in
+  Identity mode, confirming the `usableHand` passthrough is a true no-op for every player who
+  was never restricted) and `testCrossbowRemovesTheSlashLimitInFreeformPlay`/
+  `testSpearOfferedAsFreeformActionEvenWithARealSlashHeld` (the freeform human path's
+  `computeLegalActions` rewrite didn't regress anything already covered). Live Library check
+  over a real WebSocket connection: still 69 generals total, Ma Dai renders both skills with
+  correct Vietnamese text. `npx tsc --noEmit` clean.
+
+
+## Milestone 41 — DONE (Jiang Wei's Tiaoxin, Cao Hong's Huyuan)
+
+User asked to keep porting (`Tiếp đi`). Continued the "partial port a general on its one
+tractable skill, document the rest as deferred" pattern established since Milestone 36's Li
+Dian, from `formation.cpp`.
+
+- **Tiaoxin/Khiêu Hấn (Jiang Wei, `shu`, 4 HP)** -- once per Play phase, pick a target within
+  Jiang Wei's own effective attack range: that target may respond by actually USING a real
+  Slash against Jiang Wei (reusing `resolveSlash` directly -- same "reuse the real card
+  resolver instead of faking the effect" precedent as Lijian's Duel-substitution), or, if they
+  decline or hold none, Jiang Wei force-discards 1 of their cards of his own choosing (via the
+  shared `forcedDiscardOne` helper, already built for Milestone 36's Fenming). Deferred: Yizhi
+  (grants Guanxing only while Jiang Wei specifically occupies the DEPUTY slot of a companion
+  pair -- no clean "which slot is this skill instance attached to" API exists in the engine
+  yet) and Tianfu (a BattleArraySkill/formation-based skill -- same excluded mechanic category
+  as Zhang Ren's Fengshi and now Cao Hong's Heyi below). Real upstream also shaves -1 off the
+  combined pair's max HP whenever Jiang Wei is deputy (`setDeputyMaxHpAdjustedValue`) -- a
+  minor balance nuance, not modeled, not a blocking mechanic.
+- **Huyuan/Hộ Viện (Cao Hong, `wei`, 4 HP, companion Cao Nhân/caoren)** -- at his own Finish
+  phase, may give 1 held equip card to any other player (reusing `ctx.equipPlayer`, same as
+  Zhijian's own equip-gift), then pick a player at EXACTLY distance 1 of the RECIPIENT (not
+  necessarily Cao Hong himself) to force a discard from, again via `forcedDiscardOne`. Deferred:
+  Heyi and Feiying, both BattleArraySkill (formation) -- the mechanic definition wasn't found in
+  either source file read, refusing to guess-implement it.
+- No new engine hooks needed -- both skills compose entirely out of existing machinery
+  (`resolveSlash`, `ctx.equipPlayer`, `forcedDiscardOne`, `effectiveDistance`/
+  `effectiveAttackRange`, `usableHand` for Huyuan's equip-card filter).
+- **Verification:** a throwaway script exercised both skills directly -- Tiaoxin's armed-target
+  branch confirmed Jiang Wei actually lost HP from a real resolved Slash, its unarmed-target
+  branch confirmed a forced discard instead; Huyuan confirmed the chosen recipient's equip zone
+  actually received the card and the card left Cao Hong's hand. 6 full bot-vs-bot 8-player
+  Hegemony games drafting Jiang Wei and/or Cao Hong (main or deputy slot) ran 38-80 turns with
+  no crash. The full existing `npm run sim` regression suite (94 tests) still passes clean --
+  no regressions from reusing `resolveSlash`/`equipPlayer` in a new context. Live Library check
+  over a real WebSocket connection: 71 generals total (69 -> 71), both new generals render with
+  correct Vietnamese skill names/descriptions. `npx tsc --noEmit` clean.
+
+## Milestone 42 — DONE (Dong Zhuo's Hengzheng, Jiang Qin's Shangyi -- completes the momentum.cpp/formation.cpp roster assessment)
+
+User asked to port all remaining generals (`Tiếp tục port các tướng chưa có còn lại`). Went back
+to the 2 upstream source files (`momentum.cpp`, `formation.cpp`) and enumerated literally every
+`new General(...)` in both, cross-checked against the roster -- the only 3 characters left
+untouched were Dong Zhuo, Zhang Ren, and (from `formation.cpp`) Deng Ai/Jiang Qin/Yu Ji. Read
+every one of their skill classes end to end before deciding what's portable.
+
+- **Hengzheng (Dong Zhuo, `qun`, 4 HP)** -- at the start of his own Draw phase, if he's
+  empty-handed or at exactly 1 HP, may take 1 card (his own choice, hand/equip/judge-area) from
+  EVERY other player who holds any. `otherPhaseAction` at `Phase.Draw`. The real skill's scope is
+  hand+equip+JUDGE zone ("hej") -- this port is the first to actually reach into
+  `GamePlayer.judgeArea` for a steal-like effect (Snatch itself only ever offered hand+equip).
+  Deferred: Baoling (only functions while Dong Zhuo is specifically the MAIN/head-slot general
+  -- same position-dependent-skill blocker as Jiang Wei's Yizhi) and Benghuai, which Baoling
+  dynamically grants via a voluntary discard-his-own-deputy-general choice (the same unbuilt
+  "voluntary self-general-removal" subsystem Mi Furen's Cunsi/Sun Ce's Hunshang are already
+  deferred for) -- moot without Baoling ever firing.
+- **Shangyi (Jiang Qin, `wu`, 4 HP, companion Chu Thái/zhoutai)** -- once per Play phase, pick a
+  target with any hand card or a still-hidden general, then choose to either (a) privately view
+  their hand and discard 1 BLACK card from it, or (b) privately view one of their still-hidden
+  generals. Reuses KnownBoth's exact `askKnownBothChoice`/`revealPrivately` infra (Milestone 31)
+  instead of inventing a parallel private-info channel -- zero new engine hooks needed. One
+  faithful simplification: real Shangyi's "view a hidden general" branch reveals BOTH still-
+  hidden generals at once; this port reuses KnownBoth's own one-slot-at-a-time choice instead.
+  Deferred: Niaoxiang, a BattleArraySkill (formation) -- same excluded category as Zhang Ren's
+  Fengshi and Cao Hong's Heyi.
+- **Zhang Ren stays fully deferred** -- both his skills are blocked: Chuanxin's own effect forces
+  the DAMAGED player to choose between "discard all equipment + lose 1 HP" or "remove your own
+  deputy general" (the same self-general-removal subsystem above), and that choice isn't
+  cleanly reducible to just the first option (dropping it would silently disable the skill
+  exactly when a target legitimately has no equipment to discard); Fengshi is BattleArraySkill.
+- **Deng Ai stays fully deferred** -- his real kit (Tuntian/TuntianPostpone/TuntianGotoField/
+  TuntianDistance/Jixi/Ziliang) is built around a brand new "field" pile: cards judged off his
+  own hand/equip losses accumulate in a persistent per-player pile that both reduces his
+  effective distance to everyone (read by a `DistanceSkill`) and gets spent by 2 further skills
+  as a Snatch-like view-as source -- a genuinely new pile type, a new "any card leaving hand/
+  equip" interception point, and a distance-correction hook, all for a skill cluster where the
+  other 2 pieces (Jixi, Ziliang) are ADDITIONALLY head/deputy-position-gated (the same blocker
+  Jiang Wei's Yizhi and Dong Zhuo's Baoling already hit). Not worth building the whole pile
+  subsystem for a skill whose 2 real payoffs are independently blocked anyway.
+- **Yu Ji stays fully deferred** -- Qianhuan needs its own new "sorcery" pile (suit-deduplicated,
+  filled by a judgment draw whenever an ally is damaged) AND a pre-resolution "remove exactly
+  one target from a card's target list before it resolves" hook that doesn't exist yet (distinct
+  from the existing reactive `onAllySlashTargeted`/`onAllyDuelTargeted` hooks, which fire AFTER
+  targeting is locked in, not before) -- refusing to guess-implement a new interception point.
+- **Roster assessment complete**: every `new General(...)` in both `momentum.cpp` and
+  `formation.cpp` has now been read and individually resolved -- fully ported, partially ported
+  with the rest documented, or fully deferred with a specific reason. Nothing in either file is
+  unassessed. The only characters skipped outright are `lord_zhangjiao`/`lord_liubei` (lord-only
+  generals -- Hegemony mode has no monarch role at all, so these simply don't apply, not a
+  deferred-for-a-reason case).
+- **Verification:** a throwaway script confirmed Hengzheng's gate (no-op at full HP with cards
+  in hand; fires and takes exactly 1 card from each of 2 other players, including a judge-area
+  card, when kongcheng) and Shangyi's both branches (handcards branch privately reveals the
+  hand exactly once and discards exactly 1 black card leaving the red one; general branch
+  privately reveals the correct hidden general name exactly once). 10 full bot-vs-bot 8-player
+  Hegemony games drafting Dong Zhuo and/or Jiang Qin (alongside Jiang Wei/Cao Hong from
+  Milestone 41) ran 18-66 turns with no crash. The full existing `npm run sim` regression suite
+  (94 tests) still passes clean. Live Library check over a real WebSocket connection: 73
+  generals total (71 -> 73), both new generals render with correct Vietnamese skill names/
+  descriptions. `npx tsc --noEmit` clean.
+
+## Milestone 43 — DONE (first 4 generals from transformation.cpp: Xun You, Li Guo, Ma Su, Ling Tong)
+
+User asked to keep porting (`Tiếp đi`). With `momentum.cpp`/`formation.cpp` fully assessed
+(Milestone 42), moved to `transformation.cpp` -- the package headlined by Zuo Ci's Huashen, a
+whole-general skill-ACQUISITION mechanic (pick random unused generals, dynamically gain their
+entire non-lord skillset, re-rollable on demand) that's genuinely the "unbuilt deputy-general-
+transform subsystem" this package has been deferred for since Milestone 36. Read all 9 generals'
+skill classes end to end; 4 of them turned out to have at least 1 real skill that never touches
+that subsystem at all.
+
+- **Zhiyu (Xun You, `wei`, 3 HP, companion Tuân Úc/xunyu)** -- after taking damage, draws 1 card;
+  if his hand is then a single color (all red or all black), the damage's source discards 1 of
+  their own choosing. `onDamaged` reuse (same self-reactive hook as Ganglie/Fankui/Jianxiong).
+  Deferred: Qice, a guhuo-style "recast any played trick card as a DIFFERENT trick card type"
+  mechanic that ALSO calls `transformDeputyGeneral` on use -- both unbuilt subsystems.
+- **Xichou (Li Guo, `qun`, 4 HP, companion Giả Hủ/jiaxu)** -- compulsory: the instant he reveals,
+  +2 max HP and heals 2. `onGeneralRevealed` reuse (Milestone 38). Deferred: the rest of the real
+  skill -- for the remainder of the game, the FIRST card he plays/responds with each Play phase
+  locks a color, and any DIFFERENT-colored card use/response that same phase costs him 1 HP --
+  needs a broad per-turn card-color interception across every use/response call site (the same
+  scale of sweep Milestone 40's card-restriction subsystem needed), not attempted speculatively.
+- **Sanyao + Zhiman (Ma Su, `shu`, 3 HP, no companion in upstream)** -- his full kit, minus one
+  bonus clause:
+  - Sanyao: ONCE PER GAME (not per turn -- a new `GamePlayer.sanyaoUsed` flag, since every other
+    `activeAction` skill so far only needed the engine's existing once-per-Play-phase loop),
+    discard 1 card to deal 1 damage to whoever currently has the highest HP among himself and his
+    allies.
+  - Zhiman: whenever he damages someone else, may mark them (new `GamePlayer.zhimanMarkedBy`);
+    the next time he damages that SAME already-marked player, the mark clears and he
+    automatically takes 1 of their equipped/judge-area cards (no ask -- matches real upstream's
+    payoff half, which has no invoke cost of its own). `onDamageDealt` reuse. Dropped: the real
+    payoff's bonus ally deputy-general-transform offer -- same unbuilt subsystem as Qice above.
+- **LieFeng (Ling Tong, `wu`, 4 HP, companion Cam Ninh/ganning)** -- whenever ANY of his own
+  equipped cards leaves his equip zone (discarded, snatched, destroyed -- matches real
+  upstream's unconditional trigger scope), may force 1 other player (his own choice, hand or
+  equip) to discard 1 card. `onEquipLost` reuse (Milestone 34's SilverLion hook, already fires
+  for every equip-zone departure regardless of reason). Deferred: Xuanlue, a complex once-per-
+  game multi-step "steal 1-3 equipped cards from anyone, redistribute them into empty equip
+  slots across the whole table" interactive flow -- not attempted this round.
+- **Bian Huanghou, Zuo Ci, Sha Moke, Lu Fan stay fully deferred**: Bian Huanghou's Wanwei needs
+  the same pre-resolution "cancel myself as a target before a card resolves" hook Yu Ji's
+  Qianhuan is already deferred for, and her Yuejian needs a broad "did I use a card targeting
+  someone else this turn" interception; Zuo Ci's Huashen/Xinsheng ARE the package's namesake
+  transform subsystem; Sha Moke's entire "jili" skill is one compound mechanic split across 3
+  classes (an always-on extra-Slash-target `TargetModSkill` this engine has no framework for,
+  inseparable from its card-draw payoff -- porting only the draw half would misrepresent a
+  general players know for BOTH halves); Lu Fan's Diaodu is a complex chained multi-player
+  equip-give flow and Diancai needs broad off-turn card-loss tracking. `lord_sunquan` is
+  lord-only -- Hegemony mode has no monarch role at all, so it simply doesn't apply, same as
+  `lord_zhangjiao`/`lord_liubei` from the previous 2 packages.
+- **Verification:** a throwaway script exercised all 5 new skill functions directly -- Zhiyu's
+  monochrome-vs-mixed hand branches, Xichou's reveal bonus, Sanyao's once-per-game gate (never
+  offers a target again after first use) and damage-to-highest-HP-ally targeting, Zhiman's
+  mark-then-payoff 2-hit sequence (equip taken only on the SECOND hit from the SAME source), and
+  LieFeng's equip-departure trigger. 10 full bot-vs-bot 8-player Hegemony games drafting Xun You/
+  Li Guo/Ma Su/Ling Tong ran 23-80 turns with no crash. The full existing `npm run sim`
+  regression suite (94 tests) still passes clean. Live Library check over a real WebSocket
+  connection: 77 generals total (73 -> 77), all 4 render with correct Vietnamese skill names/
+  descriptions. `npx tsc --noEmit` clean.
+
+## Milestone 44 — DONE (new pre-resolution target-cancel hook, unlocks Bian Huanghou's Wanwei)
+
+User asked to keep porting (`Tiếp tục đi`). With every general in `momentum.cpp`/`formation.cpp`/
+`transformation.cpp` individually assessed (Milestones 42-43), the remaining 4 (Bian Huanghou,
+Zuo Ci, Sha Moke, Lu Fan) were each blocked on a genuinely new subsystem. Explicitly asked the
+user which one to invest in (matching Milestone 40's precedent of asking before building
+something wide-reaching rather than silently picking) -- user chose the target-cancel hook.
+
+- **New `Skill.onTrickTargetCancelling` hook**: fired on a Dismantlement/Snatch TARGET's own
+  skills right before either card resolves against them, one skill at a time; the first truthy
+  return cancels the whole card. Both cards are single-target-only in this engine, so "remove
+  this one target" and "the card fizzles" are the same outcome -- no need for a fully generic
+  multi-target-splicing subsystem to serve what currently calls this. Wired into
+  `trick.ts`'s `resolveDismantlement`/`resolveSnatch`, right at their top, before either
+  function does anything else.
+- **Wanwei (Bian Huanghou, `wei`, 3 HP, companion Tào Tháo/caocao)** -- when Dismantlement or
+  Snatch targets her, she may pay a card to cancel herself as its target: Dismantlement, discard
+  1 of her own cards; Snatch, give 1 of her own cards to whoever used it (matches the real
+  rule's flavor difference between the 2 costs exactly). Deferred: Yuejian, her other real skill
+  (an ally who targeted someone else this turn gets a raised hand-size limit at their own
+  Discard phase) -- needs a broad "did I use a card targeting someone else this turn"
+  interception across every card-use call site, not attempted this round.
+- **Yu Ji's Qianhuan is now blocked on ONE less thing**: the target-cancel mechanic it needs is
+  no longer missing, but its OWN version is broader (any single-target non-equip/non-skill card,
+  not just Dismantlement/Snatch; reacts on behalf of an ALLY, not self; paid from a dedicated new
+  "sorcery" pile, not hand cards) -- deliberately didn't over-generalize this round's hook to
+  guess at that shape speculatively. Yu Ji stays deferred pending the sorcery pile.
+- **Zuo Ci, Sha Moke, Lu Fan, and `lord_sunquan` stay fully deferred** -- unrelated blockers this
+  milestone doesn't touch: Huashen is the package's namesake deputy-general-transform mechanic
+  (and would ALSO need the still-unbuilt position-dependent-skill-grant API on top, since
+  acquired skills attach to whichever slot Zuo Ci occupies); Sha Moke's Jili is one compound
+  mechanic needing an always-on extra-Slash-target framework this engine hardcodes against
+  (`resolveSlash` assumes exactly 1 target throughout); Lu Fan needs a multi-player equip-give
+  flow and broad off-turn card-loss tracking; `lord_sunquan` is lord-only.
+- **Verification:** a throwaway script exercised `resolveDismantlement`/`resolveSnatch` directly
+  -- Wanwei cancels both (discard branch for Dismantlement, give-away branch for Snatch,
+  confirmed the card lands in the right place each way), declining lets the card resolve
+  normally, and a player WITHOUT Wanwei is completely unaffected (true no-op regression check on
+  the new hook's empty-skills path). 8 full bot-vs-bot 8-player Hegemony games drafting Bian
+  Huanghou ran 21-72 turns with no crash. Because this touches the shared resolution path both
+  Dismantlement AND Snatch use for EVERY player in EVERY game mode, the full existing `npm run
+  sim` regression suite (94 tests) was run and still passes clean -- confirms the new hook is a
+  true no-op for the other 76 generals. Live Library check over a real WebSocket connection: 78
+  generals total (77 -> 78), Bian Huanghou renders with correct Vietnamese skill name/
+  description. `npx tsc --noEmit` clean.
+
+## Milestone 45 — DONE (new multi-target-Slash subsystem, unlocks the target-count half of Sha Moke's Jili)
+
+User asked to keep porting (`Tiếp tục`). With Bian Huanghou's blocker resolved (Milestone 44),
+asked again which of the 3 remaining generals' subsystems to invest in -- user picked the
+multi-target-Slash framework for Sha Moke's Jili. Mid-build, discovered Jili is actually a
+COMPOUND skill split across 3 upstream classes (JiliTM: extra targets from weapon range;
+JiliRecord + Jili: mark non-skill cards played/responded this Play phase, draw that many when
+the count hits the weapon's range exactly) -- the 2nd half needs the SAME broad "every card
+played or responded with" interception already deferred for Xichou/Yuejian/Diancai, so this
+milestone only delivers the 1st half (the actual "multi-target Slash" ask), not the whole skill.
+Corrected that scope honestly rather than silently stretch the deliverable to match the
+original framing.
+
+- **New multi-target-Slash subsystem** -- this engine hardcoded Slash to exactly 1 target
+  throughout `resolveSlash` and every call site until now:
+  - `Skill.extraSlashTargets?(ctx, player): number` -- how many EXTRA targets `player` may pick
+    for a single Slash use right now, on top of the normal 1.
+  - `combat.ts`'s `maxSlashTargets(ctx, player)` -- sums every skill's contribution + 1.
+  - `Controller.chooseExtraSlashTargets(actor, primary, candidates, maxExtra)` -- asks for
+    0..`maxExtra` ADDITIONAL distinct targets beyond the primary (already chosen the normal way
+    via `chooseSlashTarget`). Bot policy: greedy, always fills every extra slot available.
+    Human policy: a new `chooseExtraSlashTargets` WS message + a toggle-multi-select-then-
+    confirm client prompt (`showExtraSlashTargetsPicker`, mirrors the reveal prompt's "click
+    several buttons then confirm" pattern) -- new, but not click-tested live in a browser this
+    round (every other verification below IS exercised end to end; this one narrow prompt's
+    client wiring is checked by syntax validation only, and a human seat without it working
+    would just silently fall back to the bot's own greedy policy via the existing
+    `{...makeBotController(), ...humanPartial}` merge -- never broken, at worst less clever).
+  - `room.ts`'s `maybeResolveExtraSlashTargets` -- called right after `resolveSlash` resolves
+    the primary target in BOTH `tryPlaySlash` and `trySpearSlash`; the SAME played card then
+    resolves again against each extra target too (a target-COUNT modifier, not extra physical
+    cards -- matches the real rule exactly).
+- **Jili (Sha Moke, `shu`, 4 HP, no companion in upstream)** -- while wielding a weapon, may
+  target up to (1 + that weapon's range) players with a single Slash use. Deferred: the card-
+  count-tracking draw payoff described above -- needs the broad per-turn interception, not
+  attempted this round.
+- **Zuo Ci and Lu Fan stay fully deferred**, along with `lord_sunquan` (lord-only) -- unchanged
+  from Milestone 44's assessment.
+- **Verification:** a throwaway script confirmed `maxSlashTargets` directly (weaponless = 1,
+  weapon range N = 1+N, and critically that a player WITHOUT Jili is completely unaffected by
+  their own weapon range), then ran the FULL engine end to end -- a real `Room.tryPlaySlash`
+  call with Sha Moke wielding a range-2 weapon actually dealt damage to 3 distinct targets
+  (1 primary + 2 extras) from a SINGLE physical Slash card consumed exactly once from hand. 8
+  full bot-vs-bot 8-player Hegemony games drafting Sha Moke ran 22-78 turns with no crash.
+  Because this touches the shared Slash-resolution path used by EVERY Slash in EVERY game mode,
+  the full existing `npm run sim` regression suite (94 tests) was run and still passes clean --
+  confirms the new subsystem is a true no-op for the other 78 generals. Live Library check over
+  a real WebSocket connection: 79 generals total (78 -> 79), Sha Moke renders with correct
+  Vietnamese skill name/description. `npx tsc --noEmit` clean; the client's new JS was also
+  syntax-validated (`new Function(...)` on the extracted script block).
+
+## Milestone 46 — DONE (Pang Tong's Lianhuan -- a stale-documentation catch, not a new subsystem)
+
+User asked to keep porting (`Tiếp tục`) but picked "switch to a different webport category, not
+more general porting" once told the only 2 remaining generals (Zuo Ci, Lu Fan) each need 2
+separate large subsystems. Went hunting through every OTHER already-ported general's own
+documented deferred-skill reasons instead, looking for anything whose blocker had quietly become
+stale since it was originally written. Found one: Pang Tong's Lianhuan was deferred with "needs
+the Iron Chain trick card (not ported)" -- but the Iron Chain trick card was actually built back
+in Milestone 30 (it's been playable by every OTHER general as a real physical card ever since);
+nobody had gone back to wire Lianhuan's `viewAs` conversion up to it. A real gap, not a new
+subsystem -- same "reuse over reinvention" category as every other partial-port completion this
+session, just triggered by documentation archaeology instead of upstream source reading.
+
+- **New `Skill.canViewAsIronChain` hook** + `combat.ts`'s `findIronChainLikeCard`/
+  `allIronChainLikeCards` -- exact same shape as every other `canViewAsX`/`findXLikeCard` pair
+  already in the file (Dismantlement/Duel/Indulgence/SupplyShortage). Wired into `room.ts`'s
+  fixed-pass IronChain call (now passes a real `findCard` override instead of defaulting to
+  "real card only") and the freeform legal-actions builder (now `allIronChainLikeCards` instead
+  of a raw `hand.filter`).
+- **Lianhuan (Pang Tong, `shu`, 3 HP)** -- any Club-suited hand card may be played or responded
+  with as if it were IronChain. Pang Tong's kit is now COMPLETE (Niết Bàn + Liên Hoàn, both his
+  real skills).
+- **Verification:** a throwaway script confirmed `findIronChainLikeCard`/`allIronChainLikeCards`
+  respect the new gate (a Club card is found for a Lianhuan-holder, the same card is invisible
+  to a player without the skill), then drove a real `Room.tryPlayTargeted` call end to end -- a
+  Club-suited Peach actually got played as IronChain, chained exactly 1 player, and was spent
+  from hand. 6 full bot-vs-bot 6-player Identity games drafting Pang Tong ran 17-60 turns with
+  no crash (exercising the real automatic-pass `playTurn` route, not just the hand-rolled call
+  above). The full existing `npm run sim` regression suite (94 tests) still passes clean. Live
+  Library check over a real WebSocket connection: still 79 generals total (no new general this
+  time, an existing one got completed) -- Pang Tong now shows both skills with correct
+  Vietnamese names/descriptions. `npx tsc --noEmit` clean.
+
+## Milestone 47 — DONE (Li Dian's Xunxun -- a small dedicated ask, not a stretch of Guanxing)
+
+User asked to keep going (`Làm đi`) after the Lianhuan documentation catch. Kept auditing every
+other already-ported general's deferred-skill reasons for anything genuinely small and buildable
+now, rather than more speculative large subsystems. Found Li Dian's Xunxun: deferred as "needs a
+reveal-4/split-exactly-2-to-hand-2-to-bottom ask Guanxing's own arrange-ask doesn't match" --
+re-read Xunxun's real upstream source (`momentum.cpp`) to confirm exactly HOW it differs from
+Guanxing (Guanxing only ever rearranges the pile, cards never leave it; Xunxun sends exactly 2 of
+the 4 revealed cards to HAND, permanently leaving the pile) and built the small dedicated ask the
+original assessment said was missing, instead of trying to force-fit Guanxing's existing one.
+
+- **New `askXunxunKeep`/`resolveXunxunSplit` EngineContext hooks** (`combat.ts`) + matching
+  `Controller.chooseXunxunKeep` (bot: keeps the 2 most valuable of the 4, reusing
+  `pickLeastImportantCards`; human: a new WS ask, fallback keeps the first 2 on disconnect since
+  the skill's own invoke already committed to a mandatory split by the time this ask fires) +
+  `Room.resolveXunxunSplit` (a new small primitive, deliberately NOT built on top of `arrangeTop`
+  -- that one assumes every peeked card gets placed back somewhere in the pile, which doesn't
+  hold once some of them leave for hand instead).
+- **Xunxun (Li Dian, `wei`, 3 HP, companion Nhạc Tiến/yuejin)** -- at his own Draw phase, may
+  peek the top 4 cards of the draw pile, keep exactly 2 into hand, bury the other 2 at the
+  bottom. Li Dian's kit is now COMPLETE (Vong Khích + Tuần Tuần, both his real skills).
+- **Verification:** a throwaway script drove a real `Room` with a hand-seeded draw pile end to
+  end -- confirmed the exact 4 peeked cards split correctly (the 2 chosen landed in hand in the
+  right order, the other 2 ended up buried at the bottom, and a 5th unpeeked card underneath
+  stayed completely untouched), and that declining the initial ask is a true no-op on both hand
+  and pile. 6 full bot-vs-bot 8-player Hegemony games drafting Li Dian ran 12-68 turns with no
+  crash. The full existing `npm run sim` regression suite (94 tests) still passes clean. Live
+  Library check over a real WebSocket connection: still 79 generals total (an existing one
+  completed, not a new draft entry) -- Li Dian now shows both skills with correct Vietnamese
+  names/descriptions. `npx tsc --noEmit` clean (also caught and fixed a missing stub in
+  `simulate.ts`'s own hand-rolled test `EngineContext`, which doesn't go through `Room.
+  makeContext` and needed the 2 new hooks added there too).
+
 ## Deploy
 
 This is a single stateless Node process (`src/server.ts`) with everything in memory -- no

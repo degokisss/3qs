@@ -7,13 +7,13 @@ import strict from "node:assert/strict";
 import { Card, CardKind, Suit, buildStandardDeck } from "./card.js";
 import { Room } from "./room.js";
 import { GamePlayer } from "./player.js";
-import { EngineContext, SUIT_LABEL_VI, allIndulgenceLikeCards, allSlashLikeCards, effectiveAttackRange, effectiveDistance, findIndulgenceLikeCard, findJinkLikeCard, findSlashLikeCard, judge, loseHp, resolveSlash } from "./combat.js";
+import { EngineContext, PrivateReveal, SUIT_LABEL_VI, allIndulgenceLikeCards, allSlashLikeCards, applyDamage, detachCardFrom, effectiveAttackRange, effectiveDistance, findIndulgenceLikeCard, findJinkLikeCard, findSlashLikeCard, judge, loseHp, resolveSlash } from "./combat.js";
 import { GENERALS, SKILLS } from "./skill.js";
 import { pickLeastImportantCards, slashCandidates } from "./controller.js";
-import { attachIndulgence, duelCandidates, resolveArcheryAttack, resolveDismantlement, resolveDuel, resolveIndulgenceJudgment, resolveSavageAssault, resolveSnatch, snatchCandidates } from "./trick.js";
-import { GameMode, Phase, Role } from "./types.js";
+import { attachIndulgence, befriendAttackingCandidates, duelCandidates, resolveArcheryAttack, resolveBefriendAttacking, resolveDismantlement, resolveDuel, resolveIndulgenceJudgment, resolveKnownBoth, resolveSavageAssault, resolveSnatch, snatchCandidates } from "./trick.js";
+import { DamageNature, GameMode, Phase, Role } from "./types.js";
 import { KINGDOMS, assignHegemonyFaction, checkHegemonyWinCondition, combineHegemonyHp, isAlly, isCompanionPair } from "./gamerule.js";
-const DECK_SIZE = 54 + 19 + 16; // basics(Slash-family 29+Jink 14+Peach 8+Analeptic 3) + implemented tricks(19, incl. 2 Indulgence + 2 SupplyShortage) + equips(10 weapons+6 horses), see card.ts
+const DECK_SIZE = 54 + 34 + 20; // basics(Slash-family 29+Jink 14+Peach 8+Analeptic 3) + implemented tricks(34, incl. 2 Indulgence + 2 SupplyShortage + 2 FireAttack + 1 Lightning + 1 Collateral + 1 BefriendAttacking + 2 AwaitExhausted + 3 IronChain + 1 Nullification + 2 HegNullification + 2 KnownBoth) + equips(10 weapons+6 horses+4 armors, see card.ts's ARMORS -- Milestone 34)
 
 function playerIds(n: number): string[] {
   return Array.from({ length: n }, (_, i) => `P${i + 1}`);
@@ -31,19 +31,31 @@ function seededRng(seed: number): () => number {
   };
 }
 
+/** Jiling's Shuangren (Milestone 25) can synthesize a free virtual Slash with no backing
+ *  physical card (see card.ts's `makeVirtualSlash`) -- it lands in the discard pile like any
+ *  other played card, but was never part of the dealt deck, so it's excluded from every bucket
+ *  it could ever end up in, not just the discard pile: a reshuffle (`Room.drawOne`) sweeps the
+ *  ENTIRE discard pile -- virtual cards included -- back into the draw pile, from which it can
+ *  then be drawn into a real hand (or even become one of Zhou Tai's Buqu "Sang", since
+ *  `ctx.drawTop()` also just pops the draw pile) exactly like any other card. Excluding it only
+ *  from `discardPile` (the original, narrower version of this helper) left it silently
+ *  DOUBLE-COUNTED the instant it got reshuffled into `drawPile` -- a real bug in this TEST
+ *  HELPER (not the engine itself), found live by Milestone 29's larger deck/roster shifting
+ *  seed 1's RNG stream onto a game where Jiling actually drafted, played Shuangren, and the
+ *  draw pile emptied out later in the same turn -- same "newly exposed by a roster/deck-size
+ *  change" pattern Milestone 26 already hit for a real engine bug. */
 function totalCardsInPlay(room: Room): number {
-  const inHands = room.players.reduce((sum, p) => sum + p.handcardNum, 0);
+  const real = (c: { virtual?: boolean }) => !c.virtual;
+  const inHands = room.players.reduce((sum, p) => sum + p.hand.filter(real).length, 0);
   const equipped = room.players.reduce(
-    (sum, p) => sum + (p.weapon ? 1 : 0) + (p.defenseHorse ? 1 : 0) + (p.offenseHorse ? 1 : 0),
+    (sum, p) => sum + (p.weapon ? 1 : 0) + (p.armor ? 1 : 0) + (p.defenseHorse ? 1 : 0) + (p.offenseHorse ? 1 : 0),
     0,
   );
-  const judged = room.players.reduce((sum, p) => sum + p.judgeArea.length, 0);
-  // Jiling's Shuangren (Milestone 25) can synthesize a free virtual Slash with no backing
-  // physical card (see card.ts's `makeVirtualSlash`) -- it lands in the discard pile like any
-  // other played card, but was never part of the dealt deck, so it's excluded here rather than
-  // drifting the expected DECK_SIZE total upward every time the skill actually fires.
-  const realDiscarded = room.discardPile.filter((c) => !c.virtual).length;
-  return inHands + equipped + judged + room.drawPile.length + realDiscarded;
+  const judged = room.players.reduce((sum, p) => sum + p.judgeArea.filter(real).length, 0);
+  const buqued = room.players.reduce((sum, p) => sum + p.buquPile.filter(real).length, 0);
+  const realDiscarded = room.discardPile.filter(real).length;
+  const realDrawPile = room.drawPile.filter(real).length;
+  return inHands + equipped + judged + buqued + realDrawPile + realDiscarded;
 }
 
 async function testRoleDistribution(): Promise<void> {
@@ -209,6 +221,12 @@ async function testFreeformPlayLetsHumanChooseCardsAndPlayDuplicates(): Promise<
   const room = new Room(playerIds(8), seededRng(1));
   await room.pickGenerals();
   const lord = room.players.find((p) => p.role === Role.Lord)!;
+  // Neutralize whichever general this seed's shifted deck-size RNG happens to draft onto the
+  // lord (e.g. Ganfuren's Shenzhi: discards the ENTIRE hand at Start phase, before this test's
+  // seeded cards ever reach the Play phase this test actually exercises) -- this test is about
+  // generic freeform-play mechanics, not any specific general's skill, same "newly exposed by a
+  // deck-size change" class of fragility totalCardsInPlay's own header already documents.
+  lord.skills = [];
   const deck = buildStandardDeck();
   const exNihilo1 = deck.find((c) => c.kind === CardKind.ExNihilo)!;
   const exNihilo2 = deck.find((c) => c.kind === CardKind.ExNihilo && c.id !== exNihilo1.id)!;
@@ -258,6 +276,9 @@ async function testEquipTriggersLiveUpdateCallback(): Promise<void> {
   const room = new Room(playerIds(8), seededRng(1));
   await room.pickGenerals();
   const lord = room.players.find((p) => p.role === Role.Lord)!;
+  lord.skills = []; // neutralize whichever general this seed's shifted deck-size RNG drafts
+  // onto the lord (e.g. Ganfuren's Shenzhi: discards the entire hand at Start phase before this
+  // test's seeded weapon ever reaches Play phase) -- generic mechanics test, not general-specific
   const deck = buildStandardDeck();
   const weapon = deck.find((c) => c.kind === CardKind.Weapon)!;
   lord.hand = [weapon];
@@ -312,6 +333,8 @@ async function testSlashTriggersLiveUpdateCallback(): Promise<void> {
   const room = new Room(playerIds(8), seededRng(1));
   await room.pickGenerals();
   const lord = room.players.find((p) => p.role === Role.Lord)!;
+  lord.skills = []; // same "neutralize the randomly-drafted general" reasoning as
+  // testEquipTriggersLiveUpdateCallback above
   const deck = buildStandardDeck();
   const slash = deck.find((c) => c.kind === CardKind.Slash)!;
   lord.hand = [slash];
@@ -377,6 +400,10 @@ async function testFreeformPlayAOECardIsOfferedAndResolves(): Promise<void> {
   const room = new Room(playerIds(8), seededRng(1));
   await room.pickGenerals();
   const lord = room.players.find((p) => p.role === Role.Lord)!;
+  lord.skills = []; // same "neutralize the randomly-drafted general" reasoning as
+  // testEquipTriggersLiveUpdateCallback above -- this test is about the AOE card's own
+  // freeform-play offer/resolution, not any lord general's skill (other players keep their real
+  // skills; `immune`/`reduced` below already account for whichever ones land on THEM)
   const deck = buildStandardDeck();
   const savageAssault = deck.find((c) => c.kind === CardKind.SavageAssault)!;
   lord.hand = [savageAssault];
@@ -440,6 +467,8 @@ async function testFreeformPlayLetsHumanSelfHealWithPeach(): Promise<void> {
   const room = new Room(playerIds(8), seededRng(1));
   await room.pickGenerals();
   const lord = room.players.find((p) => p.role === Role.Lord)!;
+  lord.skills = []; // same "neutralize the randomly-drafted general" reasoning as
+  // testEquipTriggersLiveUpdateCallback above
   await room.damagePlayer(lord.id, 1); // wound the lord by exactly 1 before their own turn
   strict.ok(lord.isWounded(), "test setup: the lord must actually be wounded before their turn starts");
   const woundedHp = lord.hp;
@@ -480,6 +509,8 @@ async function testFreeformPlayLetsHumanBuffSlashWithAnaleptic(): Promise<void> 
   const room = new Room(playerIds(8), seededRng(1));
   await room.pickGenerals();
   const lord = room.players.find((p) => p.role === Role.Lord)!;
+  lord.skills = []; // same "neutralize the randomly-drafted general" reasoning as
+  // testEquipTriggersLiveUpdateCallback above
   const deck = buildStandardDeck();
   const analeptic = deck.find((c) => c.kind === CardKind.Analeptic)!;
   const slash = deck.find((c) => c.kind === CardKind.Slash)!;
@@ -615,6 +646,12 @@ async function testAmazingGraceIsATurnOrderDraft(): Promise<void> {
   const room = new Room(playerIds(8), seededRng(1));
   await room.pickGenerals();
   const lord = room.players.find((p) => p.role === Role.Lord)!;
+  // Neutralize whichever general this seed's shifted deck-size RNG drafts onto the LORD
+  // specifically (e.g. Ganfuren's Shenzhi: discards the ENTIRE hand -- including the seeded
+  // amazingGrace card below -- at Start phase, before it ever reaches Play phase). Other seats
+  // keep their real skills (the comment below already accounts for one of THEM interleaving an
+  // extra choosePickCard call, e.g. Xun Yu's Quhu).
+  lord.skills = [];
   const deck = buildStandardDeck();
   const amazingGrace = deck.find((c) => c.kind === CardKind.AmazingGrace)!;
   lord.hand = [amazingGrace];
@@ -808,6 +845,9 @@ async function testDrawPhaseAsksBeforeDrawing(): Promise<void> {
   const room = new Room(playerIds(8), seededRng(1));
   await room.pickGenerals();
   const lord = room.players.find((p) => p.role === Role.Lord)!;
+  lord.skills = []; // same "neutralize the randomly-drafted general" reasoning as
+  // testEquipTriggersLiveUpdateCallback above -- an otherPhaseAction (e.g. Shenzhi) firing
+  // before the Draw phase would make `handBeforeDraw`/`handSizeAtAskTime` unreliable
   const handBeforeDraw = lord.handcardNum;
 
   let askedCount = 0;
@@ -891,17 +931,18 @@ async function testEquipAndTricksAppearInPlay(): Promise<void> {
 }
 
 /**
- * Milestone 2/2.6/24 proof: confirms all 49 ported generals get assigned and as many of their
- * skills as can reliably be log-mined actually fire through real play. Kongcheng/Qianxun/
- * Liegong/Qicai/Mashu/Wushuang/SavageAssaultAvoid/Zhijian/Wansha/Tiandu/Niepan/Hongyan are
- * proven separately (dedicated tests below) since they're either passive filters with no log
- * line, or gated behind a rare/never-reached-by-the-bot precondition (e.g. Wushuang needs 2
- * held Jinks at once; Zhijian needs an equip card to survive in hand past the bot's own
+ * Milestone 2/2.6/24/25/26/27 proof: confirms all 60 ported generals get assigned and as many of
+ * their skills as can reliably be log-mined actually fire through real play. Kongcheng/Qianxun/
+ * Liegong/Qicai/Mashu/Wushuang/SavageAssaultAvoid/Zhijian/Wansha/Tiandu/Niepan/Hongyan/Buqu/
+ * Qingcheng are proven separately (dedicated tests below) since they're either passive filters
+ * with no log line, or gated behind a rare/never-reached-by-the-bot precondition (e.g. Wushuang
+ * needs 2 held Jinks at once; Zhijian needs an equip card to survive in hand past the bot's own
  * always-equip pass; Tiandu needs Guojia specifically to both be dealt an Indulgence AND accept
  * the claim ask; Niepan needs Pang Tong to reach dying specifically without already holding a
  * Peach-family card; Hongyan needs Xiao Qiao specifically to be the OWNER of one of the 5
- * judgment-producing skills' judgment AND draw a Spade -- all far too rare an intersection to
- * reliably log-mine in a fixed seed range).
+ * judgment-producing skills' judgment AND draw a Spade; Buqu needs Zhou Tai to reach dying at an
+ * exact draw-pile state; Qingcheng needs a Hegemony pair fully revealed on both attacker AND
+ * target -- all far too rare an intersection to reliably log-mine in a fixed seed range).
  */
 async function testGeneralSkillsAppearInPlay(): Promise<void> {
   const generalsSeen = new Set<string>();
@@ -978,10 +1019,17 @@ async function testGeneralSkillsAppearInPlay(): Promise<void> {
     ["qiaobianSkip", "bỏ qua giai đoạn này (qiaobian)"],
     ["tianyiWin", "(tianyi)"],
     ["tianyiBonus", "nhắm thêm mục tiêu"],
+    ["huojiViewAs", "biến 1 lá bài thành Hỏa Công (kỹ năng biến hóa)"],
+    ["lightningJudge", "phán Thiểm Điện"],
+    ["lightningDamage", "chịu 3 sát thương Lôi từ Thiểm Điện"],
+    ["collateralSlash", "buộc"],
+    ["collateralForfeit", "không dùng Sát, giao vũ khí cho"],
+    ["awaitExhaustedUse", "dùng Dĩ Dật Đãi Lao"],
+    ["ironChainToggle", "trạng thái liên hoàn (iron_chain)"],
   ];
   const seen = new Set<string>();
 
-  for (let seed = 200; seed < 350; seed++) {
+  for (let seed = 200; seed < 400; seed++) {
     const room = new Room(playerIds(8), seededRng(seed));
     await room.pickGenerals();
     for (const p of room.players) generalsSeen.add(p.general);
@@ -1005,12 +1053,12 @@ async function testGeneralSkillsAppearInPlay(): Promise<void> {
       "erzhang", "ganfuren", "ganning", "guanyu", "guojia", "huanggai", "huangyueying",
       "huangzhong", "huatuo", "jiaxu", "jiling", "kongrong", "liubei", "liushan", "lusu", "luxun",
       "lvbu", "lvmeng", "machao", "mateng", "menghuo", "panfeng", "pangde", "pangtong", "simayi",
-      "sunjian", "sunquan", "sunshangxiang", "taishici", "tianfeng", "weiyan", "xiahoudun",
-      "xiahouyuan", "xiaoqiao", "xuchu", "xuhuang", "xunyu", "yanliangwenchou", "yuanshao",
-      "yuejin", "zhangfei", "zhanghe", "zhangjiao", "zhangliao", "zhaoyun", "zhenji", "zhouyu",
-      "zhugeliang", "zhurong",
+      "sunjian", "sunquan", "sunshangxiang", "taishici", "tianfeng", "weiyan", "wolong",
+      "xiahoudun", "xiahouyuan", "xiaoqiao", "xuchu", "xuhuang", "xunyu", "yanliangwenchou",
+      "yuanshao", "yuejin", "zhangfei", "zhanghe", "zhangjiao", "zhangliao", "zhaoyun", "zhenji",
+      "zhoutai", "zhouyu", "zhugeliang", "zhurong", "zoushi",
     ],
-    "all 57 ported generals must appear across 150 seeds of 8-player games",
+    "all 60 ported generals must appear across 200 seeds of 8-player games",
   );
   strict.ok(sawMultiSlashTurn, "paoxiao (zhangfei) never allowed >1 slash in a single turn");
   const missing = markers.map(([name]) => name).filter((name) => !seen.has(name));
@@ -1355,8 +1403,10 @@ async function testSavageAssaultAndArcheryAttackAreAChoice(): Promise<void> {
 function makeTestContext(alivePlayers: GamePlayer[], log: string[], drawTop: () => Card | null = () => null): EngineContext {
   return {
     alivePlayers,
+    currentPlayer: alivePlayers[0],
     discardPile: [],
     aoChienActive: false,
+    isGameOver: () => false,
     log,
     rng: Math.random,
     draw: () => {},
@@ -1376,11 +1426,16 @@ function makeTestContext(alivePlayers: GamePlayer[], log: string[], drawTop: () 
     askUseKylinBow: async () => true,
     askUseIceSword: async () => true,
     askUseAxe: async () => true,
+    askUseEightDiagram: async () => true,
     askUseDoubleSword: async () => true,
     askDiscardForDoubleSword: async () => true,
     peekTop: () => [],
     arrangeTop: () => {},
     askGuanxingBottom: async () => new Set<number>(),
+    askXunxunKeep: async (_player, revealed) => new Set(revealed.slice(0, 2).map((c) => c.id)),
+    resolveXunxunSplit: (player, revealed, keepIds) => {
+      player.hand.push(...revealed.filter((c) => keepIds.has(c.id)));
+    },
     askGuicaiRetrial: async () => null,
     askChooseDiscards: async (player, count) => player.hand.slice(0, count),
     askAnyHandCards: async (player, min, max) => player.hand.slice(0, Math.max(min, Math.min(max, player.hand.length))),
@@ -1389,6 +1444,9 @@ function makeTestContext(alivePlayers: GamePlayer[], log: string[], drawTop: () 
       else if (card.horseDelta === 1) target.defenseHorse = card;
       else target.offenseHorse = card;
     },
+    askNullification: async () => ({ blocked: false, shieldFaction: null }),
+    revealPrivately: () => {},
+    askKnownBothChoice: async (_player, _target, options) => options[0],
   };
 }
 
@@ -1643,6 +1701,174 @@ async function testKurouSelfInflictedDeathCreditsNoKiller(): Promise<void> {
 }
 
 /**
+ * Buqu (Zhou Tai) proof: prevents death by accumulating a duplicate-free pile of "Sang" (scars)
+ * matching the current hp deficit, drawn from the top of the draw pile -- pure/deterministic,
+ * scripting `drawTop()` per call so the pile grows exactly 1 scar at a time as hp drops further:
+ * 2 distinct-point scars must save him, a 3rd that collides with an existing point must not.
+ * Driven directly through `loseHp` (matching `testKurouSelfInflictedDeathCreditsNoKiller`'s own
+ * precedent), too tied to exact draw-pile order to reliably log-mine from ordinary bot play.
+ */
+async function testBuquSurvivesUntilADuplicateScarAppears(): Promise<void> {
+  const player = new GamePlayer("ZT", 4);
+  player.skills = [SKILLS.buqu];
+  const scarA: Card = { id: -1, kind: CardKind.Slash, suit: Suit.Spade, point: 2 };
+  const scarB: Card = { id: -2, kind: CardKind.Slash, suit: Suit.Club, point: 5 }; // distinct point from scarA
+  const scarDup: Card = { id: -3, kind: CardKind.Slash, suit: Suit.Heart, point: 5 }; // SAME point as scarB
+
+  let drawQueue: Card[] = [];
+  const log: string[] = [];
+  const ctx = makeTestContext([player], log, () => drawQueue.shift() ?? null);
+  let becameDead = false;
+  ctx.onDying = (p) => {
+    p.alive = false;
+    becameDead = true;
+  };
+
+  // hp 4 -> loseHp(4): drops to exactly 0, need = 1 -- draws exactly 1 scar (scarA), no duplicate possible yet.
+  drawQueue = [scarA];
+  await loseHp(ctx, player, 4);
+  strict.equal(player.alive, true, "buqu must save zhoutai the first time (1 scar, no duplicate possible)");
+  strict.equal(becameDead, false);
+  strict.deepEqual(player.buquPile, [scarA]);
+
+  // Further loseHp(1) -> hp -1, need = 2 -- draws exactly 1 MORE scar (scarB, distinct point) -- must still survive.
+  drawQueue = [scarB];
+  await loseHp(ctx, player, 1);
+  strict.equal(player.alive, true, "buqu must keep saving zhoutai as long as no 2 scars share a point");
+  strict.deepEqual(player.buquPile, [scarA, scarB]);
+
+  // Further loseHp(1) -> hp -2, need = 3 -- draws scarDup, which DOES share scarB's point -- must die for real.
+  drawQueue = [scarDup];
+  await loseHp(ctx, player, 1);
+  strict.equal(becameDead, true, "a duplicate-point scar must let zhoutai actually die");
+
+  console.log("PASS testBuquSurvivesUntilADuplicateScarAppears: survived 2 non-duplicate scars, died on the 3rd (duplicate point)");
+}
+
+/**
+ * Qingcheng (Zoushi) proof: discards a held equip card to force-hide another fully-revealed
+ * player's main general (real rule lets the attacker pick which of the 2; this port always
+ * targets the main slot, see skill.ts's `qingchengSelfAction` doc comment) -- driven directly
+ * through the `selfAction` hook (pure/deterministic), since natural play needs a drafted
+ * Hegemony pair fully revealed on BOTH sides, far too rare an intersection across ordinary bot
+ * play to log-mine reliably.
+ */
+async function testQingchengHidesARevealedMainGeneral(): Promise<void> {
+  const zoushi = new GamePlayer("ZS", 3);
+  zoushi.deputyGeneral = "somebody"; // marks her as a drafted Hegemony pair (gates player.skills)
+  zoushi.mainRevealed = true;
+  zoushi.deputyRevealed = true;
+  zoushi.skills = [SKILLS.qingcheng];
+  const weapon = buildStandardDeck().find((c) => c.kind === CardKind.Weapon)!;
+  zoushi.hand = [weapon];
+
+  const target = new GamePlayer("T", 4);
+  target.deputyGeneral = "somebody-else";
+  target.mainRevealed = true;
+  target.deputyRevealed = true;
+
+  const log: string[] = [];
+  const ctx = makeTestContext([zoushi, target], log);
+
+  await SKILLS.qingcheng.selfAction!(ctx, zoushi, Math.random);
+
+  strict.equal(target.mainRevealed, false, "qingcheng must hide the target's main general");
+  strict.equal(target.deputyRevealed, true, "qingcheng must leave the target's deputy general alone");
+  strict.ok(!zoushi.hand.includes(weapon), "the equip card must be spent");
+  strict.ok(ctx.discardPile.includes(weapon), "the spent equip card must land in the discard pile");
+  console.log("PASS testQingchengHidesARevealedMainGeneral: equip discarded, target's main general re-hidden");
+}
+
+/**
+ * Befriend Attacking (Viễn Giao Cận Công, Milestone 29) proof: only a player with a DETERMINED
+ * faction different from the actor's own is a legal target (real rule: `hasShownOneGeneral()`
+ * on both sides) -- same faction, undetermined faction, and an actor with no faction of their
+ * own all excluded; then resolves as target draws 1, source draws 3. Hegemony-only in practice
+ * (Identity mode never assigns `faction`), so too rare an intersection to log-mine from the
+ * Identity-mode `testGeneralSkillsAppearInPlay` loop -- driven directly (pure targeting +
+ * deterministic resolve), same precedent as `testQingchengHidesARevealedMainGeneral` above.
+ */
+async function testBefriendAttackingRequiresEnemyFactionAndDrawsCards(): Promise<void> {
+  const actor = new GamePlayer("A");
+  actor.faction = "wei";
+  const enemy = new GamePlayer("B");
+  enemy.faction = "shu";
+  const ally = new GamePlayer("C");
+  ally.faction = "wei";
+  const hidden = new GamePlayer("D"); // faction "" -- undetermined, must be excluded
+  const alive = [actor, enemy, ally, hidden];
+
+  strict.deepEqual(
+    befriendAttackingCandidates(actor, alive),
+    [enemy],
+    "only the enemy-faction player is a legal target -- same-faction ally and undetermined-faction player excluded",
+  );
+  const noFactionActor = new GamePlayer("A2");
+  strict.deepEqual(
+    befriendAttackingCandidates(noFactionActor, [noFactionActor, enemy]),
+    [],
+    "an actor with no determined faction of their own must have zero legal targets",
+  );
+
+  const deck = buildStandardDeck();
+  const freshCards = deck.slice(0, 4);
+  let drawIdx = 0;
+  const log: string[] = [];
+  const ctx = makeTestContext([actor, enemy], log);
+  ctx.draw = (player, n) => {
+    for (let i = 0; i < n; i++) player.hand.push(freshCards[drawIdx++]);
+  };
+
+  await resolveBefriendAttacking(ctx, actor, enemy);
+
+  strict.equal(enemy.handcardNum, 1, "the target must draw exactly 1 card");
+  strict.equal(actor.handcardNum, 3, "the source (who played the card) must draw exactly 3 cards");
+  console.log("PASS testBefriendAttackingRequiresEnemyFactionAndDrawsCards: enemy-faction-only targeting, target drew 1, source drew 3");
+}
+
+/**
+ * Iron Chain (Thiết Tác Liên Hoàn, Milestone 30) proof: any Fire/Thunder-natured damage to a
+ * chained player unchains them AND every splash recipient (matches the real upstream
+ * `gamerule.cpp`'s `DamageComplete` handler running its unchain check once per damage instance,
+ * splash included -- traced during this milestone's own investigation, not IronChain's card
+ * class itself), and splashes the SAME base amount to every OTHER still-chained alive player.
+ * Also proves Normal-natured damage never unchains/splashes at all, and a splash hit itself
+ * never re-triggers a FURTHER splash (no infinite loop). Driven directly through `applyDamage`
+ * (pure, deterministic, no Room needed) -- 2+ chained players hit by elemental damage is too
+ * rare/specific an intersection to reliably log-mine from ordinary bot play.
+ */
+async function testIronChainSplashesElementalDamageAndUnchainsEveryoneHit(): Promise<void> {
+  const attacker = new GamePlayer("ATK");
+  const target = new GamePlayer("T");
+  target.chained = true;
+  const bystanderChained = new GamePlayer("BC");
+  bystanderChained.chained = true;
+  const bystanderUnchained = new GamePlayer("BU"); // not chained -- must be untouched
+  const log: string[] = [];
+  const ctx = makeTestContext([attacker, target, bystanderChained, bystanderUnchained], log);
+
+  await applyDamage(ctx, target, 2, attacker, DamageNature.Fire);
+
+  strict.equal(target.hp, target.maxHp - 2, "the original target takes the real damage normally");
+  strict.equal(target.chained, false, "elemental damage must unchain the original target");
+  strict.equal(bystanderChained.hp, bystanderChained.maxHp - 2, "every OTHER still-chained player must take the SAME splash amount");
+  strict.equal(bystanderChained.chained, false, "a splash hit must ALSO unchain its own recipient (real rule: unchain runs per damage instance, splash included)");
+  strict.equal(bystanderUnchained.hp, bystanderUnchained.maxHp, "an unchained bystander must take no splash damage at all");
+
+  // Normal-natured damage must never unchain or splash, even between 2 chained players.
+  const target2 = new GamePlayer("T2");
+  target2.chained = true;
+  const bystander2 = new GamePlayer("BC2");
+  bystander2.chained = true;
+  const ctx2 = makeTestContext([attacker, target2, bystander2], []);
+  await applyDamage(ctx2, target2, 2, attacker); // default nature = Normal
+  strict.equal(bystander2.hp, bystander2.maxHp, "Normal-natured damage must never splash to other chained players");
+  strict.equal(target2.chained, true, "Normal-natured damage must not unchain its target either");
+
+  console.log("PASS testIronChainSplashesElementalDamageAndUnchainsEveryoneHit: elemental hit splashed+unchained both players, Normal damage never triggered either");
+}
+
+/**
  * Milestone 3.5 proof: Room.setController actually overrides the bot for one seat. Installs a
  * controller on P1 that always DECLINES to slash (the opposite of the greedy bot default), runs
  * many turns, and asserts P1 never appears as a slash attacker in the log while every other seat
@@ -1714,12 +1940,19 @@ async function testExpandedControllerHooksRespected(): Promise<void> {
       // so skip those specific occurrences when checking self-SOURCING via wantsToPlayTrick.
       const compelled =
         /dùng Ly Gián:.*xem như dùng Quyết Đấu với/.test(room.log[i - 1] ?? "") || /\(luanji\)$/.test(room.log[i - 1] ?? "");
-      if (/^P1 trang bị/.test(line)) p1Equipped = true;
+      // Kuangfu (Pan Feng, Milestone 26) and Zhijian (Erzhang) can both assign an equip card
+      // straight onto ANY player -- including a "declined every equip" seat -- via
+      // `ctx.equipPlayer`, entirely bypassing `wantsToEquip` (a genuinely different ask path,
+      // not a bug this test should catch). `Room.equip()`'s own "X trang bị Y" line always
+      // fires BEFORE the assigning skill's own summary line, so check the NEXT line, not the
+      // previous one (opposite direction from the `compelled` trick check above).
+      const assignedByOtherSkill = /\(kuangfu\)$/.test(room.log[i + 1] ?? "") || /\(zhijian\)$/.test(room.log[i + 1] ?? "");
+      if (!assignedByOtherSkill && /^P1 trang bị/.test(line)) p1Equipped = true;
       if (!compelled && /^P1 (bốc 2 lá \(Vô Trung Sinh Hữu\)|dùng Quyết Đấu|dùng Nam Man Nhập Xâm|dùng Vạn Tiễn Tề Phát)/.test(line))
         p1SelfTrickSourced = true;
       if (/^P1 né bằng Thiểm/.test(line)) p1Dodged = true;
       if (/^P1 dùng Đào để hồi phục/.test(line)) p1Peached = true;
-      if (/^P[2-8] trang bị/.test(line)) otherEquipped = true;
+      if (!assignedByOtherSkill && /^P[2-8] trang bị/.test(line)) otherEquipped = true;
       if (!compelled && /^P[2-8] (bốc 2 lá \(Vô Trung Sinh Hữu\)|dùng Quyết Đấu|dùng Nam Man Nhập Xâm|dùng Vạn Tiễn Tề Phát)/.test(line))
         otherSelfTrickSourced = true;
       if (/^P[2-8] né bằng Thiểm/.test(line)) otherDodged = true;
@@ -1906,6 +2139,144 @@ async function testLordKillingALoyalistLosesHandAndEquipment(): Promise<void> {
   console.log("PASS testLordKillingALoyalistLosesHandAndEquipment: lord lost hand + weapon + defense horse");
 }
 
+/**
+ * Nullification (Milestone 31) proof: a held Nullification card cancels a trick card's effect
+ * entirely -- the trick is still discarded (it was legally played), but its EFFECT never
+ * happens. Driven through a real Room turn (Duel is routed through `tryPlayTargeted`, whose
+ * nullification window this proves end-to-end) with rigged hands, same "real Room + custom
+ * controller + manipulated hand" construction as `testKillingARebelRewardsTheKillerWithThreeCards`.
+ */
+async function testNullificationCancelsATrickCardsEffect(): Promise<void> {
+  const room = new Room(playerIds(8), seededRng(1));
+  await room.pickGenerals();
+  const lord = room.players.find((p) => p.role === Role.Lord)!;
+  const target = room.players.find((p) => p !== lord)!;
+  const responder = room.players.find((p) => p !== lord && p !== target)!;
+  for (const p of room.players) {
+    p.skills = [];
+    p.hand = []; // no OTHER player may coincidentally also hold a Nullification-kind card
+  }
+  const deck = buildStandardDeck();
+  const duelCard = deck.find((c) => c.kind === CardKind.Duel)!;
+  const nullificationCard = deck.find((c) => c.kind === CardKind.Nullification)!;
+  lord.hand = [duelCard];
+  responder.hand = [nullificationCard];
+
+  room.setController(lord.id, {
+    chooseFreeAction: async (_player, legalActions) => legalActions.find((a) => a.kind === "playCard" && a.cardKind === CardKind.Duel) ?? null,
+    chooseTrickTarget: async (_player, _kind, candidates) => candidates.find((c) => c.id === target.id) ?? null,
+  });
+  room.setController(responder.id, { wantsToNullify: async () => true });
+
+  await room.playTurn(); // the lord acts first
+
+  strict.equal(target.hp, target.maxHp, "the nullified duel must never have exchanged/dealt any damage");
+  strict.ok(!responder.hand.includes(nullificationCard), "the played nullification card must leave the responder's hand");
+  strict.ok(room.discardPile.some((c) => c.id === nullificationCard.id), "the nullification card must end up discarded");
+  strict.ok(room.discardPile.some((c) => c.id === duelCard.id), "the nullified trick card itself must still be discarded (it was legally played)");
+  strict.ok(
+    room.log.some((l) => l.includes("Vô Giải Khả Kích") && l.includes("Quyết Đấu")),
+    "the nullification must be logged, naming both the response card and the trick it cancelled",
+  );
+  console.log("PASS testNullificationCancelsATrickCardsEffect: duel never resolved, nullification card spent and logged");
+}
+
+/**
+ * HegNullification (Milestone 31) proof: choosing the "all" scope shields every OTHER
+ * still-untouched same-faction target from the SAME AOE card's remaining hits too, without a
+ * new ask for each -- while a different-faction target is unaffected. Seat order [source,
+ * allyA, allyB, enemy, bystander] guarantees `resolveSavageAssault`'s per-player loop reaches
+ * allyA (who plays the HegNullification) before allyB (the auto-shielded ally).
+ */
+async function testHegNullificationCanShieldAWholeFactionFromAoe(): Promise<void> {
+  const room = new Room(playerIds(5), seededRng(1), GameMode.Hegemony);
+  await room.pickGenerals();
+  const [source, allyA, allyB, enemy] = room.players;
+  for (const p of room.players) {
+    p.skills = [];
+    p.hand = [];
+    p.maxHp = 4;
+    p.hp = 4;
+    p.mainRevealed = true;
+    p.deputyRevealed = true; // fully revealed already -- skip runHegemonyReveal's own ask entirely
+  }
+  source.faction = "qun";
+  allyA.faction = "wei";
+  allyB.faction = "wei";
+  enemy.faction = "shu";
+  room.currentIndex = room.players.indexOf(source);
+
+  const deck = buildStandardDeck();
+  const savageAssaultCard = deck.find((c) => c.kind === CardKind.SavageAssault)!;
+  const hegNullCard = deck.find((c) => c.kind === CardKind.HegNullification)!;
+  source.hand = [savageAssaultCard];
+  allyA.hand = [hegNullCard];
+
+  room.setController(source.id, {
+    chooseFreeAction: async (_player, legalActions) =>
+      legalActions.find((a) => a.kind === "playCard" && a.cardKind === CardKind.SavageAssault) ?? null,
+  });
+  room.setController(allyA.id, {
+    wantsToNullify: async (_player, _kind, _src, target) => target.id === allyA.id,
+    chooseHegNullificationScope: async () => "all",
+  });
+
+  await room.playTurn(); // source acts first
+
+  strict.equal(allyA.hp, allyA.maxHp, "allyA's own hit must be nullified");
+  strict.equal(allyB.hp, allyB.maxHp, "allyB must be auto-shielded by allyA's 'all' scope, never even asked to discard/take damage");
+  strict.equal(enemy.hp, enemy.maxHp - 1, "a different-faction target must still take the savage assault damage normally");
+  strict.ok(room.discardPile.some((c) => c.id === hegNullCard.id), "the heg nullification card must be discarded after use");
+  console.log("PASS testHegNullificationCanShieldAWholeFactionFromAoe: allyA nullified+shielded allyB, enemy still took the hit");
+}
+
+/**
+ * KnownBoth (Milestone 31) proof: the reveal is delivered ONLY via `ctx.revealPrivately` to the
+ * card's USER, never appearing in `ctx.log` (a single shared PUBLIC channel every player/
+ * spectator sees identically) -- driven directly through `resolveKnownBoth` (pure,
+ * deterministic), same "trick.ts resolver + makeTestContext" shape as this file's other
+ * combat/trick-level proofs.
+ */
+async function testKnownBothRevealsPrivatelyNotInPublicLog(): Promise<void> {
+  const deck = buildStandardDeck();
+  const handCards = deck.filter((c) => c.kind === CardKind.Slash).slice(0, 2);
+  const actor = new GamePlayer("ACTOR");
+  const target = new GamePlayer("TARGET");
+  target.mainRevealed = true; // already-public general -- only the hand is worth viewing
+  target.hand = handCards;
+  const log: string[] = [];
+  const ctx = makeTestContext([actor, target], log);
+  let revealedViewerId: string | null = null;
+  let revealedPayload: PrivateReveal | null = null;
+  ctx.revealPrivately = (viewer, reveal) => {
+    revealedViewerId = viewer.id;
+    revealedPayload = reveal;
+  };
+  let offeredOptions: string[] = [];
+  ctx.askKnownBothChoice = async (_player, _target, options) => {
+    offeredOptions = options;
+    return "handcards";
+  };
+
+  await resolveKnownBoth(ctx, actor, target);
+
+  strict.deepEqual(offeredOptions, ["handcards"], "an already-revealed target with cards must only offer the hand-view option");
+  strict.equal(revealedViewerId, actor.id, "the reveal must be delivered to the ACTOR (the card's user), never the target");
+  strict.ok(revealedPayload !== null, "the private reveal callback must have fired with a payload");
+  // Note: `.kind === "hand"` can't be narrowed inline here in one expression -- TypeScript's
+  // discriminant-property analysis gets confused by `PrivateReveal`'s "hand" variant nesting a
+  // `Card[]` whose OWN elements also have an unrelated `kind` field, collapsing the narrowed
+  // type to `never`; an explicit `Extract` cast (after the not-null assertion above) sidesteps
+  // it cleanly.
+  const handPayload = revealedPayload as Extract<PrivateReveal, { kind: "hand" }>;
+  strict.equal(handPayload.kind, "hand", "the revealed payload must be the hand variant");
+  strict.equal(handPayload.cards.length, 2, "the revealed payload must carry the target's actual hand");
+  strict.equal(log.length, 1, "only the card-USE line is logged, nothing per-card");
+  strict.ok(!log[0].toLowerCase().includes("slash"), "the actual revealed card identities must never leak into the shared public log");
+  strict.ok(log[0].includes("Tri Bỉ Tri Kỉ"), "using the card itself is still publicly logged -- just not WHAT it revealed");
+  console.log("PASS testKnownBothRevealsPrivatelyNotInPublicLog: reveal delivered privately to the actor, never touched the public log");
+}
+
 await testRoleDistribution();
 await testPhaseCyclingConservesCards();
 await testRebelKillsLord();
@@ -1946,12 +2317,19 @@ await testViewAsJinkDodges();
 await testLiegongBlocksJink();
 await testWushuangRequiresTwoJinks();
 await testKurouSelfInflictedDeathCreditsNoKiller();
+await testBuquSurvivesUntilADuplicateScarAppears();
+await testQingchengHidesARevealedMainGeneral();
+await testBefriendAttackingRequiresEnemyFactionAndDrawsCards();
+await testIronChainSplashesElementalDamageAndUnchainsEveryoneHit();
 await testHumanControllerOverridesBot();
 await testExpandedControllerHooksRespected();
 await testChooseTrickTargetPicksExactPlayer();
 await testDuelSlashAndGanglieDiscardRespected();
 await testKillingARebelRewardsTheKillerWithThreeCards();
 await testLordKillingALoyalistLosesHandAndEquipment();
+await testNullificationCancelsATrickCardsEffect();
+await testHegNullificationCanShieldAWholeFactionFromAoe();
+await testKnownBothRevealsPrivatelyNotInPublicLog();
 
 /**
  * Standard rule: Kylin Bow (weapon, range 5) -- when a Slash you wielded it with deals damage to
@@ -2768,12 +3146,24 @@ function testCombineHegemonyHp(): void {
 
 /**
  * Real `pickGenerals()` Hegemony draft (Milestone 23 addendum: dual-general system): every
- * player must end up with 2 DISTINCT generals sharing one kingdom, combined stats matching
- * `combineHegemonyHp` + a skill union, main general deciding gender -- driven through the exact
- * same bot `Controller.chooseGeneral` path a live game uses, across several seeds since which
- * generals land is random.
+ * player must end up with 2 DISTINCT generals, combined stats matching `combineHegemonyHp` +
+ * a skill union, main general deciding both `player.kingdom` and gender -- driven through the
+ * exact same bot `Controller.chooseGeneral` path a live game uses, across several seeds since
+ * which generals land is random. The pair SHARING a kingdom is the COMMON case, not a hard
+ * guarantee: `candidateGenerals`'s own doc comment documents the real fallback -- if the 4
+ * candidates left over after the main pick happen to include ZERO of the main's own kingdom
+ * (a real possibility this early in a draft, not just "several players already drafted from a
+ * small kingdom" -- confirmed directly: seed 1's P2 here drafts menghuo/shu then falls back to
+ * zhanghe/wei, the very 2nd player of the very 1st seed), the deputy pick falls back to the
+ * FULL unfiltered 4 rather than ever leaving a player with zero deputy candidates. So this
+ * asserts the weaker, ALWAYS-true invariant (`player.kingdom` follows the MAIN general
+ * specifically, regardless of whether the deputy happened to match) plus an aggregate check
+ * that the primary same-kingdom rule still fires for the large majority of pairs, not just the
+ * fallback path every time.
  */
 async function testHegemonyDraftPicksSameKingdomPairWithCombinedStats(): Promise<void> {
+  let sameKingdomPairs = 0;
+  let totalPairs = 0;
   for (let seed = 1; seed <= 8; seed++) {
     const room = new Room(playerIds(6), seededRng(seed), GameMode.Hegemony);
     await room.pickGenerals();
@@ -2782,8 +3172,9 @@ async function testHegemonyDraftPicksSameKingdomPairWithCombinedStats(): Promise
       strict.notEqual(p.general, p.deputyGeneral, `seed ${seed}: ${p.id}'s main and deputy must be 2 distinct generals`);
       const mainDef = GENERALS.find((g) => g.name === p.general)!;
       const deputyDef = GENERALS.find((g) => g.name === p.deputyGeneral)!;
-      strict.equal(mainDef.kingdom, deputyDef.kingdom, `seed ${seed}: ${p.id}'s pair must share one kingdom`);
-      strict.equal(p.kingdom, mainDef.kingdom, `seed ${seed}: ${p.id}'s kingdom must match the pair's shared kingdom`);
+      strict.equal(p.kingdom, mainDef.kingdom, `seed ${seed}: ${p.id}'s kingdom must always follow the MAIN general`);
+      totalPairs++;
+      if (mainDef.kingdom === deputyDef.kingdom) sameKingdomPairs++;
       strict.equal(p.skills.length, 0, `seed ${seed}: ${p.id}'s ACTIVE skills must be empty -- nothing revealed yet right after the draft`);
       strict.equal(
         p.allSkills.length,
@@ -2798,7 +3189,13 @@ async function testHegemonyDraftPicksSameKingdomPairWithCombinedStats(): Promise
       strict.equal(p.gender, mainDef.gender ?? "male", `seed ${seed}: ${p.id}'s gender must follow the MAIN general`);
     }
   }
-  console.log("PASS testHegemonyDraftPicksSameKingdomPairWithCombinedStats: every player got 2 distinct same-kingdom generals with correctly combined stats, across 8 seeds");
+  strict.ok(
+    sameKingdomPairs > totalPairs / 2,
+    `the primary same-kingdom draft rule must still be the common case, not just the fallback (${sameKingdomPairs}/${totalPairs})`,
+  );
+  console.log(
+    `PASS testHegemonyDraftPicksSameKingdomPairWithCombinedStats: every player got 2 distinct generals with correctly combined stats across 8 seeds (${sameKingdomPairs}/${totalPairs} pairs shared a kingdom, the documented common case)`,
+  );
 }
 
 /**
@@ -3179,6 +3576,165 @@ async function testTianyiWinArmsRangelessBonusLossBansSlash(): Promise<void> {
 
   console.log("PASS testTianyiWinArmsRangelessBonusLossBansSlash: win armed rangeless+extra-target+limit, loss armed the Slash ban");
 }
+
+/**
+ * EightDiagram (armor, Milestone 34) proof: with no real/viewAs Jink held, invoking the armor
+ * judges a card (reusing the shared `judge()` helper) -- red (Heart/Diamond) counts as a
+ * successful dodge (no damage, logged distinctly from a real jink dodge), any other color fails
+ * (damage lands as normal). Driven directly through resolveSlash (pure, deterministic).
+ */
+async function testEightDiagramJudgesABackupDodge(): Promise<void> {
+  const deck = buildStandardDeck();
+  const eightDiagram = deck.find((c) => c.armorName === "EightDiagram")!;
+  const slash1 = deck.find((c) => c.kind === CardKind.Slash)!;
+  const slash2 = deck.find((c) => c.kind === CardKind.Slash && c.id !== slash1.id)!;
+  const redJudgeCard = deck.find((c) => (c.suit === Suit.Heart || c.suit === Suit.Diamond) && c.id !== slash1.id && c.id !== slash2.id)!;
+  const blackJudgeCard = deck.find(
+    (c) => (c.suit === Suit.Spade || c.suit === Suit.Club) && c.id !== slash1.id && c.id !== slash2.id && c.id !== redJudgeCard.id,
+  )!;
+
+  const dodger = new GamePlayer("EDG1");
+  dodger.armor = eightDiagram;
+  dodger.hand = []; // no real/viewAs jink -- eightDiagram is the only backup
+  const log1: string[] = [];
+  await resolveSlash(makeTestContext([new GamePlayer("EDA1"), dodger], log1, () => redJudgeCard), new GamePlayer("EDA1"), dodger, slash1);
+  strict.equal(dodger.hp, dodger.maxHp, "a red judgment must count as a successful dodge -- no damage");
+  strict.ok(log1.some((l) => l.includes("né bằng Bát Quái Trận")), "the dodge must be logged as eight diagram, distinct from a real jink dodge");
+
+  const nonDodger = new GamePlayer("EDG2");
+  nonDodger.armor = eightDiagram;
+  nonDodger.hand = [];
+  const log2: string[] = [];
+  await resolveSlash(makeTestContext([new GamePlayer("EDA2"), nonDodger], log2, () => blackJudgeCard), new GamePlayer("EDA2"), nonDodger, slash2);
+  strict.equal(nonDodger.hp, nonDodger.maxHp - 1, "a non-red judgment must fail to dodge -- damage lands");
+
+  console.log("PASS testEightDiagramJudgesABackupDodge: red judgment dodged, non-red judgment took the hit");
+}
+
+/**
+ * RenwangShield (armor, Milestone 34) proof: locked, full immunity to a BLACK-suited Slash --
+ * the jink-dodge ask never even fires, no damage at all; a RED-suited Slash is unaffected by
+ * the armor and connects normally. Driven directly through resolveSlash (pure, deterministic).
+ */
+async function testRenwangShieldBlocksOnlyBlackSuitedSlash(): Promise<void> {
+  const deck = buildStandardDeck();
+  const renwangShield = deck.find((c) => c.armorName === "RenwangShield")!;
+  const blackSlash = deck.find((c) => c.kind === CardKind.Slash && (c.suit === Suit.Spade || c.suit === Suit.Club))!;
+  const redSlash = deck.find((c) => c.kind === CardKind.Slash && (c.suit === Suit.Heart || c.suit === Suit.Diamond))!;
+
+  const target1 = new GamePlayer("RWS1");
+  target1.armor = renwangShield;
+  let askDodgeCalled = false;
+  const ctx1 = makeTestContext([new GamePlayer("RWA1"), target1], []);
+  ctx1.askDodge = async () => {
+    askDodgeCalled = true;
+    return true;
+  };
+  await resolveSlash(ctx1, new GamePlayer("RWA1"), target1, blackSlash);
+  strict.equal(target1.hp, target1.maxHp, "a black-suited slash must be fully nullified by renwang shield");
+  strict.equal(askDodgeCalled, false, "the jink-dodge ask must never even fire -- renwang shield's nullify short-circuits before it");
+
+  const target2 = new GamePlayer("RWS2");
+  target2.armor = renwangShield;
+  await resolveSlash(makeTestContext([new GamePlayer("RWA2"), target2], []), new GamePlayer("RWA2"), target2, redSlash);
+  strict.equal(target2.hp, target2.maxHp - 1, "a red-suited slash must connect normally, unaffected by renwang shield");
+
+  console.log("PASS testRenwangShieldBlocksOnlyBlackSuitedSlash: black slash fully nullified with no dodge ask, red slash connected normally");
+}
+
+/**
+ * Vine (armor, Milestone 34) proof: locked, full immunity to an ordinary Normal-nature Slash AND
+ * to Savage Assault/Archery Attack (the wearer isn't even offered the discard-a-card choice);
+ * a Fire-natured Slash instead connects with +1 extra damage. Driven directly through
+ * resolveSlash/resolveSavageAssault/resolveArcheryAttack (pure, deterministic).
+ */
+async function testVineBlocksNormalDamageAmplifiesFireDamage(): Promise<void> {
+  const deck = buildStandardDeck();
+  const vine = deck.find((c) => c.armorName === "Vine")!;
+  const normalSlash = deck.find((c) => c.kind === CardKind.Slash && !c.nature)!;
+  const fireSlash = deck.find((c) => c.kind === CardKind.Slash && c.nature === DamageNature.Fire)!;
+
+  const vsSlash = new GamePlayer("VN1");
+  vsSlash.armor = vine;
+  await resolveSlash(makeTestContext([new GamePlayer("VNA1"), vsSlash], []), new GamePlayer("VNA1"), vsSlash, normalSlash);
+  strict.equal(vsSlash.hp, vsSlash.maxHp, "an ordinary Normal-nature slash must be fully nullified by vine");
+
+  const vsFireSlash = new GamePlayer("VN2");
+  vsFireSlash.armor = vine;
+  await resolveSlash(makeTestContext([new GamePlayer("VNA2"), vsFireSlash], []), new GamePlayer("VNA2"), vsFireSlash, fireSlash);
+  strict.equal(vsFireSlash.hp, vsFireSlash.maxHp - 2, "a fire-natured slash must connect AND deal +1 extra damage (1 base + 1 vine penalty)");
+
+  const source = new GamePlayer("VNSRC");
+  const vsSavage = new GamePlayer("VN3");
+  vsSavage.armor = vine;
+  vsSavage.hand = [deck.find((c) => c.kind === CardKind.Slash && c.id !== normalSlash.id && c.id !== fireSlash.id)!]; // held slash that would otherwise be a discard-vs-damage choice
+  const bystander = new GamePlayer("VNBY1");
+  bystander.hand = [];
+  const savageLog: string[] = [];
+  const savageCtx = makeTestContext([source, vsSavage, bystander], savageLog);
+  let savageAskCalled = false;
+  savageCtx.askSavageAssaultSlash = async () => {
+    savageAskCalled = true;
+    return true;
+  };
+  await resolveSavageAssault(savageCtx, source);
+  strict.equal(vsSavage.hp, vsSavage.maxHp, "vine's wearer must take no savage assault damage");
+  strict.equal(savageAskCalled, false, "vine's wearer must never even be offered the discard-a-slash choice");
+  strict.equal(bystander.hp, bystander.maxHp - 1, "a non-vine bystander must still take normal savage assault damage");
+
+  const vsArchery = new GamePlayer("VN4");
+  vsArchery.armor = vine;
+  const bystander2 = new GamePlayer("VNBY2");
+  bystander2.hand = [];
+  await resolveArcheryAttack(makeTestContext([source, vsArchery, bystander2], []), source);
+  strict.equal(vsArchery.hp, vsArchery.maxHp, "vine's wearer must take no archery attack damage");
+  strict.equal(bystander2.hp, bystander2.maxHp - 1, "a non-vine bystander must still take normal archery attack damage");
+
+  console.log(
+    "PASS testVineBlocksNormalDamageAmplifiesFireDamage: normal slash/savage assault/archery attack all nullified, fire slash connected with +1 damage",
+  );
+}
+
+/**
+ * SilverLion (armor, Milestone 34) proof: any single damage instance >1 is capped down to
+ * exactly 1 (locked, no ask), and after it leaves the wielder's equip zone (while alive and
+ * still wounded), they heal exactly 1 hp -- but not if already at full hp. Driven directly
+ * through applyDamage/detachCardFrom (pure, deterministic; detachCardFrom is the shared
+ * departure path Dismantlement/Snatch/IceSword all use -- see room.ts's `equip` for the OTHER
+ * departure path, being replaced by a newly-equipped armor, which shares the same heal logic).
+ */
+async function testSilverLionCapsDamageAndHealsOnLoss(): Promise<void> {
+  const deck = buildStandardDeck();
+  const silverLion = deck.find((c) => c.armorName === "SilverLion")!;
+
+  const wearer = new GamePlayer("SL1");
+  wearer.armor = silverLion;
+  const source = new GamePlayer("SLSRC");
+  const log: string[] = [];
+  await applyDamage(makeTestContext([wearer, source], log), wearer, 3, source);
+  strict.equal(wearer.hp, wearer.maxHp - 1, "silver lion must cap any single damage instance >1 down to exactly 1");
+  strict.ok(log.some((l) => l.includes("bạch ngân sư tử")), "the damage cap must be logged");
+
+  const wounded = new GamePlayer("SL2");
+  wounded.armor = silverLion;
+  wounded.hp = wounded.maxHp - 1; // wounded, so leaving the equip zone should heal
+  const log2: string[] = [];
+  await detachCardFrom(makeTestContext([wounded], log2), wounded, silverLion);
+  strict.equal(wounded.armor, null, "the armor must actually leave the equip zone");
+  strict.equal(wounded.hp, wounded.maxHp, "leaving the equip zone while wounded must heal exactly 1 hp");
+  strict.ok(log2.some((l) => l.includes("hồi 1 máu do Bạch Ngân Sư Tử")), "the heal must be logged");
+
+  const fullHp = new GamePlayer("SL3");
+  fullHp.armor = silverLion;
+  const log3: string[] = [];
+  await detachCardFrom(makeTestContext([fullHp], log3), fullHp, silverLion);
+  strict.equal(fullHp.hp, fullHp.maxHp, "leaving the equip zone at full hp must not overheal");
+  strict.ok(!log3.some((l) => l.includes("hồi 1 máu do Bạch Ngân Sư Tử")), "no heal must be logged when already at full hp");
+
+  console.log(
+    "PASS testSilverLionCapsDamageAndHealsOnLoss: >1 damage capped to 1, leaving the equip zone healed exactly 1 hp while wounded, no overheal at full hp",
+  );
+}
 await testZhijianEquipsAnotherPlayer();
 await testWanshaBlocksAllyRescueDuringOwnTurn();
 await testPindianTieBreakFavorsOpponent();
@@ -3199,6 +3755,10 @@ await testHegemonyRevealTiming();
 testHegemonySkillsGatedByReveal();
 await testHegemonyRevealCompletionBonuses();
 await testTianyiWinArmsRangelessBonusLossBansSlash();
+await testEightDiagramJudgesABackupDodge();
+await testRenwangShieldBlocksOnlyBlackSuitedSlash();
+await testVineBlocksNormalDamageAmplifiesFireDamage();
+await testSilverLionCapsDamageAndHealsOnLoss();
 console.log(
-  "\nAll Milestone 0-3.9 smoke tests passed, plus Luoshen/Fanjian/Lieren/Quhu/Jieyin/Dimeng/Zhijian/Lijian/Wansha/Luanwu/Xiongyi/Guidao/Lirang/Duoshi/Fangquan/Indulgence/Tiandu/Guose, plus Milestone 23 Hegemony (Quốc Chiến) mode, plus Milestone 26 (Shensu/Qiaobian/Tianyi).",
+  "\nAll Milestone 0-3.9 smoke tests passed, plus Luoshen/Fanjian/Lieren/Quhu/Jieyin/Dimeng/Zhijian/Lijian/Wansha/Luanwu/Xiongyi/Guidao/Lirang/Duoshi/Fangquan/Indulgence/Tiandu/Guose, plus Milestone 23 Hegemony (Quốc Chiến) mode, plus Milestone 26 (Shensu/Qiaobian/Tianyi), plus Milestone 27 (Huoji/Buqu/Qingcheng -- full 60/60 Standard general roster), plus Milestone 28 (Lightning), Milestone 29 (Collateral/BefriendAttacking), Milestone 31 (Nullification/HegNullification/KnownBoth), and Milestone 34 (EightDiagram/RenwangShield/Vine/SilverLion armors).",
 );
