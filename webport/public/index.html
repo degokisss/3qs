@@ -2503,6 +2503,50 @@
       startPromptCountdown(msg.requestId, msg.timeoutMs, close);
     }
 
+    /** Sha Moke's Jili (Milestone 45): the Slash's PRIMARY target is already resolved by the
+     *  time this fires -- toggle 0..maxExtra ADDITIONAL candidates (multi-select, same "click
+     *  several buttons then confirm" pattern as showRevealPrompt above), then confirm to Slash
+     *  every toggled candidate too with the same played card. Auto-closes on timeout -- the
+     *  server's own askClient fallback is "no extras", never forced. */
+    function showExtraSlashTargetsPicker(msg) {
+      promptOverlayEl.className = "active";
+      const picked = new Set();
+      const render = () => {
+        const buttons = msg.candidateIds
+          .map((id) => {
+            const p = lastState?.players.find((pl) => pl.id === id);
+            const label = p ? generalDisplayName(p) : id;
+            const on = picked.has(id);
+            return `<button data-target-id="${id}" class="${on ? "confirmYes" : ""}">${on ? "✓ " : ""}${id} (${label})</button>`;
+          })
+          .join("");
+        promptEl.innerHTML = `
+          <img class="cardArt" src="${IMG}/card/slash.png" alt="">
+          <div class="promptTitle">Kí Lệ: thêm mục tiêu cho Sát?</div>
+          <div class="promptSub">Chọn tối đa ${msg.maxExtra} người ngoài mục tiêu đã chọn — còn <span id="promptCountdown">${Math.ceil(msg.timeoutMs / 1000)}</span>s</div>
+          ${buttons}
+          <button id="extraSlashConfirmBtn">${picked.size > 0 ? "Xác nhận" : "Không thêm"}</button>`;
+        msg.candidateIds.forEach((id) => {
+          document.querySelector(`[data-target-id="${id}"]`).onclick = () => {
+            if (picked.has(id)) picked.delete(id);
+            else if (picked.size < msg.maxExtra) picked.add(id);
+            render();
+          };
+        });
+        document.getElementById("extraSlashConfirmBtn").onclick = () => {
+          send({ type: "response", requestId: msg.requestId, targetIds: [...picked] });
+          close();
+        };
+      };
+      const close = () => {
+        clearPromptCountdown();
+        promptOverlayEl.className = "";
+        promptEl.innerHTML = "";
+      };
+      render();
+      startPromptCountdown(msg.requestId, msg.timeoutMs, close);
+    }
+
     /** Hegemony companion-bonus prompt (Milestone 23 addendum 5, 珠联璧合): fires once, the instant
      *  a human seat's SECOND general reveals, ONLY when their drafted pair is a real companion
      *  pair. "Hồi 1 máu" only shows while wounded (mirrors the real rule's own conditional 3rd
@@ -2898,6 +2942,7 @@
           "confirmSelfAction",
           "confirmHalfMaxHpDraw",
           "confirmNullification",
+          "chooseExtraSlashTargets",
         ].includes(msg.type);
         if (isPromptType) {
           if (msg.actorId !== mySeat) return; // a prompt for a seat this tab doesn't control
@@ -2968,6 +3013,7 @@
               "Dùng Vô Giải Khả Kích để triệt tiêu?",
             );
           }
+          else if (msg.type === "chooseExtraSlashTargets") showExtraSlashTargetsPicker(msg);
           return;
         }
       };

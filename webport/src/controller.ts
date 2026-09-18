@@ -146,6 +146,12 @@ export interface Controller {
   wantsHalfMaxHpBonusDraw(player: GamePlayer): Promise<boolean>;
   /** `candidates` is always non-empty (Room checks first). Return null to decline/pass. */
   chooseSlashTarget(actor: GamePlayer, candidates: GamePlayer[]): Promise<GamePlayer | null>;
+  /** Milestone 45 (Sha Moke's JiliTM): when `combat.ts`'s `maxSlashTargets` says `actor` may
+   *  Slash more than 1 person right now, asks for 0..`maxExtra` ADDITIONAL distinct targets
+   *  beyond `primary` (already chosen via `chooseSlashTarget` above), pulled from `candidates`
+   *  (never includes `primary`). The SAME played Slash card resolves against every returned
+   *  target too. Return `[]` to Slash only `primary`. */
+  chooseExtraSlashTargets(actor: GamePlayer, primary: GamePlayer, candidates: GamePlayer[], maxExtra: number): Promise<GamePlayer[]>;
   /** Room already confirmed `card` is a legal Weapon/Horse to equip right now. */
   wantsToEquip(player: GamePlayer, card: Card): Promise<boolean>;
   /** Dismantlement/Snatch/Duel: `candidates` is always non-empty. Return null to decline. */
@@ -187,6 +193,10 @@ export interface Controller {
    *  the pile; everything else stays on top in its original relative order. Returns the ids of
    *  cards to bury -- an empty set leaves the pile untouched. */
   chooseGuanxingBottom(player: GamePlayer, revealed: Card[]): Promise<Set<number>>;
+  /** Xunxun (Li Dian, Milestone 47): `player` looked at `revealed` (`peekTop(4)`, in draw order)
+   *  and picks EXACTLY 2 to keep into hand -- the other 2 get buried at the bottom of the pile
+   *  via `resolveXunxunSplit`. An invalid/missing response falls back to the first 2. */
+  chooseXunxunKeep(player: GamePlayer, revealed: Card[]): Promise<Set<number>>;
   /** Guicai (Sima Yi): `player` may replace an in-progress judgment's `currentCard` (owned by
    *  `judgeOwner`, for skill `reason`) with a card from their own hand (a "retrial"). Return
    *  the chosen card (must be present in `player.hand`) or null to decline. Only ever called
@@ -285,6 +295,15 @@ export function makeBotController(rng: () => number): Controller {
     async chooseSlashTarget(_actor, candidates) {
       return pickRandom(candidates);
     },
+    async chooseExtraSlashTargets(_actor, primary, candidates, maxExtra) {
+      const pool = candidates.filter((p) => p !== primary);
+      const picks: GamePlayer[] = [];
+      while (picks.length < maxExtra && pool.length > 0) {
+        const idx = Math.floor(rng() * pool.length);
+        picks.push(pool.splice(idx, 1)[0]);
+      }
+      return picks;
+    },
     async wantsToEquip() {
       return true;
     },
@@ -341,6 +360,14 @@ export function makeBotController(rng: () => number): Controller {
       // "known/valuable resource" preferences instead of leaving the pile untouched.
       const buryCount = Math.floor(revealed.length / 2);
       return new Set(pickLeastImportantCards(revealed, buryCount).map((c) => c.id));
+    },
+    async chooseXunxunKeep(_player, revealed) {
+      // Keep the most valuable 2 (bury the rest via pickLeastImportantCards) -- matches
+      // chooseGuanxingBottom's own "known/valuable resource" preference, just inverted (this
+      // skill sends the KEPT half to hand, not the buried half).
+      const buryCount = Math.max(0, revealed.length - 2);
+      const buried = pickLeastImportantCards(revealed, buryCount);
+      return new Set(revealed.filter((c) => !buried.includes(c)).map((c) => c.id));
     },
     async wantsToUseGuicai() {
       // No alignment-aware AI to judge whether flipping a given judgment helps or hurts

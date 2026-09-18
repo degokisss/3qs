@@ -1403,6 +1403,7 @@ async function testSavageAssaultAndArcheryAttackAreAChoice(): Promise<void> {
 function makeTestContext(alivePlayers: GamePlayer[], log: string[], drawTop: () => Card | null = () => null): EngineContext {
   return {
     alivePlayers,
+    currentPlayer: alivePlayers[0],
     discardPile: [],
     aoChienActive: false,
     isGameOver: () => false,
@@ -1431,6 +1432,10 @@ function makeTestContext(alivePlayers: GamePlayer[], log: string[], drawTop: () 
     peekTop: () => [],
     arrangeTop: () => {},
     askGuanxingBottom: async () => new Set<number>(),
+    askXunxunKeep: async (_player, revealed) => new Set(revealed.slice(0, 2).map((c) => c.id)),
+    resolveXunxunSplit: (player, revealed, keepIds) => {
+      player.hand.push(...revealed.filter((c) => keepIds.has(c.id)));
+    },
     askGuicaiRetrial: async () => null,
     askChooseDiscards: async (player, count) => player.hand.slice(0, count),
     askAnyHandCards: async (player, min, max) => player.hand.slice(0, Math.max(min, Math.min(max, player.hand.length))),

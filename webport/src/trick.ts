@@ -75,6 +75,9 @@ async function pickOpponentCard(ctx: EngineContext, actor: GamePlayer, owner: Ga
 }
 
 export async function resolveDismantlement(ctx: EngineContext, actor: GamePlayer, target: GamePlayer): Promise<void> {
+  for (const skill of target.skills) {
+    if (await skill.onTrickTargetCancelling?.(ctx, target, actor, CardKind.Dismantlement)) return;
+  }
   const candidates = [...target.hand, ...equippedCards(target)];
   if (candidates.length === 0) return;
   const chosen = await pickOpponentCard(ctx, actor, target, candidates);
@@ -84,6 +87,9 @@ export async function resolveDismantlement(ctx: EngineContext, actor: GamePlayer
 }
 
 export async function resolveSnatch(ctx: EngineContext, source: GamePlayer, target: GamePlayer): Promise<void> {
+  for (const skill of target.skills) {
+    if (await skill.onTrickTargetCancelling?.(ctx, target, source, CardKind.Snatch)) return;
+  }
   const candidates = [...target.hand, ...equippedCards(target)];
   if (candidates.length === 0) return;
   const chosen = await pickOpponentCard(ctx, source, target, candidates);
@@ -97,6 +103,12 @@ export async function resolveSnatch(ctx: EngineContext, source: GamePlayer, targ
  *  turn, same shape as resolveSlash's Jink requirement. */
 export async function resolveDuel(ctx: EngineContext, source: GamePlayer, target: GamePlayer): Promise<void> {
   ctx.log.push(`${source.id} dùng Quyết Đấu với ${target.id}`);
+  // Jiang (Sun Ce, Milestone 38 -- Hegemony-specific, NOT Standard): broadcast the fixed target
+  // to every alive player's skills before the exchange begins (Duel has no redirect/armor-
+  // nullify step in this engine, unlike Slash's onAllySlashTargeted, so this fires right here).
+  for (const p of ctx.alivePlayers) {
+    for (const skill of p.skills) await skill.onAllyDuelTargeted?.(ctx, p, target, source);
+  }
   let responder = target;
   let other = source;
   while (true) {

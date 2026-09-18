@@ -278,6 +278,23 @@ function makeHumanController(gr: GameRoom, playerId: string): Partial<Controller
         (msg) => candidates.find((c) => c.id === msg.targetId) ?? null,
         null,
       ),
+    chooseExtraSlashTargets: (_actor, primary, candidates, maxExtra) =>
+      askClient(
+        gr,
+        playerId,
+        {
+          type: "chooseExtraSlashTargets",
+          actorId: playerId,
+          primaryTargetId: primary.id,
+          candidateIds: candidates.map((c) => c.id),
+          maxExtra,
+        },
+        (msg) => {
+          const ids: string[] = Array.isArray(msg.targetIds) ? msg.targetIds : [];
+          return candidates.filter((c) => ids.includes(c.id)).slice(0, maxExtra);
+        },
+        [], // fallback on timeout/disconnect: offensive/optional-resource action, same "silent human passes" policy as chooseSlashTarget above
+      ),
     chooseTrickTarget: (_player, kind, candidates) =>
       askClient(
         gr,
@@ -482,6 +499,21 @@ function makeHumanController(gr: GameRoom, playerId: string): Partial<Controller
         },
         new Set<number>(), // fallback on timeout/disconnect: leave the pile untouched (nothing buried), matching
         // wantsToPlayTrick's "silent human passes" policy -- this ask is optional, never forced
+      ),
+    chooseXunxunKeep: (_player, revealed) =>
+      askClient(
+        gr,
+        playerId,
+        { type: "chooseXunxunKeep", actorId: playerId, revealed },
+        (msg) => {
+          const ids = Array.isArray(msg.keepIds) ? msg.keepIds : [];
+          return new Set(revealed.filter((c) => ids.includes(c.id)).map((c) => c.id));
+        },
+        new Set(revealed.slice(0, Math.min(2, revealed.length)).map((c) => c.id)), // fallback on
+        // timeout/disconnect: keep the first 2 revealed -- unlike Guanxing (an optional
+        // rearrange), Xunxun's invoke already committed to a mandatory exactly-2/exactly-2
+        // split by the time this ask fires, so leaving it fully unresolved isn't a sensible
+        // "silent pass" here
       ),
     wantsToUseGuicai: (player, judgeOwner, currentCard, reason) =>
       askClient(

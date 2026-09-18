@@ -28,15 +28,20 @@ import {
   allIndulgenceLikeCards,
   allSlashLikeCards,
   allSupplyShortageLikeCards,
+  allIronChainLikeCards,
+  findIronChainLikeCard,
   findDismantlementLikeCard,
   findDuelLikeCard,
   findFireAttackLikeCard,
+  isCardUsable,
   findIndulgenceLikeCard,
   findSlashLikeCard,
+  maxSlashTargets,
   findSupplyShortageLikeCard,
   heal,
   resolveSlash,
   resolveSlashBonusTarget,
+  usableHand,
 } from "./combat.js";
 import { GENERALS, GeneralDef, SKILLS, routeDiscard } from "./skill.js";
 import { Controller, FreeAction, makeBotController, pickLeastImportantCards, slashCandidates } from "./controller.js";
@@ -176,6 +181,10 @@ export class Room {
    *  gracefully rather than ever leaving a player with zero deputy candidates). */
   private candidateGenerals(count: number, kingdom?: string, pool?: GeneralDef[]): GeneralDef[] {
     let remaining = pool ? [...pool] : GENERALS.filter((g) => !this.takenGenerals.has(g.name));
+    // Milestone 39: Hegemony-specific supplementary generals (momentum.cpp/formation.cpp, e.g.
+    // Zang Ba/Sun Ce -- see GeneralDef's `hegemonyOnly` doc comment) never get offered outside
+    // Hegemony mode -- those upstream packages are Quốc Chiến-only content.
+    if (this.mode !== GameMode.Hegemony) remaining = remaining.filter((g) => !g.hegemonyOnly);
     if (kingdom) {
       const sameKingdom = remaining.filter((g) => g.kingdom === kingdom);
       if (sameKingdom.length > 0) remaining = sameKingdom;
@@ -335,6 +344,21 @@ export class Room {
     this.drawPile = [...bottom.slice().reverse(), ...this.drawPile, ...top.slice().reverse()];
   }
 
+  /** Xunxun support (Li Dian, Milestone 47): commits a peeked-4/keep-2 split -- removes exactly
+   *  `revealed.length` cards from the actual top of the pile (same invariant as `arrangeTop`),
+   *  pushes whichever of them are in `keepIds` straight into `player.hand`, and buries the rest
+   *  at the bottom (drawn last, in their `revealed` relative order). See EngineContext.
+   *  resolveXunxunSplit's doc comment for why this is a separate primitive from `arrangeTop`
+   *  (Guanxing's own rearrange-only support) -- Xunxun sends cards to hand, Guanxing never does. */
+  private resolveXunxunSplit(player: GamePlayer, revealed: Card[], keepIds: Set<number>): void {
+    const n = revealed.length;
+    this.drawPile.splice(this.drawPile.length - n, n);
+    const kept = revealed.filter((c) => keepIds.has(c.id));
+    const buried = revealed.filter((c) => !keepIds.has(c.id));
+    player.hand.push(...kept);
+    this.drawPile = [...buried.slice().reverse(), ...this.drawPile];
+  }
+
   private drawCards(player: GamePlayer, n: number): void {
     for (let i = 0; i < n; i++) {
       const c = this.drawOne();
@@ -350,6 +374,7 @@ export class Room {
     }
     const over = player.handcardNum - player.maxCards;
     if (over <= 0) return;
+    player.hengjiangDiscardedThisTurn = true; // Hengjiang (Zang Ba): this debuff really bit this turn
     const chosen = await this.controllers.get(player.id)!.chooseDiscards(player, over);
     // Validate: exactly `over` DISTINCT cards actually still in hand right now -- covers a
     // misbehaving or timed-out controller by falling back to pickLeastImportantCards instead of
@@ -412,6 +437,14 @@ export class Room {
     if (this.mode === GameMode.Identity && killer?.alive && player.role === Role.Rebel) {
       this.drawCards(killer, 3);
       this.log.push(`${killer.id} giết phản tặc ${player.id}, rút 3 lá`);
+    }
+
+    // Qiluan (He Taihou, Milestone 37 -- Hegemony-specific, NOT Standard): fires on the
+    // credited killer's own skills, mode-agnostic (works in both Identity and Hegemony) unlike
+    // the 2 Identity-only rules right above/below it.
+    if (killer?.alive) {
+      const killCtx = this.makeContext(this.players.filter((p) => p.alive));
+      for (const skill of killer.skills) await skill.onKill?.(killCtx, killer, player, this.rng);
     }
 
     // Standard rule: if the Lord kills a Loyalist (friendly fire), the Lord discards their
@@ -499,6 +532,7 @@ export class Room {
     const wasHidden = player.faction === "";
     const controller = this.controllers.get(player.id)!;
     const choice = await controller.chooseReveal(player, !player.mainRevealed, !player.deputyRevealed);
+    const skillsBeforeReveal = new Set(player.skills.map((s) => s.name)); // Guixiu (Mi Furen, Milestone 38): diffed below
     const revealedNow: string[] = [];
     if (choice.main && !player.mainRevealed) {
       player.mainRevealed = true;
@@ -509,6 +543,13 @@ export class Room {
       revealedNow.push(`phó tướng ${player.deputyGeneralName}`);
     }
     if (revealedNow.length === 0) return;
+    // Guixiu (Mi Furen, formation.cpp -- Milestone 38, Hegemony-specific, NOT Standard): fires
+    // on exactly the skills that just became visible (whichever half -- main, deputy, or both
+    // at once) -- computed as a set difference so a general drafted as either half still fires
+    // correctly, without hardcoding which slot owns the skill.
+    const newlyVisible = player.skills.filter((s) => !skillsBeforeReveal.has(s.name));
+    const revealCtx = this.makeContext(this.players.filter((p) => p.alive));
+    for (const skill of newlyVisible) await skill.onGeneralRevealed?.(revealCtx, player);
     if (wasHidden) {
       const { faction, isAmbitionist } = assignHegemonyFaction(player.id, player.kingdom, this.hegemonyKingdomCounts, this.hegemonyKingdomQuota);
       player.faction = faction;
@@ -601,6 +642,7 @@ export class Room {
   private makeContext(alive: GamePlayer[]): EngineContext {
     return {
       alivePlayers: alive,
+      currentPlayer: this.players[this.currentIndex],
       discardPile: this.discardPile,
       aoChienActive: this.aoChienActive,
       isGameOver: () => this.gameOver !== null,
@@ -632,6 +674,8 @@ export class Room {
       peekTop: (n) => this.peekTop(n),
       arrangeTop: (top, bottom) => this.arrangeTop(top, bottom),
       askGuanxingBottom: (player, revealed) => this.controllers.get(player.id)!.chooseGuanxingBottom(player, revealed),
+      askXunxunKeep: (player, revealed) => this.controllers.get(player.id)!.chooseXunxunKeep(player, revealed),
+      resolveXunxunSplit: (player, revealed, keepIds) => this.resolveXunxunSplit(player, revealed, keepIds),
       askGuicaiRetrial: (player, judgeOwner, currentCard, reason) =>
         this.controllers.get(player.id)!.wantsToUseGuicai(player, judgeOwner, currentCard, reason),
       askChooseDiscards: async (player, count) => {
@@ -701,7 +745,7 @@ export class Room {
     const startIdx = alive.indexOf(target);
     const order = startIdx === -1 ? alive : [...alive.slice(startIdx + 1), ...alive.slice(0, startIdx + 1)];
     for (const responder of order) {
-      const nullifyCard = responder.hand.find((c) => c.kind === CardKind.Nullification || c.kind === CardKind.HegNullification);
+      const nullifyCard = usableHand(responder).find((c) => c.kind === CardKind.Nullification || c.kind === CardKind.HegNullification);
       if (!nullifyCard) continue;
       if (!(await this.controllers.get(responder.id)!.wantsToNullify(responder, kind, source, target))) continue;
       responder.hand.splice(responder.hand.indexOf(nullifyCard), 1);
@@ -773,11 +817,19 @@ export class Room {
   }
 
   /** Sijian (Tianfeng): fires on `player`'s own skills right when a played card leaves their
-   *  hand at 0 count. Checked after every hand-emptying splice site below. */
+   *  hand at 0 count. Checked after every hand-emptying splice site below. Also broadcasts
+   *  Shoucheng (Jiang Wan/Fei Yi, Milestone 36 -- Hegemony-specific, NOT Standard) to every
+   *  OTHER alive player's skills, but only when it happened outside `player`'s own active turn
+   *  (their last-recorded `.phase` is `NotActive`). */
   private async checkHandEmptied(player: GamePlayer): Promise<void> {
     if (player.handcardNum !== 0) return;
     const ctx = this.makeContext(this.players.filter((p) => p.alive));
     for (const skill of player.skills) await skill.onHandEmptied?.(ctx, player, this.rng);
+    if (player.phase === Phase.NotActive) {
+      for (const other of ctx.alivePlayers.filter((p) => p !== player)) {
+        for (const skill of other.skills) await skill.onAllyHandEmptied?.(ctx, other, player, this.rng);
+      }
+    }
   }
 
   /**
@@ -849,7 +901,7 @@ export class Room {
     kind: CardKind,
     candidatesFor: (alive: GamePlayer[]) => GamePlayer[],
     resolve: (card: Card, target: GamePlayer, alive: GamePlayer[]) => void | Promise<void>,
-    findCard: (player: GamePlayer) => Card | null = (p) => p.hand.find((c) => c.kind === kind) ?? null,
+    findCard: (player: GamePlayer) => Card | null = (p) => usableHand(p).find((c) => c.kind === kind) ?? null,
   ): Promise<void> {
     if (this.gameOver || !player.alive) return;
     const card = findCard(player);
@@ -901,7 +953,7 @@ export class Room {
     kind: CardKind,
     candidatesFor: (alive: GamePlayer[]) => GamePlayer[],
     attach: (card: Card, target: GamePlayer, alive: GamePlayer[]) => void,
-    findCard: (player: GamePlayer) => Card | null = (p) => p.hand.find((c) => c.kind === kind) ?? null,
+    findCard: (player: GamePlayer) => Card | null = (p) => usableHand(p).find((c) => c.kind === kind) ?? null,
   ): Promise<void> {
     if (this.gameOver || !player.alive) return;
     const card = findCard(player);
@@ -960,6 +1012,7 @@ export class Room {
     player.hand.splice(player.hand.indexOf(slashCard), 1);
     await this.checkHandEmptied(player);
     await resolveSlash(this.makeContext(alive), player, target, slashCard);
+    await this.maybeResolveExtraSlashTargets(player, target, slashCard);
     await this.maybeResolveTianyiBonusTarget(player, target);
     this.onLiveUpdate?.();
     return true;
@@ -991,6 +1044,7 @@ export class Room {
     this.log.push(`${player.id} dùng Trượng Bát Xà Mâu: 2 lá bài như 1 Sát`);
     await this.checkHandEmptied(player);
     await resolveSlash(this.makeContext(alive), player, target, slashCard);
+    await this.maybeResolveExtraSlashTargets(player, target, slashCard);
     await this.maybeResolveTianyiBonusTarget(player, target);
     this.onLiveUpdate?.();
     return true;
@@ -1012,6 +1066,28 @@ export class Room {
     if (!target) return;
     await resolveSlashBonusTarget(this.makeContext(this.players.filter((p) => p.alive)), player, target);
     this.onLiveUpdate?.();
+  }
+
+  /** Milestone 45 (Sha Moke's JiliTM half of "jili", transformation.cpp -- Hegemony-specific,
+   *  NOT Standard): if `player` currently has extra Slash targets available (combat.ts's
+   *  `maxSlashTargets`), offers 0..N additional targets beyond `primaryTarget` (already
+   *  resolved) from the SAME `slashCandidates` pool, and resolves the SAME `slashCard` against
+   *  each of them too -- matches the real rule's "target count" modifier (not extra physical
+   *  cards); the whole reason each `resolveSlash` call here re-derives `alive`/`ctx` is that an
+   *  earlier target's Jink-fail/dying loop may have killed someone since the last snapshot. */
+  private async maybeResolveExtraSlashTargets(player: GamePlayer, primaryTarget: GamePlayer, slashCard: Card): Promise<void> {
+    if (this.gameOver || !player.alive) return;
+    const alive = this.players.filter((p) => p.alive);
+    const maxExtra = maxSlashTargets(this.makeContext(alive), player) - 1;
+    if (maxExtra <= 0) return;
+    const candidates = slashCandidates(alive, player).filter((p) => p !== primaryTarget);
+    if (candidates.length === 0) return;
+    const extras = await this.controllers.get(player.id)!.chooseExtraSlashTargets(player, primaryTarget, candidates, maxExtra);
+    for (const extra of extras) {
+      if (this.gameOver || !player.alive || !extra.alive || extra === primaryTarget) continue;
+      await resolveSlash(this.makeContext(this.players.filter((p) => p.alive)), player, extra, slashCard);
+      this.onLiveUpdate?.();
+    }
   }
 
   /** Real Sanguosha slash limit: 1 per turn by default, raised by e.g. Paoxiao (skill.ts), or
@@ -1038,7 +1114,7 @@ export class Room {
     // action, no target, no limit -- the bot policy always wants to).
     for (let i = player.hand.length - 1; i >= 0; i--) {
       const c = player.hand[i];
-      if (c.kind === CardKind.Weapon || c.kind === CardKind.Horse || c.kind === CardKind.Armor) {
+      if ((c.kind === CardKind.Weapon || c.kind === CardKind.Horse || c.kind === CardKind.Armor) && isCardUsable(player, c)) {
         if (await controller.wantsToEquip(player, c)) {
           player.hand.splice(i, 1);
           await this.equip(player, c);
@@ -1056,7 +1132,7 @@ export class Room {
     for (let i = player.hand.length - 1; i >= 0 && player.alive && !this.gameOver && !this.aoChienActive; i--) {
       if (!player.isWounded()) break;
       const c = player.hand[i];
-      if (c.kind !== CardKind.Peach) continue;
+      if (c.kind !== CardKind.Peach || !isCardUsable(player, c)) continue;
       if (!(await controller.wantsToUsePeachSelfHeal(player))) continue;
       player.hand.splice(i, 1);
       this.discardPile.push(c);
@@ -1070,7 +1146,7 @@ export class Room {
     // pattern as the Peach self-heal loop above (see controller.ts's wantsToUseAnalepticBuff).
     for (let i = player.hand.length - 1; i >= 0 && player.alive && !this.gameOver; i--) {
       const c = player.hand[i];
-      if (c.kind !== CardKind.Analeptic) continue;
+      if (c.kind !== CardKind.Analeptic || !isCardUsable(player, c)) continue;
       if (!(await controller.wantsToUseAnalepticBuff(player))) continue;
       player.hand.splice(i, 1);
       this.discardPile.push(c);
@@ -1151,6 +1227,7 @@ export class Room {
       CardKind.IronChain,
       (alive) => ironChainCandidates(alive),
       (_card, target, alive) => resolveIronChain(this.makeContext(alive), target),
+      (p) => findIronChainLikeCard(p),
     );
     await this.tryPlayTargeted(
       player,
@@ -1230,7 +1307,8 @@ export class Room {
     const alive = this.players.filter((p) => p.alive);
     const actions: FreeAction[] = [];
 
-    for (const c of player.hand) {
+    const hand = usableHand(player); // Tiềm Tập/Qianxi (Ma Dai): excludes any color-forbidden card
+    for (const c of hand) {
       if (c.kind === CardKind.Weapon || c.kind === CardKind.Horse || c.kind === CardKind.Armor) actions.push({ kind: "equip", cardId: c.id });
     }
 
@@ -1245,7 +1323,7 @@ export class Room {
       addPlayCard(allDismantlementLikeCards(player), CardKind.Dismantlement);
     }
     if (snatchCandidates(player, alive).length > 0) {
-      addPlayCard(player.hand.filter((c) => c.kind === CardKind.Snatch), CardKind.Snatch);
+      addPlayCard(hand.filter((c) => c.kind === CardKind.Snatch), CardKind.Snatch);
     }
     if (duelCandidates(player, alive).length > 0) {
       addPlayCard(allDuelLikeCards(player), CardKind.Duel);
@@ -1254,14 +1332,14 @@ export class Room {
       addPlayCard(allFireAttackLikeCards(player), CardKind.FireAttack);
     }
     if (collateralCandidates(player, alive).length > 0) {
-      addPlayCard(player.hand.filter((c) => c.kind === CardKind.Collateral), CardKind.Collateral);
+      addPlayCard(hand.filter((c) => c.kind === CardKind.Collateral), CardKind.Collateral);
     }
     if (befriendAttackingCandidates(player, alive).length > 0) {
-      addPlayCard(player.hand.filter((c) => c.kind === CardKind.BefriendAttacking), CardKind.BefriendAttacking);
+      addPlayCard(hand.filter((c) => c.kind === CardKind.BefriendAttacking), CardKind.BefriendAttacking);
     }
-    addPlayCard(player.hand.filter((c) => c.kind === CardKind.IronChain), CardKind.IronChain);
+    addPlayCard(allIronChainLikeCards(player), CardKind.IronChain);
     if (knownBothCandidates(player, alive).length > 0) {
-      addPlayCard(player.hand.filter((c) => c.kind === CardKind.KnownBoth), CardKind.KnownBoth);
+      addPlayCard(hand.filter((c) => c.kind === CardKind.KnownBoth), CardKind.KnownBoth);
     }
     if (indulgenceCandidates(player, alive).length > 0) {
       addPlayCard(allIndulgenceLikeCards(player), CardKind.Indulgence);
@@ -1269,12 +1347,12 @@ export class Room {
     if (supplyShortageCandidates(player, alive).length > 0) {
       addPlayCard(allSupplyShortageLikeCards(player), CardKind.SupplyShortage);
     }
-    addPlayCard(player.hand.filter((c) => c.kind === CardKind.Lightning), CardKind.Lightning);
-    addPlayCard(player.hand.filter((c) => c.kind === CardKind.AwaitExhausted), CardKind.AwaitExhausted);
-    addPlayCard(player.hand.filter((c) => c.kind === CardKind.ExNihilo), CardKind.ExNihilo);
-    addPlayCard(player.hand.filter((c) => c.kind === CardKind.SavageAssault), CardKind.SavageAssault);
-    addPlayCard(player.hand.filter((c) => c.kind === CardKind.ArcheryAttack), CardKind.ArcheryAttack);
-    addPlayCard(player.hand.filter((c) => c.kind === CardKind.GodSalvation), CardKind.GodSalvation);
+    addPlayCard(hand.filter((c) => c.kind === CardKind.Lightning), CardKind.Lightning);
+    addPlayCard(hand.filter((c) => c.kind === CardKind.AwaitExhausted), CardKind.AwaitExhausted);
+    addPlayCard(hand.filter((c) => c.kind === CardKind.ExNihilo), CardKind.ExNihilo);
+    addPlayCard(hand.filter((c) => c.kind === CardKind.SavageAssault), CardKind.SavageAssault);
+    addPlayCard(hand.filter((c) => c.kind === CardKind.ArcheryAttack), CardKind.ArcheryAttack);
+    addPlayCard(hand.filter((c) => c.kind === CardKind.GodSalvation), CardKind.GodSalvation);
     // Spear (weapon): offered independently of whether a real/viewAs Slash is also held --
     // real Sanguosha lets you choose either, not just fall back to this when out of Slashes.
     if (
@@ -1286,11 +1364,11 @@ export class Room {
     ) {
       actions.push({ kind: "spearSlash" });
     }
-    addPlayCard(player.hand.filter((c) => c.kind === CardKind.AmazingGrace), CardKind.AmazingGrace);
+    addPlayCard(hand.filter((c) => c.kind === CardKind.AmazingGrace), CardKind.AmazingGrace);
     if (player.isWounded() && !this.aoChienActive) {
-      addPlayCard(player.hand.filter((c) => c.kind === CardKind.Peach), CardKind.Peach);
+      addPlayCard(hand.filter((c) => c.kind === CardKind.Peach), CardKind.Peach);
     }
-    addPlayCard(player.hand.filter((c) => c.kind === CardKind.Analeptic), CardKind.Analeptic);
+    addPlayCard(hand.filter((c) => c.kind === CardKind.Analeptic), CardKind.Analeptic);
 
     for (const skill of player.skills) {
       if (usedSkillsThisTurn.has(skill.name)) continue;
@@ -1692,9 +1770,34 @@ export class Room {
     player.tianyiLostThisTurn = false;
     player.duelViewAsBlackAllowed = null;
     player.fixedDistanceTo.clear(); // Fenxun (Ding Feng): any distance override from a PRIOR turn expires
+    player.hengjiangMark = 0; // Hengjiang (Zang Ba): any debuff from a PRIOR turn expires
+    player.hengjiangDiscardedThisTurn = false;
+    player.dealtDamageInPlayPhase = false; // Shengxi (Jiang Wan/Fei Yi): any PRIOR turn's damage tracking expires
     for (const phase of PHASE_ORDER) {
       if (this.gameOver) return;
       await this.runPhase(player, phase);
+    }
+    // Hengjiang (Zang Ba): if this turn's owner was debuffed and it never actually forced a
+    // discard, Zang Ba draws 1 card as compensation -- the debuff itself always clears here
+    // regardless (matches the real rule's unconditional HengjiangFail reset).
+    if (player.hengjiangMark > 0) {
+      if (!player.hengjiangDiscardedThisTurn) {
+        const zangba = this.players.find((p) => p.alive && (p.general === "zangba" || p.deputyGeneral === "zangba"));
+        if (zangba) {
+          this.drawCards(zangba, 1);
+          this.log.push(`${zangba.id} rút 1 lá (hengjiang -- ${player.id} không bị ép bỏ bài dù giới hạn bị giảm)`);
+        }
+      }
+      player.hengjiangMark = 0;
+    }
+    // Tiềm Tập/Qianxi (Ma Dai): the restriction lasts only until Ma Dai's OWN turn ends -- clear
+    // it on whichever OTHER player he cast it against, not on `player` themselves (the
+    // restricted victim isn't necessarily the one whose turn is ending here).
+    for (const p of this.players) {
+      if (p.handColorForbiddenBy === player) {
+        p.handColorForbidden = null;
+        p.handColorForbiddenBy = null;
+      }
     }
     player.phase = Phase.NotActive;
     if (!fromQueue) this.advanceToNextAlivePlayer();

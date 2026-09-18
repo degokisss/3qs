@@ -88,8 +88,8 @@ import { Card, CardKind, Suit, makeVirtualSlash } from "./card.js";
 import { GamePlayer } from "./player.js";
 import { Phase, Role } from "./types.js";
 import { alliesOf, isAlly } from "./gamerule.js";
-import { EngineContext, SUIT_LABEL_VI, applyDamage, detachCardFrom, effectiveAttackRange, effectiveDistance, findSlashLikeCard, heal, judge, loseHp, resolveSlash } from "./combat.js";
-import { resolveArcheryAttack, resolveDuel } from "./trick.js";
+import { EngineContext, KnownBothOption, SUIT_LABEL_VI, applyDamage, detachCardFrom, effectiveAttackRange, effectiveDistance, findSlashLikeCard, heal, judge, loseHp, resolveSlash, usableHand } from "./combat.js";
+import { knownBothCandidates, resolveAnalepticBuff, resolveArcheryAttack, resolveDuel } from "./trick.js";
 
 export interface Skill {
   name: string;
@@ -121,6 +121,9 @@ export interface Skill {
   /** ViewAs: can `card` be played as if it were SupplyShortage (e.g. Xu Huang's Duanliang, any
    *  black card)? */
   canViewAsSupplyShortage?(card: Card, player: GamePlayer): boolean;
+  /** ViewAs: can `card` be played/responded with as if it were IronChain (e.g. Pang Tong's
+   *  Lianhuan, any Club)? */
+  canViewAsIronChain?(card: Card, player: GamePlayer): boolean;
   /** True while `player` should be immune to being targeted by Slash/Duel (e.g. Kongcheng). */
   immuneToSlashAndDuel?(player: GamePlayer): boolean;
   /** True while `player` should be immune to being targeted by Snatch (e.g. Qianxun). */
@@ -200,12 +203,31 @@ export interface Skill {
     discardedCards: Card[],
     rng: () => number,
   ): Promise<void> | void;
+  /** Milestone 44 (Bian Huanghou's Wanwei, transformation.cpp -- Hegemony-specific, NOT
+   *  Standard): fired on `player`'s own skills right BEFORE Dismantlement/Snatch resolves
+   *  against them (`source` is whoever's using the card), one skill at a time in `player.
+   *  skills` order -- the first truthy return cancels the whole card (both are single-target-
+   *  only in this engine, so "remove this one target" and "the card fizzles" are the same
+   *  outcome; a broader multi-target-aware version isn't needed for what currently calls this).
+   *  See trick.ts's resolveDismantlement/resolveSnatch for the call sites. */
+  onTrickTargetCancelling?(
+    ctx: EngineContext,
+    player: GamePlayer,
+    source: GamePlayer,
+    kind: CardKind.Dismantlement | CardKind.Snatch,
+  ): Promise<boolean> | boolean;
   /** Generic proactive single-target skill (e.g. Dianwei's Qiangxi, Huatuo's Qingnang): gated by
    *  `wantsToUseSelfAction` then `chooseAnyPlayerTarget` restricted to `candidatesFor`'s list. */
   activeAction?: {
     candidatesFor(alive: GamePlayer[], player: GamePlayer): GamePlayer[];
     run(ctx: EngineContext, player: GamePlayer, target: GamePlayer, rng: () => number): Promise<void> | void;
   };
+  /** Milestone 45 (Sha Moke's JiliTM half of "jili", transformation.cpp -- Hegemony-specific,
+   *  NOT Standard): extra Slash targets `player` may pick for a single Slash use RIGHT NOW, on
+   *  top of the normal 1 -- see combat.ts's `maxSlashTargets`, room.ts's
+   *  `maybeResolveExtraSlashTargets`. The SAME played card resolves against every target (this
+   *  is a target-COUNT modifier, not extra physical cards). */
+  extraSlashTargets?(ctx: EngineContext, player: GamePlayer): number;
   /** Additive modifier to `player`'s distance TO other players (positive = closer, same -1-style
    *  shape as an offense horse). Consulted by combat.ts's effectiveDistance (e.g. Mashu). */
   attackDistanceDelta?(player: GamePlayer): number;
@@ -225,11 +247,51 @@ export interface Skill {
   /** Fired on `player`'s own skills right after a card they played leaves their hand at 0 count
    *  (e.g. Tianfeng's Sijian). */
   onHandEmptied?(ctx: EngineContext, player: GamePlayer, rng: () => number): Promise<void> | void;
+  /** Broadcast to every OTHER alive player's skills right after `emptiedPlayer`'s hand hits 0,
+   *  but ONLY when it happened outside `emptiedPlayer`'s own active turn (`Room.checkHandEmptied`
+   *  gates on their last-recorded `.phase` being `NotActive`) -- e.g. Shoucheng (Jiang Wan/Fei
+   *  Yi). Distinct from the self-only `onHandEmptied` above (which fires regardless of whose
+   *  turn it is, but only on the emptied player's OWN skills). */
+  onAllyHandEmptied?(ctx: EngineContext, self: GamePlayer, emptiedPlayer: GamePlayer, rng: () => number): Promise<void> | void;
+  /** Broadcast to EVERY alive player's skills the instant a Slash's real target is finalized
+   *  (after any Liushan/Daqiao redirect and RenwangShield/Vine armor-nullify check, but BEFORE
+   *  the Jink-dodge exchange even begins) -- e.g. Yicheng (Xu Sheng), Jiang (Sun Ce, checks
+   *  `slashCard`'s suit). Matches upstream's TargetConfirmed timing, distinct from the
+   *  attacker-only `onSlashTargeted` above (which decides un-dodgeability) and the
+   *  post-resolution `onSomeoneSlashDamaged`/`onSlashDodged` hooks (which only fire once the
+   *  outcome is already known). `self` may equal `attacker` (fires on the attacker's own
+   *  skills too, e.g. Jiang caring about a Slash he himself played). */
+  onAllySlashTargeted?(ctx: EngineContext, self: GamePlayer, target: GamePlayer, attacker: GamePlayer, slashCard: Card): Promise<void> | void;
+  /** Broadcast to EVERY alive player's skills the instant a Duel's target is fixed, before the
+   *  alternating Slash exchange begins -- e.g. Jiang (Sun Ce). `self` may equal `source` (fires
+   *  on the Duel's own player too). Duel has no redirect/armor-nullify step in this engine, so
+   *  this fires right at `resolveDuel`'s very start. */
+  onAllyDuelTargeted?(ctx: EngineContext, self: GamePlayer, target: GamePlayer, source: GamePlayer): Promise<void> | void;
   /** Broadcast to every alive player's skills whenever anyone starts dying / actually dies, so
    *  allies can react (e.g. Tianfeng's Suishi). `self` is the reacting player, never the one
    *  dying/dead. */
   onAllyDying?(ctx: EngineContext, self: GamePlayer, dyingAlly: GamePlayer, rng: () => number): Promise<void> | void;
   onAllyDeath?(ctx: EngineContext, self: GamePlayer, deadAlly: GamePlayer, rng: () => number): Promise<void> | void;
+  /** Fired on the CREDITED KILLER's own skills right after a kill resolves (e.g. Qiluan, He
+   *  Taihou) -- only fires when `Room.killPlayer` actually knows a specific killer (matches the
+   *  same "real killer, not just a role" guard the existing Rebel-kill-reward/Lord-punish logic
+   *  right above it in `killPlayer` already uses). Distinct from `onAllyDeath` (broadcast to
+   *  every ally regardless of who dealt the kill) and `claimsDeathCards` (automatic, no skill
+   *  choice involved). Real upstream's Qiluan actually waits until the killer's OWN turn next
+   *  ends before offering the draw; simplified to an immediate offer right after the kill --
+   *  same "faithful behavior, simplified interaction" precedent as collapsing per-point
+   *  damage asks (Hengjiang/Wangxi) down to once per event. */
+  onKill?(ctx: EngineContext, self: GamePlayer, killed: GamePlayer, rng: () => number): Promise<void> | void;
+  /** Fired on exactly the skills that just became visible when `self` reveals a general (main,
+   *  deputy, or both at once -- `Room.runHegemonyReveal` computes the set difference so this
+   *  fires correctly regardless of which slot the skill's general occupies) -- e.g. Guixiu (Mi
+   *  Furen). Hegemony-only (Identity mode has no hidden-general reveal step). */
+  onGeneralRevealed?(ctx: EngineContext, self: GamePlayer): Promise<void> | void;
+  /** Fired on `self`'s own skills right after their side's pindian card is revealed, before the
+   *  win/loss comparison (`isInitiator` says which side `self` is) -- e.g. Yingyang (Sun Ce).
+   *  A returned number adjusts `self`'s OWN effective comparison point by that delta (clamped
+   *  1-13 by the shared `pindian()` helper); returning nothing/0 leaves it unchanged. */
+  onPindianVerifying?(ctx: EngineContext, self: GamePlayer, isInitiator: boolean): Promise<number | void> | number | void;
   /** True if `player` claims a just-died player's hand instead of it going to the discard pile
    *  (e.g. Caopi's Xingshang). Purely automatic (no ask) -- see room.ts's killPlayer. */
   claimsDeathCards?: boolean;
@@ -392,6 +454,517 @@ async function fankuiOnDamaged(ctx: EngineContext, player: GamePlayer, source: G
   player.hand.push(stolen);
   ctx.log.push(`${player.id} lấy 1 lá từ ${source.id} (fankui)`);
 }
+
+/** Hengjiang (Zang Ba, momentum.cpp -- see player.ts's `hengjiangMark`/`hengjiangDiscardedThisTurn`
+ *  doc comments for the full reset/reward timing). Real Hengjiang is a per-POINT-of-damage
+ *  MasochismSkill ask; this port's `onDamaged` hook fires once per damage EVENT regardless of
+ *  amount (same simplification every other masochism-style skill here already makes, e.g.
+ *  Fankui/Jianxiong above), so this invokes at most once per hit. */
+async function hengjiangOnDamaged(ctx: EngineContext, player: GamePlayer): Promise<void> {
+  if (!(await ctx.askUseSelfAction(player, "hengjiang"))) return;
+  ctx.currentPlayer.hengjiangMark += 1;
+  ctx.log.push(`${player.id} dùng Hoành Giang: giới hạn bài của ${ctx.currentPlayer.id} giảm 1 (còn lại lượt này)`);
+}
+
+/** Wangxi (Li Dian, momentum.cpp -- Milestone 36, a Hegemony-specific supplementary general,
+ *  NOT one of the 60 Standard generals): whenever Li Dian either deals OR takes damage, he may
+ *  have himself AND the other combatant each draw 1 card. Shared by both directions below --
+ *  real upstream is a per-POINT-of-damage ask (same simplification as Hengjiang above: this
+ *  port's onDamaged/onDamageDealt hooks carry no `amount`, so this invokes at most once per
+ *  hit). */
+async function wangxiMutualDraw(ctx: EngineContext, self: GamePlayer, other: GamePlayer): Promise<void> {
+  if (other === self || !other.alive) return;
+  if (!(await ctx.askUseSelfAction(self, "wangxi"))) return;
+  ctx.draw(self, 1);
+  ctx.draw(other, 1);
+  ctx.log.push(`${self.id} dùng Vong Khích: ${self.id} và ${other.id} mỗi người rút 1 lá.`);
+}
+async function wangxiOnDamaged(ctx: EngineContext, player: GamePlayer, source: GamePlayer): Promise<void> {
+  await wangxiMutualDraw(ctx, player, source);
+}
+async function wangxiOnDamageDealt(ctx: EngineContext, source: GamePlayer, target: GamePlayer): Promise<void> {
+  await wangxiMutualDraw(ctx, source, target);
+}
+
+/** Duanxie (Chen Wu/Dong Xi combined general, momentum.cpp -- Milestone 36, Hegemony-specific,
+ *  NOT Standard): once per Play phase (enforced generically by `usedSkillsThisTurn`, see
+ *  room.ts's `computeLegalActions`), choose another not-yet-chained player to chain -- and
+ *  chain yourself too, if you aren't already (matches upstream's `DuanxieCard::onEffect` self
+ *  side-effect). Real upstream also gates the target by kingdom-based `canBeChainedBy` rules;
+ *  this port's whole Iron Chain trick card already simplifies that away (`ironChainCandidates`
+ *  in trick.ts returns every alive player, no kingdom restriction), so this matches that same
+ *  precedent. */
+const duanxieAction = {
+  candidatesFor(alive: GamePlayer[], player: GamePlayer): GamePlayer[] {
+    return alive.filter((p) => p !== player && !p.chained);
+  },
+  async run(ctx: EngineContext, player: GamePlayer, target: GamePlayer): Promise<void> {
+    target.chained = true;
+    if (!player.chained) player.chained = true;
+    ctx.log.push(`${player.id} dùng Đoạn Tiết: ${target.id}${player.chained ? ` và ${player.id}` : ""} vào trạng thái liên hoàn.`);
+  },
+};
+
+/** Shared by Fenming below: `actor` chooses exactly one of `owner`'s cards (hand or equipped)
+ *  to discard -- same candidate-building/pick pattern as trick.ts's Dismantlement/Snatch, just
+ *  discarding instead of stealing. */
+async function forcedDiscardOne(ctx: EngineContext, actor: GamePlayer, owner: GamePlayer, reason: string): Promise<void> {
+  const candidates = [...owner.hand, ...[owner.weapon, owner.defenseHorse, owner.offenseHorse].filter((c): c is Card => c !== null)];
+  if (candidates.length === 0) return;
+  const picked = await ctx.askPickPlayerCard(actor, owner, candidates);
+  const chosen = candidates.find((c) => c.id === picked.id) ?? candidates[0];
+  await detachCardFrom(ctx, owner, chosen);
+  ctx.discardPile.push(chosen);
+  ctx.log.push(`${owner.id} bỏ 1 lá bài (${reason}, ${actor.id} chọn)`);
+}
+
+/** Tiaoxin/Khiêu Hấn (Jiang Wei, formation.cpp -- Milestone 41, Hegemony-specific, NOT
+ *  Standard): once per Play phase, pick a target within Jiang Wei's own effective attack range
+ *  -- they may use a real Slash against HIM (reusing `resolveSlash` directly, same "reuse the
+ *  real card resolver instead of faking the effect" precedent as Lijian's Duel-substitution
+ *  above); if they decline or can't, Jiang Wei discards 1 of their cards (his own choice, via
+ *  the shared `forcedDiscardOne`). */
+const tiaoxinAction = {
+  candidatesFor(alive: GamePlayer[], player: GamePlayer): GamePlayer[] {
+    return alive.filter((p) => p !== player && effectiveDistance(alive, player, p) <= effectiveAttackRange(alive, player));
+  },
+  async run(ctx: EngineContext, player: GamePlayer, target: GamePlayer): Promise<void> {
+    const slashCard = findSlashLikeCard(target, ctx.aoChienActive);
+    if (slashCard && (await ctx.askUseSelfAction(target, "tiaoxin-slash"))) {
+      target.hand.splice(target.hand.indexOf(slashCard), 1);
+      ctx.discardPile.push(slashCard);
+      if (slashCard.kind !== CardKind.Slash) ctx.log.push(`${target.id} biến 1 lá bài thành Sát (kỹ năng biến hóa)`);
+      ctx.log.push(`${target.id} dùng Sát nhắm vào ${player.id} (tiaoxin)`);
+      await resolveSlash(ctx, target, player, slashCard);
+    } else {
+      await forcedDiscardOne(ctx, player, target, "tiaoxin");
+    }
+  },
+};
+
+/** Huyuan/Hộ Viện (Cao Hong, formation.cpp -- Milestone 41, Hegemony-specific, NOT Standard): at
+ *  his own Finish phase, may give 1 held equip card to any other player (reusing `ctx.
+ *  equipPlayer`, same as Zhijian's own equip-gift above), then pick a player at EXACTLY
+ *  distance 1 of the RECIPIENT (not necessarily Cao Hong himself) to force a discard from
+ *  (shared `forcedDiscardOne`). Real upstream's candidate pool for that 2nd pick doesn't
+ *  explicitly exclude Cao Hong himself; simplified to exclude him here (a bot would never
+ *  rationally target itself anyway). */
+const huyuanAction = {
+  phase: Phase.Finish,
+  async run(ctx: EngineContext, player: GamePlayer): Promise<void> {
+    const equipCards = usableHand(player).filter((c) => c.kind === CardKind.Weapon || c.kind === CardKind.Horse || c.kind === CardKind.Armor);
+    if (equipCards.length === 0 || !(await ctx.askUseSelfAction(player, "huyuan"))) return;
+    const card = await ctx.askPickCard(player, equipCards);
+    const recipients = ctx.alivePlayers.filter((p) => p !== player);
+    if (recipients.length === 0) return;
+    const recipient = await ctx.askChooseAnyPlayer(player, recipients);
+    if (!recipient) return;
+    player.hand.splice(player.hand.indexOf(card), 1);
+    await ctx.equipPlayer(recipient, card);
+    ctx.log.push(`${player.id} dùng Hộ Viện: trang bị 1 lá cho ${recipient.id}.`);
+    const nearby = ctx.alivePlayers.filter((p) => p !== player && effectiveDistance(ctx.alivePlayers, recipient, p) === 1);
+    if (nearby.length === 0) return;
+    const victim = await ctx.askChooseAnyPlayer(player, nearby);
+    if (!victim) return;
+    await forcedDiscardOne(ctx, player, victim, "huyuan");
+  },
+};
+
+/** Hengzheng (Dong Zhuo, momentum.cpp -- Milestone 42, Hegemony-specific, NOT Standard): at the
+ *  start of his own Draw phase, if he's empty-handed OR at exactly 1 HP, may take 1 card (his
+ *  own choice of hand/equip/judge-area card) from EVERY other player who holds any --
+ *  `otherPhaseAction` at `Phase.Draw`. Baoling/Benghuai (Dong Zhuo's other 2 real skills) stay
+ *  deferred: Baoling only functions while he's specifically the MAIN(head)-slot general (same
+ *  position-dependent-skill blocker as Jiang Wei's Yizhi above) and its effect dynamically
+ *  grants Benghuai via a voluntary discard-his-own-deputy-general choice (the same unbuilt
+ *  "voluntary self-general-removal" subsystem Mi Furen's Cunsi/Sun Ce's Hunshang are already
+ *  deferred for). */
+const hengzhengAction = {
+  phase: Phase.Draw,
+  async run(ctx: EngineContext, player: GamePlayer): Promise<void> {
+    if (player.handcardNum !== 0 && player.hp !== 1) return;
+    const targets = ctx.alivePlayers.filter(
+      (p) => p !== player && (p.hand.length > 0 || p.weapon || p.defenseHorse || p.offenseHorse || p.judgeArea.length > 0),
+    );
+    if (targets.length === 0 || !(await ctx.askUseSelfAction(player, "hengzheng"))) return;
+    for (const target of targets) {
+      const candidates = [
+        ...target.hand,
+        ...[target.weapon, target.defenseHorse, target.offenseHorse].filter((c): c is Card => c !== null),
+        ...target.judgeArea,
+      ];
+      if (candidates.length === 0) continue;
+      const picked = await ctx.askPickPlayerCard(player, target, candidates);
+      const card = candidates.find((c) => c.id === picked.id) ?? candidates[0];
+      const judgeIdx = target.judgeArea.indexOf(card);
+      if (judgeIdx !== -1) target.judgeArea.splice(judgeIdx, 1);
+      else await detachCardFrom(ctx, target, card);
+      player.hand.push(card);
+      ctx.log.push(`${player.id} lấy 1 lá của ${target.id} (hengzheng)`);
+    }
+  },
+};
+
+/** Shangyi (Jiang Qin, formation.cpp -- Milestone 42, Hegemony-specific, NOT Standard): once
+ *  per Play phase, pick a target with any hand card or a still-hidden general, then choose to
+ *  either (a) privately view their hand and discard 1 BLACK card from it, or (b) privately view
+ *  one of their still-hidden generals -- reuses KnownBoth's exact `askKnownBothChoice`/
+ *  `revealPrivately` infra (Milestone 31) rather than inventing a parallel private-info channel;
+ *  same "reuse over reinvention" precedent as Tiaoxin/Huyuan above. Simplified: real Shangyi's
+ *  "view a hidden general" branch reveals BOTH still-hidden generals at once -- this reuses
+ *  KnownBoth's own one-slot-at-a-time choice instead (a minor faithful-behavior/simplified-
+ *  interaction nuance, not a missing mechanic). Niaoxiang (Jiang Qin's other skill) stays
+ *  deferred -- BattleArraySkill (formation), same excluded category as Zhang Ren's Fengshi and
+ *  Cao Hong's Heyi. */
+const shangyiAction = {
+  candidatesFor: (alive: GamePlayer[], player: GamePlayer) => knownBothCandidates(player, alive),
+  async run(ctx: EngineContext, player: GamePlayer, target: GamePlayer): Promise<void> {
+    const options: KnownBothOption[] = [];
+    if (target.handcardNum > 0) options.push("handcards");
+    if (!target.mainRevealed) options.push("head_general");
+    if (target.deputyGeneral !== "" && !target.deputyRevealed) options.push("deputy_general");
+    if (options.length === 0) return;
+    const choice = await ctx.askKnownBothChoice(player, target, options);
+    const picked = options.includes(choice) ? choice : options[0];
+    if (picked === "handcards") {
+      ctx.revealPrivately(player, { kind: "hand", ownerId: target.id, cards: [...target.hand] });
+      const blackCards = target.hand.filter((c) => c.suit === Suit.Spade || c.suit === Suit.Club);
+      if (blackCards.length === 0) {
+        ctx.log.push(`${player.id} dùng Thương Nghị xem bài ${target.id}, không có lá đen để bỏ (shangyi)`);
+        return;
+      }
+      const chosen = await ctx.askPickPlayerCard(player, target, blackCards);
+      const card = blackCards.find((c) => c.id === chosen.id) ?? blackCards[0];
+      await detachCardFrom(ctx, target, card);
+      ctx.discardPile.push(card);
+      ctx.log.push(`${player.id} dùng Thương Nghị xem bài ${target.id}, bỏ 1 lá đen (shangyi)`);
+    } else {
+      const slot: "main" | "deputy" = picked === "head_general" ? "main" : "deputy";
+      const generalName = slot === "main" ? target.general : target.deputyGeneral;
+      ctx.revealPrivately(player, { kind: "general", ownerId: target.id, generalName, slot });
+      ctx.log.push(`${player.id} dùng Thương Nghị xem tướng ẩn của ${target.id} (shangyi)`);
+    }
+  },
+};
+
+/** Zhiyu (Xun You, transformation.cpp -- Milestone 43, Hegemony-specific, NOT Standard): after
+ *  taking damage, draws 1 card -- if his hand is then a single color (all red or all black),
+ *  the damage's source discards 1 of their own choosing. `onDamaged` reuse (same self-reactive
+ *  hook as Ganglie/Fankui/Jianxiong above; same "drop the optional invoke ask, auto-resolve"
+ *  simplification those already make). Qice (his other real skill: recast any played trick card
+ *  as a different one AND transform his deputy general) stays deferred -- both a guhuo-style
+ *  "view as any of several different card types" mechanic and `transformDeputyGeneral` are
+ *  unbuilt subsystems this engine doesn't have. */
+async function zhiyuOnDamaged(ctx: EngineContext, player: GamePlayer, source: GamePlayer): Promise<void> {
+  ctx.draw(player, 1);
+  if (!player.alive || player.hand.length === 0) return;
+  const isRed = (c: Card) => c.suit === Suit.Heart || c.suit === Suit.Diamond;
+  const first = isRed(player.hand[0]);
+  if (!player.hand.every((c) => isRed(c) === first)) return;
+  if (!source.alive || source.hand.length === 0) return;
+  const discarded = await ctx.askChooseDiscards(source, 1);
+  for (const c of discarded) {
+    source.hand.splice(source.hand.indexOf(c), 1);
+    ctx.discardPile.push(c);
+  }
+  if (discarded.length > 0) ctx.log.push(`${player.id} dùng Chi Dụ: bài đồng màu, ${source.id} bỏ 1 lá`);
+}
+
+/** Xichou (Li Guo, transformation.cpp -- Milestone 43, Hegemony-specific, NOT Standard):
+ *  compulsory, the instant Li Guo reveals, gains +2 max HP and heals 2. `onGeneralRevealed`
+ *  reuse (Milestone 38). Deferred: the rest of the real skill -- for the remainder of the game,
+ *  the FIRST card Li Guo plays/responds with each Play phase locks a color, and any
+ *  DIFFERENT-colored card use/response that same phase costs him 1 HP -- needs a broad
+ *  per-turn "which color was the first card played" interception across every use/response call
+ *  site (the same scale of sweep Milestone 40's card-restriction subsystem needed), not
+ *  attempted speculatively this round. */
+async function xichouOnRevealed(ctx: EngineContext, self: GamePlayer): Promise<void> {
+  self.maxHp += 2;
+  await heal(ctx, self, 2);
+  ctx.log.push(`${self.id} dùng Nghi Sầu: +2 máu tối đa, hồi 2 máu`);
+}
+
+/** Sanyao (Ma Su, transformation.cpp -- Milestone 43, Hegemony-specific, NOT Standard): ONCE PER
+ *  GAME (not per turn -- see player.ts's `sanyaoUsed`), discard 1 card to deal 1 damage to
+ *  whoever currently has the HIGHEST hp among himself and his allies. */
+const sanyaoAction = {
+  candidatesFor(alive: GamePlayer[], player: GamePlayer): GamePlayer[] {
+    if (player.sanyaoUsed || player.hand.length === 0) return [];
+    const pool = alive.filter((p) => p === player || isAlly(player, p));
+    if (pool.length === 0) return [];
+    const maxHp = Math.max(...pool.map((p) => p.hp));
+    return pool.filter((p) => p.hp === maxHp);
+  },
+  async run(ctx: EngineContext, player: GamePlayer, target: GamePlayer): Promise<void> {
+    if (!(await ctx.askUseSelfAction(player, "sanyao"))) return;
+    const card = await ctx.askPickCard(player, player.hand);
+    player.hand.splice(player.hand.indexOf(card), 1);
+    ctx.discardPile.push(card);
+    player.sanyaoUsed = true;
+    ctx.log.push(`${player.id} dùng Tán Diêu: bỏ 1 lá, gây 1 sát thương lên ${target.id}`);
+    await applyDamage(ctx, target, 1, player);
+  },
+};
+
+/** Zhiman (Ma Su, transformation.cpp -- Milestone 43, Hegemony-specific, NOT Standard): whenever
+ *  Ma Su damages someone else, may mark them (`GamePlayer.zhimanMarkedBy`); the NEXT time Ma Su
+ *  damages that SAME already-marked player, the mark clears and Ma Su automatically takes 1 of
+ *  their equipped/judge-area cards (no ask -- matches real upstream's `ZhimanSecond`, which has
+ *  no invoke cost of its own). `onDamageDealt` reuse. The real payoff also offers a bonus ally
+ *  deputy-general transform afterward -- dropped, `transformDeputyGeneral` is the same unbuilt
+ *  subsystem the rest of this package is deferred for. */
+async function zhimanOnDamageDealt(ctx: EngineContext, source: GamePlayer, target: GamePlayer): Promise<void> {
+  if (target === source || !target.alive) return;
+  if (target.zhimanMarkedBy === source.id) {
+    target.zhimanMarkedBy = null;
+    const equipped = [target.weapon, target.armor, target.defenseHorse, target.offenseHorse].filter((c): c is Card => c !== null);
+    const candidates = [...equipped, ...target.judgeArea];
+    if (candidates.length === 0) return;
+    const picked = await ctx.askPickPlayerCard(source, target, candidates);
+    const card = candidates.find((c) => c.id === picked.id) ?? candidates[0];
+    const judgeIdx = target.judgeArea.indexOf(card);
+    if (judgeIdx !== -1) target.judgeArea.splice(judgeIdx, 1);
+    else await detachCardFrom(ctx, target, card);
+    source.hand.push(card);
+    ctx.log.push(`${source.id} dùng Chí Mạn: lấy 1 lá trang bị/phán của ${target.id}`);
+  } else if (await ctx.askUseSelfAction(source, "zhiman")) {
+    target.zhimanMarkedBy = source.id;
+    ctx.log.push(`${source.id} dùng Chí Mạn: đánh dấu ${target.id}`);
+  }
+}
+
+/** LieFeng (Ling Tong, transformation.cpp -- Milestone 43, Hegemony-specific, NOT Standard):
+ *  whenever ANY of his own equipped cards leaves his equip zone (discarded, snatched, destroyed
+ *  -- matches real upstream's unconditional CardsMoveOneTime/PlaceEquip trigger), he may force 1
+ *  other player (his own choice, of hand OR equip) to discard 1 card. `onEquipLost` reuse
+ *  (Milestone 34's SilverLion hook, already fired for every equip-zone departure regardless of
+ *  reason). Xuanlue (his other real skill: once per game, steal 1-3 equipped cards from anyone
+ *  and redistribute them into empty equip slots across the whole table) stays deferred -- a
+ *  genuinely complex multi-step interactive equip-distribution flow, not attempted this round. */
+async function liefengOnEquipLost(ctx: EngineContext, player: GamePlayer): Promise<void> {
+  const candidates = ctx.alivePlayers.filter((p) => p !== player && (p.hand.length > 0 || p.weapon || p.armor || p.defenseHorse || p.offenseHorse));
+  if (candidates.length === 0 || !(await ctx.askUseSelfAction(player, "liefeng"))) return;
+  const target = await ctx.askChooseAnyPlayer(player, candidates);
+  if (!target) return;
+  await forcedDiscardOne(ctx, player, target, "liefeng");
+}
+
+/** Wanwei (Bian Huanghou, transformation.cpp -- Milestone 44, Hegemony-specific, NOT Standard):
+ *  when Dismantlement or Snatch targets her, she may pay a card to cancel herself as its target
+ *  -- Dismantlement: discard 1 of her own cards; Snatch: give 1 of her own cards to whoever
+ *  used it. Either way the card then has no target left (both are single-target-only in this
+ *  engine) and fizzles entirely. New `onTrickTargetCancelling` hook (see its own doc comment on
+ *  the Skill interface, and trick.ts's resolveDismantlement/resolveSnatch for the call sites).
+ *  Yuejian (her other real skill: an ally who targeted someone else this turn gets a raised
+ *  hand-size limit at their own Discard phase) stays deferred -- needs a broad "did I use a
+ *  card targeting someone else this turn" interception across every card-use call site, not
+ *  attempted this round. */
+async function wanweiOnTrickTargetCancelling(
+  ctx: EngineContext,
+  player: GamePlayer,
+  source: GamePlayer,
+  kind: CardKind.Dismantlement | CardKind.Snatch,
+): Promise<boolean> {
+  if (player.hand.length === 0 || !(await ctx.askUseSelfAction(player, "wanwei"))) return false;
+  const card = await ctx.askPickCard(player, player.hand);
+  player.hand.splice(player.hand.indexOf(card), 1);
+  if (kind === CardKind.Dismantlement) {
+    ctx.discardPile.push(card);
+    ctx.log.push(`${player.id} dùng Uyển Vi: bỏ 1 lá để hủy mục tiêu Quá Hạ Sách Kiều`);
+  } else {
+    source.hand.push(card);
+    ctx.log.push(`${player.id} dùng Uyển Vi: đưa 1 lá cho ${source.id} để hủy mục tiêu Thuận Thủ Khiên Dương`);
+  }
+  return true;
+}
+
+/** JiliTM half of Jili (Sha Moke, transformation.cpp -- Milestone 45, Hegemony-specific, NOT
+ *  Standard): while wielding a weapon, may target up to (1 + that weapon's range) players with
+ *  a single Slash use -- new `extraSlashTargets` hook (see combat.ts's `maxSlashTargets`,
+ *  room.ts's `maybeResolveExtraSlashTargets`; the whole reason this Milestone exists). The
+ *  OTHER half of the real compound "jili" skill (mark how many non-skill cards were played or
+ *  responded with this Play phase; when the count reaches the weapon's range EXACTLY, draw that
+ *  many cards) stays deferred -- it needs a broad "every card played or responded with, across
+ *  every use/response call site" interception, the same scale of sweep Xichou's color tax,
+ *  Yuejian, and Diancai are ALL separately deferred for; this milestone only builds the
+ *  target-COUNT subsystem, not that one. */
+function jiliExtraSlashTargets(_ctx: EngineContext, player: GamePlayer): number {
+  return player.weapon?.weaponRange ?? 0;
+}
+
+/** Fenming (Chen Wu/Dong Xi, momentum.cpp -- Milestone 36, Hegemony-specific, NOT Standard): at
+ *  your own Finish phase, if you're chained, may make EVERY currently chained player (yourself
+ *  included) discard 1 card of your choosing. */
+const fenmingAction = {
+  phase: Phase.Finish,
+  async run(ctx: EngineContext, player: GamePlayer): Promise<void> {
+    if (!player.chained) return;
+    const chainedAlive = ctx.alivePlayers.filter((p) => p.chained);
+    if (chainedAlive.length === 0 || !(await ctx.askUseSelfAction(player, "fenming"))) return;
+    for (const p of chainedAlive) {
+      if (p.alive) await forcedDiscardOne(ctx, player, p, "fenming");
+    }
+  },
+};
+
+/** Shengxi (Jiang Wan/Fei Yi combined general, formation.cpp -- Milestone 36, Hegemony-specific,
+ *  NOT Standard): marks whenever this player deals ANY damage during the turn -- checked by
+ *  `shengxiAction` below at the start of their own Discard phase (equivalent timing to
+ *  upstream's "Play phase ended" check). */
+function shengxiOnDamageDealt(_ctx: EngineContext, source: GamePlayer): void {
+  source.dealtDamageInPlayPhase = true;
+}
+/** Runs right before Discard-phase's own over-limit check (`Room.runOtherPhaseActions` fires
+ *  before a phase's default handling) -- functionally identical to upstream's "at the end of
+ *  your Play phase" timing. */
+const shengxiAction = {
+  phase: Phase.Discard,
+  async run(ctx: EngineContext, player: GamePlayer): Promise<void> {
+    if (player.dealtDamageInPlayPhase) return;
+    if (!(await ctx.askUseSelfAction(player, "shengxi"))) return;
+    ctx.draw(player, 2);
+    ctx.log.push(`${player.id} dùng Sinh Tức: rút 2 lá (không gây sát thương lượt này).`);
+  },
+};
+
+/** Shoucheng (Jiang Wan/Fei Yi, formation.cpp -- Milestone 36, Hegemony-specific, NOT Standard):
+ *  when an ALLY's hand hits 0 outside their own turn (see room.ts's `checkHandEmptied` gate),
+ *  may have them draw 1. */
+async function shouchengOnAllyHandEmptied(ctx: EngineContext, self: GamePlayer, emptiedPlayer: GamePlayer): Promise<void> {
+  if (!isAlly(self, emptiedPlayer)) return;
+  if (!(await ctx.askUseSelfAction(self, "shoucheng"))) return;
+  ctx.draw(emptiedPlayer, 1);
+  ctx.log.push(`${self.id} dùng Thủ Thành: ${emptiedPlayer.id} rút 1 lá.`);
+}
+
+/** Yicheng (Xu Sheng, formation.cpp -- Milestone 36, Hegemony-specific, NOT Standard): whenever
+ *  an ally (or Xu Sheng himself) is targeted by a Slash, may have them draw 1 and optionally
+ *  discard 1 of their own choosing. */
+async function yichengOnAllySlashTargeted(ctx: EngineContext, self: GamePlayer, target: GamePlayer, attacker: GamePlayer): Promise<void> {
+  if (self === attacker || !(self === target || isAlly(self, target))) return;
+  if (!(await ctx.askUseSelfAction(self, "yicheng"))) return;
+  ctx.draw(target, 1);
+  ctx.log.push(`${self.id} dùng Nghĩa Thành: ${target.id} rút 1 lá.`);
+  if (!target.alive) return;
+  const discarded = await ctx.askAnyHandCards(target, 0, 1);
+  if (discarded.length === 1 && target.hand.includes(discarded[0])) {
+    target.hand.splice(target.hand.indexOf(discarded[0]), 1);
+    await routeDiscard(ctx, target, discarded[0]);
+    ctx.log.push(`${target.id} bỏ 1 lá bài (yicheng)`);
+  }
+}
+
+/** Qiluan (He Taihou, formation.cpp -- Milestone 37, Hegemony-specific, NOT Standard): whenever
+ *  He Taihou causes a kill, she may draw 3 cards. Real upstream actually waits until the end of
+ *  the killer's OWN next turn before offering the draw; collapsed to an immediate offer right
+ *  after the kill lands -- see this file's `onKill` doc comment for the precedent. */
+async function qiluanOnKill(ctx: EngineContext, self: GamePlayer): Promise<void> {
+  if (!(await ctx.askUseSelfAction(self, "qiluan"))) return;
+  ctx.draw(self, 3);
+  ctx.log.push(`${self.id} dùng Khởi Loạn: rút 3 lá.`);
+}
+
+/** Guixiu (Mi Furen, formation.cpp -- Milestone 38, Hegemony-specific, NOT Standard): draws 2
+ *  the instant either of her generals reveals (`onGeneralRevealed`, fired once per newly
+ *  visible skill -- Mi Furen only ever has this one, so it fires at most once per game). Real
+ *  upstream also heals 1 on `GeneralRemoved` (her OWN general being removed mid-game); not
+ *  ported -- this engine has no general-removal mechanic at all (see Milestone 36/37's Dong
+ *  Zhuo/Cunsi deferral notes), so that clause can simply never trigger here. */
+async function guixiuOnGeneralRevealed(ctx: EngineContext, self: GamePlayer): Promise<void> {
+  if (!(await ctx.askUseSelfAction(self, "guixiu"))) return;
+  ctx.draw(self, 2);
+  ctx.log.push(`${self.id} dùng Quy Tú: rút 2 lá.`);
+}
+
+/** Jiang (Sun Ce, momentum.cpp -- Milestone 38, Hegemony-specific, NOT Standard): whenever Sun
+ *  Ce either plays OR is targeted by a Duel or a RED Slash, he may draw 1. Fires on both
+ *  broadcast hooks below since Duel and Slash resolve through 2 separate functions in this
+ *  engine; both check `self === attacker/source || self === target` to cover playing AND being
+ *  targeted in one shared shape. */
+async function jiangDraw(ctx: EngineContext, self: GamePlayer): Promise<void> {
+  if (!(await ctx.askUseSelfAction(self, "jiang"))) return;
+  ctx.draw(self, 1);
+  ctx.log.push(`${self.id} dùng Cương: rút 1 lá.`);
+}
+async function jiangOnAllySlashTargeted(
+  ctx: EngineContext,
+  self: GamePlayer,
+  target: GamePlayer,
+  attacker: GamePlayer,
+  slashCard: Card,
+): Promise<void> {
+  if (self !== attacker && self !== target) return;
+  if (slashCard.suit !== Suit.Heart && slashCard.suit !== Suit.Diamond) return;
+  await jiangDraw(ctx, self);
+}
+async function jiangOnAllyDuelTargeted(ctx: EngineContext, self: GamePlayer, target: GamePlayer, source: GamePlayer): Promise<void> {
+  if (self !== source && self !== target) return;
+  await jiangDraw(ctx, self);
+}
+
+/** Tiềm Tập/Qianxi (Ma Dai, momentum.cpp -- Milestone 40, Hegemony-specific, NOT Standard): at
+ *  the start of his own turn, may judge a card (color only, no card-kind effects); the judged
+ *  color then forbids a player within EXACTLY distance 1 of him from using/responding with any
+ *  HAND card of that color, until Ma Dai's OWN current turn ends (enforced via `GamePlayer.
+ *  handColorForbidden` + combat.ts's `usableHand`/`isCardUsable`, cleared by `Room.playTurn`'s
+ *  own end-of-turn sweep). This is the first ported skill needing a genuine card-USE-
+ *  restriction subsystem -- see webport/README.md's Milestone 40 entry for the full list of
+ *  engine call sites it touches. */
+const qianxiAction = {
+  phase: Phase.Start,
+  async run(ctx: EngineContext, player: GamePlayer): Promise<void> {
+    if (!(await ctx.askUseSelfAction(player, "qianxi"))) return;
+    const judgeCard = await judge(ctx, player, "qianxi");
+    if (!judgeCard) return;
+    const color = judgeCard.suit === Suit.Heart || judgeCard.suit === Suit.Diamond ? "red" : "black";
+    const candidates = ctx.alivePlayers.filter((p) => p !== player && effectiveDistance(ctx.alivePlayers, player, p) === 1);
+    if (candidates.length === 0) return;
+    const victim = await ctx.askChooseAnyPlayer(player, candidates);
+    if (!victim) return;
+    victim.handColorForbidden = color;
+    victim.handColorForbiddenBy = player;
+    ctx.log.push(
+      `${player.id} dùng Tiềm Tập: ${victim.id} không thể dùng/đáp trả bài trên tay chất ${color === "red" ? "Đỏ" : "Đen"} đến hết lượt của ${player.id}.`,
+    );
+  },
+};
+
+/** Yingyang (Sun Ce, momentum.cpp -- Milestone 39, Hegemony-specific, NOT Standard): whenever
+ *  Sun Ce is a party to a pindian (either side, via the shared `pindian()` helper's new
+ *  `onPindianVerifying` broadcast), he may adjust HIS OWN effective point by +3 or -3 (real
+ *  upstream's own free choice between the two, not situational -- collapsed to reusing the
+ *  generic yes/no `askUseSelfAction` ask twice, once to invoke and once for the +3/-3 choice,
+ *  rather than adding a dedicated 2-option ask type for one general). */
+async function yingyangOnPindianVerifying(ctx: EngineContext, self: GamePlayer): Promise<number | undefined> {
+  if (!(await ctx.askUseSelfAction(self, "yingyang"))) return undefined;
+  const increase = await ctx.askUseSelfAction(self, "yingyang-increase");
+  ctx.log.push(`${self.id} dùng Ưng Dương: điểm phán ${increase ? "+3" : "-3"}`);
+  return increase ? 3 : -3;
+}
+
+/** Zhendu (He Taihou, formation.cpp -- Milestone 39, Hegemony-specific, NOT Standard): discard
+ *  1 of your own cards, choose another player -- they gain the SAME Play-phase Slash-damage
+ *  buff a real played Analeptic grants (reusing `resolveAnalepticBuff`/`pendingSlashBonusDamage`
+ *  directly rather than simulating an actual forced card-play), then immediately take 1 damage
+ *  from He Taihou. Real upstream literally forces the target to "use" a virtual Analeptic card
+ *  (`room->useCard(...)` with a forced flag) and only deals the damage if that use genuinely
+ *  resolves; since a forced Analeptic self-use has no real failure case in this port's rules
+ *  (no card-limitation subsystem exists to block it -- see Ma Dai's Qianxi deferral), applying
+ *  the buff directly and always following with the damage is behaviorally equivalent. */
+const zhenduAction = {
+  candidatesFor(alive: GamePlayer[], player: GamePlayer): GamePlayer[] {
+    return player.hand.length > 0 ? alive.filter((p) => p !== player) : [];
+  },
+  async run(ctx: EngineContext, player: GamePlayer, target: GamePlayer): Promise<void> {
+    const discarded = await ctx.askAnyHandCards(player, 1, 1);
+    if (discarded.length !== 1 || !player.hand.includes(discarded[0])) return;
+    player.hand.splice(player.hand.indexOf(discarded[0]), 1);
+    await routeDiscard(ctx, player, discarded[0]);
+    ctx.log.push(`${player.id} dùng Chẩn Độc: bỏ 1 lá, buộc ${target.id} chịu hiệu ứng Tửu rồi nhận 1 sát thương.`);
+    resolveAnalepticBuff(ctx, target);
+    if (target.alive) await applyDamage(ctx, target, 1, player);
+  },
+};
 
 async function kurouSelfAction(ctx: EngineContext, player: GamePlayer, _rng: () => number): Promise<void> {
   await loseHp(ctx, player, 1);
@@ -690,6 +1263,25 @@ const guanxingAction = {
   },
 };
 
+/** Xunxun (Li Dian, momentum.cpp -- Milestone 47, Hegemony-specific, NOT Standard): at his own
+ *  Draw phase, may peek the top 4 cards of the draw pile, keep EXACTLY 2 of them into hand, and
+ *  bury the other 2 at the bottom of the pile. Unlike Guanxing above (automatic, no real cost
+ *  to declining), real Xunxun IS a genuine "may" ask -- gated by `askUseSelfAction`. Uses the
+ *  new `askXunxunKeep`/`resolveXunxunSplit` hooks (distinct from Guanxing's own arrange-ask,
+ *  which never sends cards to hand). */
+const xunxunAction = {
+  phase: Phase.Draw,
+  async run(ctx: EngineContext, player: GamePlayer): Promise<void> {
+    if (!(await ctx.askUseSelfAction(player, "xunxun"))) return;
+    const revealed = ctx.peekTop(4);
+    if (revealed.length === 0) return;
+    const keepIds = await ctx.askXunxunKeep(player, revealed);
+    const keptCount = revealed.filter((c) => keepIds.has(c.id)).length;
+    ctx.resolveXunxunSplit(player, revealed, keepIds);
+    ctx.log.push(`${player.id} dùng Tuần Tuần: xem ${revealed.length} lá đầu bộ, giữ ${keptCount} lá vào tay, còn lại xuống đáy`);
+  },
+};
+
 async function mengjinOnSlashDodged(ctx: EngineContext, attacker: GamePlayer, target: GamePlayer): Promise<void> {
   if (!(await discardRandom(ctx, target, ctx.rng))) return;
   ctx.log.push(`${target.id} bỏ 1 lá bài (mengjin)`);
@@ -847,14 +1439,18 @@ async function fanjianSelfAction(ctx: EngineContext, player: GamePlayer): Promis
   }
 }
 
-/** Shared pindian ("đấu điểm", card-point duel) for Lieren/Quhu: `initiator` and `opponent`
- *  each reveal 1 card from their own hand -- reusing `askPickCard` (the same generalized "pick
- *  exactly 1 from a candidate list" shape Amazing Grace's picker already has, here given the
- *  player's own hand as the candidate list) rather than adding a dedicated new ask. Higher
- *  point value wins; a tie favors `opponent` (the real rule: the side that INITIATED the
- *  pindian loses ties). Both revealed cards go to the discard pile regardless of outcome. A
- *  card-less `opponent` auto-loses (counted as 0 -- real Sanguosha rule for "nothing to
- *  reveal"); callers already guarantee `initiator.hand.length > 0`. */
+/** Shared pindian ("đấu điểm", card-point duel) for Lieren/Quhu/Yingyang: `initiator` and
+ *  `opponent` each reveal 1 card from their own hand -- reusing `askPickCard` (the same
+ *  generalized "pick exactly 1 from a candidate list" shape Amazing Grace's picker already
+ *  has, here given the player's own hand as the candidate list) rather than adding a dedicated
+ *  new ask. After both cards are revealed but before comparing, `onPindianVerifying`
+ *  (Milestone 39: Yingyang, Sun Ce) broadcasts to each side's own skills, letting one adjust
+ *  their OWN effective point by a returned delta (clamped to the real 1-13 range) -- the raw
+ *  revealed cards themselves are never mutated, only the comparison value. Higher effective
+ *  point wins; a tie favors `opponent` (the real rule: the side that INITIATED the pindian
+ *  loses ties). Both revealed cards go to the discard pile regardless of outcome. A card-less
+ *  `opponent` auto-loses (counted as 0 -- real Sanguosha rule for "nothing to reveal"); callers
+ *  already guarantee `initiator.hand.length > 0`. */
 async function pindian(ctx: EngineContext, initiator: GamePlayer, opponent: GamePlayer, reason: string): Promise<boolean> {
   const myCard = await ctx.askPickCard(initiator, initiator.hand);
   initiator.hand.splice(initiator.hand.indexOf(myCard), 1);
@@ -865,9 +1461,22 @@ async function pindian(ctx: EngineContext, initiator: GamePlayer, opponent: Game
     opponent.hand.splice(opponent.hand.indexOf(oppCard), 1);
     ctx.discardPile.push(oppCard);
   }
-  const won = !oppCard || myCard.point > oppCard.point;
-  const oppLabel = oppCard ? `${oppCard.point}` : "(không có bài)";
-  ctx.log.push(`${initiator.id} đấu điểm với ${opponent.id}: ${myCard.point} vs ${oppLabel} (${reason}) -- ${won ? initiator.id : opponent.id} thắng`);
+  let myPoint = myCard.point;
+  let oppPoint = oppCard?.point ?? 0;
+  for (const skill of initiator.skills) {
+    const delta = await skill.onPindianVerifying?.(ctx, initiator, true);
+    if (delta) myPoint = Math.max(1, Math.min(13, myPoint + delta));
+  }
+  if (oppCard) {
+    for (const skill of opponent.skills) {
+      const delta = await skill.onPindianVerifying?.(ctx, opponent, false);
+      if (delta) oppPoint = Math.max(1, Math.min(13, oppPoint + delta));
+    }
+  }
+  const won = !oppCard || myPoint > oppPoint;
+  const oppLabel = oppCard ? `${oppCard.point}${oppPoint !== oppCard.point ? `→${oppPoint}` : ""}` : "(không có bài)";
+  const myLabel = `${myCard.point}${myPoint !== myCard.point ? `→${myPoint}` : ""}`;
+  ctx.log.push(`${initiator.id} đấu điểm với ${opponent.id}: ${myLabel} vs ${oppLabel} (${reason}) -- ${won ? initiator.id : opponent.id} thắng`);
   return won;
 }
 
@@ -1470,6 +2079,12 @@ export const SKILLS: Record<string, Skill> = {
       "Đầu giai đoạn Chuẩn Bị, xem tối đa 5 lá đầu bộ bài, chọn lá nào đặt xuống đáy bộ bài (còn lại giữ nguyên thứ tự trên đỉnh).",
     otherPhaseAction: guanxingAction,
   },
+  xunxun: {
+    name: "xunxun",
+    displayName: "Tuần Tuần",
+    description: "Đầu giai đoạn rút bài, có thể xem 4 lá đầu bộ bài, giữ đúng 2 lá vào tay, 2 lá còn lại đặt xuống đáy bộ bài.",
+    otherPhaseAction: xunxunAction,
+  },
   tieqi: {
     name: "tieqi",
     displayName: "Thiết Kỵ",
@@ -1585,6 +2200,82 @@ export const SKILLS: Record<string, Skill> = {
     displayName: "Đột Tập",
     description: "Giai đoạn rút bài, có thể chọn tối đa 2 người khác có bài, lấy ngẫu nhiên 1 lá từ mỗi người.",
     otherPhaseAction: tuxiAction,
+  },
+  hengjiang: {
+    name: "hengjiang",
+    displayName: "Hoành Giang",
+    description:
+      "Khi bạn nhận sát thương, có thể khiến người đang trong lượt giảm 1 giới hạn bài đến hết lượt đó (dồn được); nếu giới hạn giảm không khiến họ phải bỏ bài ở giai đoạn Bỏ bài, bạn rút 1 lá.",
+    onDamaged: hengjiangOnDamaged,
+  },
+  wangxi: {
+    name: "wangxi",
+    displayName: "Vong Khích",
+    description: "Sau khi bạn gây hoặc nhận sát thương, có thể khiến bạn và đối phương mỗi người rút 1 lá.",
+    onDamaged: wangxiOnDamaged,
+    onDamageDealt: wangxiOnDamageDealt,
+  },
+  duanxie: {
+    name: "duanxie",
+    displayName: "Đoạn Tiết",
+    description: "Giai đoạn ra bài, có thể chọn 1 người khác chưa liên hoàn để vào liên hoàn -- bạn cũng vào liên hoàn nếu chưa.",
+    activeAction: duanxieAction,
+  },
+  fenming: {
+    name: "fenming",
+    displayName: "Phấn Mệnh",
+    description: "Nếu đang liên hoàn, giai đoạn kết thúc có thể khiến mọi người đang liên hoàn (kể cả bạn) mỗi người bỏ 1 lá do bạn chọn.",
+    otherPhaseAction: fenmingAction,
+  },
+  shengxi: {
+    name: "shengxi",
+    displayName: "Sinh Tức",
+    description: "Nếu không gây sát thương trong giai đoạn ra bài, đầu giai đoạn bỏ bài có thể rút 2 lá.",
+    onDamageDealt: shengxiOnDamageDealt,
+    otherPhaseAction: shengxiAction,
+  },
+  shoucheng: {
+    name: "shoucheng",
+    displayName: "Thủ Thành",
+    description: "Khi bài trên tay của 1 đồng minh hết sạch ngoài lượt của họ, có thể khiến họ rút 1 lá.",
+    onAllyHandEmptied: shouchengOnAllyHandEmptied,
+  },
+  yicheng: {
+    name: "yicheng",
+    displayName: "Nghĩa Thành",
+    description: "Khi 1 đồng minh (hoặc bạn) bị Sát nhắm tới, có thể khiến họ rút 1 lá rồi tùy ý bỏ 1 lá.",
+    onAllySlashTargeted: yichengOnAllySlashTargeted,
+  },
+  qiluan: {
+    name: "qiluan",
+    displayName: "Khởi Loạn",
+    description: "Khi bạn giết 1 người, có thể rút 3 lá.",
+    onKill: qiluanOnKill,
+  },
+  guixiu: {
+    name: "guixiu",
+    displayName: "Quy Tú",
+    description: "Khi 1 trong 2 tướng của bạn lộ diện, có thể rút 2 lá.",
+    onGeneralRevealed: guixiuOnGeneralRevealed,
+  },
+  jiang: {
+    name: "jiang",
+    displayName: "Cương",
+    description: "Khi bạn dùng hoặc bị nhắm bởi [Quyết Đấu] hoặc [Sát] chất Đỏ, có thể rút 1 lá.",
+    onAllySlashTargeted: jiangOnAllySlashTargeted,
+    onAllyDuelTargeted: jiangOnAllyDuelTargeted,
+  },
+  yingyang: {
+    name: "yingyang",
+    displayName: "Ưng Dương",
+    description: "Khi bạn tham gia đấu điểm (dù chủ động hay bị động), có thể khiến điểm phán của bạn +3 hoặc -3.",
+    onPindianVerifying: yingyangOnPindianVerifying,
+  },
+  zhendu: {
+    name: "zhendu",
+    displayName: "Chẩn Độc",
+    description: "Giai đoạn ra bài, có thể bỏ 1 lá, chọn 1 người khác -- họ chịu hiệu ứng [Tửu] (Sát tiếp theo của họ +1 sát thương) rồi nhận 1 sát thương từ bạn.",
+    activeAction: zhenduAction,
   },
   luoyi: {
     name: "luoyi",
@@ -1717,6 +2408,79 @@ export const SKILLS: Record<string, Skill> = {
     displayName: "Mã Thuật",
     description: "Khoảng cách từ bạn đến người khác -1.",
     attackDistanceDelta: () => 1,
+  },
+  qianxi: {
+    name: "qianxi",
+    displayName: "Tiềm Tập",
+    description:
+      "Giai đoạn chuẩn bị, có thể phán 1 lá -- chọn 1 người cách bạn đúng 1: họ không thể dùng/đáp trả bài trên tay cùng màu với lá phán đến hết lượt của bạn.",
+    otherPhaseAction: qianxiAction,
+  },
+  tiaoxin: {
+    name: "tiaoxin",
+    displayName: "Khiêu Hấn",
+    description: "Mỗi lượt 1 lần: chọn 1 người trong tầm đánh -- họ có thể dùng Sát nhắm vào bạn; nếu không, bạn bỏ 1 lá của họ.",
+    activeAction: tiaoxinAction,
+  },
+  huyuan: {
+    name: "huyuan",
+    displayName: "Hộ Viện",
+    description: "Giai đoạn kết thúc, có thể trang bị 1 lá trên tay cho người khác, rồi buộc 1 người cách người đó đúng 1 bỏ 1 lá do bạn chọn.",
+    otherPhaseAction: huyuanAction,
+  },
+  hengzheng: {
+    name: "hengzheng",
+    displayName: "Hoành Chinh",
+    description: "Đầu giai đoạn rút bài, nếu bạn không có bài trên tay hoặc chỉ còn 1 máu, có thể lấy 1 lá (tay/trang bị/khu phán) từ mỗi người chơi khác đang có bài.",
+    otherPhaseAction: hengzhengAction,
+  },
+  shangyi: {
+    name: "shangyi",
+    displayName: "Thương Nghị",
+    description: "Mỗi lượt 1 lần: chọn 1 người có bài hoặc còn tướng ẩn -- xem trộm bài của họ rồi bỏ 1 lá đen, hoặc xem trộm 1 tướng ẩn của họ.",
+    activeAction: shangyiAction,
+  },
+  zhiyu: {
+    name: "zhiyu",
+    displayName: "Chi Dụ",
+    description: "Sau khi bị thương, rút 1 lá -- nếu bài trên tay cùng màu, buộc nguồn sát thương bỏ 1 lá.",
+    onDamaged: zhiyuOnDamaged,
+  },
+  xichou: {
+    name: "xichou",
+    displayName: "Nghi Sầu",
+    description: "Khi lộ diện, +2 máu tối đa và hồi 2 máu.",
+    onGeneralRevealed: xichouOnRevealed,
+  },
+  sanyao: {
+    name: "sanyao",
+    displayName: "Tán Diêu",
+    description: "Cả ván chỉ 1 lần: bỏ 1 lá, gây 1 sát thương lên người có máu cao nhất trong phe bạn (kể cả bạn).",
+    activeAction: sanyaoAction,
+  },
+  zhiman: {
+    name: "zhiman",
+    displayName: "Chí Mạn",
+    description: "Khi bạn gây sát thương cho người khác, có thể đánh dấu họ; lần sau bạn gây sát thương cho người đã đánh dấu, tự động lấy 1 lá trang bị/phán của họ.",
+    onDamageDealt: zhimanOnDamageDealt,
+  },
+  liefeng: {
+    name: "liefeng",
+    displayName: "Liệt Phong",
+    description: "Khi trang bị của bạn rời khỏi vùng, có thể buộc 1 người khác bỏ 1 lá do bạn chọn.",
+    onEquipLost: liefengOnEquipLost,
+  },
+  wanwei: {
+    name: "wanwei",
+    displayName: "Uyển Vi",
+    description: "Khi bị Quá Hạ Sách Kiều/Thuận Thủ Khiên Dương nhắm tới, có thể bỏ/đưa 1 lá để hủy mục tiêu đó.",
+    onTrickTargetCancelling: wanweiOnTrickTargetCancelling,
+  },
+  jili: {
+    name: "jili",
+    displayName: "Kí Lệ",
+    description: "Khi cầm vũ khí, có thể dùng Sát nhắm tới tối đa (1 + tầm vũ khí) người cùng lúc.",
+    extraSlashTargets: jiliExtraSlashTargets,
   },
   mengjin: {
     name: "mengjin",
@@ -1858,6 +2622,12 @@ export const SKILLS: Record<string, Skill> = {
     description: "Hạn định kỹ: khi đang hấp hối, có thể bỏ hết bài trên tay/trang bị/phán quyết, hồi máu lên 3 (hoặc giới hạn máu nếu thấp hơn) rồi rút 3 lá.",
     cheatsDeath: niepanCheatsDeath,
   },
+  lianhuan: {
+    name: "lianhuan",
+    displayName: "Liên Hoàn",
+    description: "Có thể chuyển hóa sử dụng/đáp trả 1 lá Chuồn trên tay thành [Thiết Tác Liên Hoàn].",
+    canViewAsIronChain: (card) => card.kind !== CardKind.IronChain && card.suit === Suit.Club,
+  },
   zhiheng: {
     name: "zhiheng",
     displayName: "Chế Hành",
@@ -1983,6 +2753,11 @@ export interface GeneralDef {
    *  Omitted for the 36 male generals (defaults to male wherever consulted); only the 8
    *  historically female ones set this explicitly. */
   gender?: "female";
+  /** True for generals sourced from upstream's Hegemony-specific supplementary packages
+   *  (`momentum.cpp`/`formation.cpp`, Milestones 35-39), NOT the 60-general Standard set --
+   *  `Room.candidateGenerals` (room.ts) excludes these entirely from Identity mode's draft
+   *  pool, matching the real rule that those packages are Quốc Chiến-only content. */
+  hegemonyOnly?: boolean;
 }
 
 // 57 of the ~60 Standard generals in this repo's `dev`-branch source were ported before
@@ -2039,7 +2814,7 @@ export const GENERALS: GeneralDef[] = [
   // webport/README.md's Milestone 24 section for the full research + why these 5 (of the 16
   // real gaps found) were the tractable first batch.
   { name: "liubei", displayName: "Lưu Bị", kingdom: "shu", maxHp: 4, skillNames: ["rende"] },
-  { name: "pangtong", displayName: "Bàng Thống", kingdom: "shu", maxHp: 3, skillNames: ["niepan"] }, // Lianhuan still deferred, needs the Iron Chain trick card (not ported, see card.ts's header)
+  { name: "pangtong", displayName: "Bàng Thống", kingdom: "shu", maxHp: 3, skillNames: ["niepan", "lianhuan"] }, // full kit ported (Milestone 46 -- Lianhuan was previously deferred on a stale "Iron Chain trick card not ported" note; the card was actually already built back in Milestone 30, just never wired up for this skill's viewAs)
   { name: "sunquan", displayName: "Tôn Quyền", kingdom: "wu", maxHp: 4, skillNames: ["zhiheng"] },
   { name: "xiaoqiao", displayName: "Tiểu Kiều", kingdom: "wu", maxHp: 3, skillNames: ["hongyan"], gender: "female" }, // Tianxiang still deferred, needs a damage-transfer mechanic (redirect incoming damage to another player)
   { name: "yuanshao", displayName: "Viên Thiệu", kingdom: "qun", maxHp: 4, skillNames: ["luanji"] },
@@ -2064,4 +2839,62 @@ export const GENERALS: GeneralDef[] = [
   { name: "wolong", displayName: "Ngọa Long", kingdom: "shu", maxHp: 3, skillNames: ["huoji"] },
   { name: "zhoutai", displayName: "Chu Thái", kingdom: "wu", maxHp: 4, skillNames: ["buqu"] },
   { name: "zoushi", displayName: "Trâu Thị", kingdom: "qun", maxHp: 3, skillNames: ["qingcheng"], gender: "female" }, // Huoshui deferred, see qingchengSelfAction's doc comment for the exact architecture reason
+  // Milestone 32: Zang Ba (Tang Bá), the first general ported from OUTSIDE the 60-general
+  // Standard roster -- src/package/momentum.cpp, one of several Hegemony-specific supplementary
+  // general packs upstream (alongside formation.cpp/transformation.cpp/jiange-defense.cpp/
+  // strategic-advantage.cpp) that ship extra generals/equips for Quốc Chiến specifically, never
+  // part of "Standard". Companion with Zhang Liao (see gamerule.ts's COMPANION_PAIRS).
+  { name: "zangba", displayName: "Tang Bá", kingdom: "wei", maxHp: 4, skillNames: ["hengjiang"], hegemonyOnly: true },
+  // Milestone 36: 4 more Hegemony-specific supplementary generals, user asked to check for and
+  // port every remaining missing general plus re-check existing ones for extra momentum.cpp/
+  // formation.cpp skills. Investigated all 5 supplementary packages (momentum.cpp/formation.cpp/
+  // transformation.cpp/jiange-defense.cpp/strategic-advantage.cpp): these 4 are the ones whose
+  // FULL kit maps onto hooks this engine already has or can gain with a small, precedented
+  // addition -- everything else stays deferred, each with an inline reason at this array's own
+  // Milestone 36 README entry (see webport/README.md).
+  { name: "lidian", displayName: "Lý Điển", kingdom: "wei", maxHp: 3, skillNames: ["wangxi", "xunxun"], hegemonyOnly: true }, // full kit ported (Milestone 47 -- Xunxun was previously deferred as needing an ask Guanxing's own arrange-ask couldn't provide; built a small dedicated askXunxunKeep/resolveXunxunSplit pair instead of stretching Guanxing to fit). Companion yuejin (see COMPANION_PAIRS)
+  { name: "chenwudongxi", displayName: "Trần Vũ Đổng Tập", kingdom: "wu", maxHp: 4, skillNames: ["duanxie", "fenming"], hegemonyOnly: true },
+  { name: "jiangwanfeiyi", displayName: "Tưởng Uyển Phí Y", kingdom: "shu", maxHp: 3, skillNames: ["shengxi", "shoucheng"], hegemonyOnly: true },
+  { name: "xusheng", displayName: "Từ Thịnh", kingdom: "wu", maxHp: 4, skillNames: ["yicheng"], hegemonyOnly: true }, // companion dingfeng (see COMPANION_PAIRS)
+  // Milestone 37: 2 more Hegemony-specific generals, PARTIAL ports -- each keeps only the one
+  // skill of their real 2-skill kit that maps onto an engine hook (existing or newly added);
+  // the other skill stays deferred with an inline reason, same "faithful behavior, simplified
+  // interaction" precedent as Milestone 36's Lidian (Xunxun deferred there too).
+  { name: "madai", displayName: "Mã Đại", kingdom: "shu", maxHp: 4, skillNames: ["mashu", "qianxi"], hegemonyOnly: true }, // companion machao (see COMPANION_PAIRS). Full kit ported
+  { name: "hetaihou", displayName: "Hà Thái Hậu", kingdom: "qun", maxHp: 3, skillNames: ["qiluan", "zhendu"], gender: "female", hegemonyOnly: true }, // full kit ported
+  // Milestone 38: 2 more Hegemony-specific generals -- Mi Furen (partial port) and Sun Ce (full
+  // kit's 1-of-3 skills), unlocked by 2 new hooks (onGeneralRevealed, onAllyDuelTargeted) plus
+  // extending onAllySlashTargeted with the actual card.
+  { name: "mifuren", displayName: "Mi Phu Nhân", kingdom: "shu", maxHp: 3, skillNames: ["guixiu"], gender: "female", hegemonyOnly: true }, // Cunsi deferred -- needs skill-transfer + voluntary self-general-removal
+  { name: "sunce", displayName: "Tôn Sách", kingdom: "wu", maxHp: 4, skillNames: ["jiang", "yingyang"], hegemonyOnly: true }, // companions zhouyu, taishici, daqiao (see COMPANION_PAIRS). Hunshang still deferred -- needs dynamic runtime skill acquire/detach (temporarily granting/revoking a DIFFERENT skill class mid-game)
+  // Milestone 41: 2 more Hegemony-specific generals -- Jiang Wei and Cao Hong, each a 1-of-2/3
+  // real-skill partial port (same precedent as Milestone 36's Li Dian).
+  { name: "jiangwei", displayName: "Khương Duy", kingdom: "shu", maxHp: 4, skillNames: ["tiaoxin"], hegemonyOnly: true }, // Yizhi deferred -- grants Guanxing only while Jiang Wei occupies the DEPUTY slot specifically, no clean "which slot is this skill instance in" API exists yet; Tianfu deferred -- BattleArraySkill (formation, same excluded category as Zhang Ren/Cao Hong's Heyi below). Real upstream also applies -1 to the combined pair's maxHp whenever Jiang Wei is deputy (setDeputyMaxHpAdjustedValue) -- not modeled, a minor balance nuance rather than a blocking mechanic
+  { name: "caohong", displayName: "Tào Hồng", kingdom: "wei", maxHp: 4, skillNames: ["huyuan"], hegemonyOnly: true }, // companion caoren (see COMPANION_PAIRS). Heyi/Feiying deferred -- both BattleArraySkill (formation), same excluded category as Zhang Ren's Fengshi
+  // Milestone 42: 2 more Hegemony-specific generals -- Dong Zhuo and Jiang Qin, each a 1-of-2
+  // real-skill partial port (same precedent as Milestone 41's Jiang Wei/Cao Hong).
+  { name: "dongzhuo", displayName: "Đổng Trác", kingdom: "qun", maxHp: 4, skillNames: ["hengzheng"], hegemonyOnly: true }, // Baoling deferred -- functions only while Dong Zhuo occupies the MAIN(head) slot specifically (same position-dependent-skill blocker as Jiang Wei's Yizhi); its effect also dynamically grants Benghuai via a voluntary discard-his-own-deputy-general choice (same unbuilt "voluntary self-general-removal" subsystem Mi Furen's Cunsi/Sun Ce's Hunshang are deferred for), so Benghuai is moot without it
+  { name: "jiangqin", displayName: "Tưởng Khâm", kingdom: "wu", maxHp: 4, skillNames: ["shangyi"], hegemonyOnly: true }, // companion zhoutai (see COMPANION_PAIRS). Niaoxiang deferred -- BattleArraySkill (formation), same excluded category as Zhang Ren's Fengshi/Cao Hong's Heyi
+  // Milestone 43: first 4 generals ported from `transformation.cpp` -- the package headlined by
+  // Zuo Ci's Huashen (a whole-general skill-acquisition mechanic, still fully deferred, see the
+  // 2 generals skipped below), but these 4 each have at least 1 skill that doesn't touch that
+  // subsystem at all.
+  { name: "xunyou", displayName: "Tuân Du", kingdom: "wei", maxHp: 3, skillNames: ["zhiyu"], hegemonyOnly: true }, // companion xunyu (see COMPANION_PAIRS). Qice deferred -- a guhuo-style "recast as any of several trick card types" mechanic PLUS transformDeputyGeneral, both unbuilt subsystems
+  { name: "liguo", displayName: "Lý Quả", kingdom: "qun", maxHp: 4, skillNames: ["xichou"], hegemonyOnly: true }, // companion jiaxu (see COMPANION_PAIRS). The rest of Xichou (a per-Play-phase off-color-card HP tax) deferred -- needs a broad per-turn card-color interception across every use/response call site, see xichouOnRevealed's doc comment
+  { name: "masu", displayName: "Mã Tốc", kingdom: "shu", maxHp: 3, skillNames: ["sanyao", "zhiman"] , hegemonyOnly: true }, // full kit ported (no companion in upstream)
+  { name: "lingtong", displayName: "Lăng Thống", kingdom: "wu", maxHp: 4, skillNames: ["liefeng"], hegemonyOnly: true }, // companion ganning (see COMPANION_PAIRS). Xuanlue deferred -- a complex multi-step once-per-game equip-steal-and-redistribute flow, see liefengOnEquipLost's doc comment
+  // Milestone 44: built a small new "cancel myself as a trick card's target" hook
+  // (onTrickTargetCancelling) to unlock Bian Huanghou's Wanwei.
+  { name: "bianhuanghou", displayName: "Biện Hoàng Hậu", kingdom: "wei", maxHp: 3, skillNames: ["wanwei"], gender: "female", hegemonyOnly: true }, // companion caocao (see COMPANION_PAIRS). Yuejian deferred -- needs a broad "did I use a card targeting someone else this turn" interception across every card-use call site
+  // Milestone 45: built a new extra-Slash-target subsystem (Skill.extraSlashTargets, combat.ts's
+  // maxSlashTargets, room.ts's maybeResolveExtraSlashTargets, Controller.chooseExtraSlashTargets)
+  // to unlock the target-count half of Sha Moke's compound "jili" skill.
+  { name: "shamoke", displayName: "Sa Ma Kha", kingdom: "shu", maxHp: 4, skillNames: ["jili"], hegemonyOnly: true }, // no companion in upstream. The OTHER half of Jili (mark cards played/responded this Play phase; draw that many when the count hits the weapon's range exactly) stays deferred -- needs a broad "every card played or responded with" interception, same blocker as Xichou's color tax/Yuejian/Diancai
+  // Zuo Ci and Lu Fan (also from transformation.cpp), and lord_sunquan stay fully deferred:
+  // Zuo Ci's Huashen/Xinsheng ARE the package's namesake deputy-general-transform subsystem
+  // (and would ALSO need the still-unbuilt position-dependent-skill-grant API, since acquired
+  // skills attach to whichever slot Zuo Ci himself occupies -- same blocker as Jiang Wei's
+  // Yizhi); Lu Fan's Diaodu is a complex chained multi-player equip-give flow and Diancai needs
+  // broad off-turn card-loss tracking (same interception category as Jili's other half above).
+  // lord_sunquan is lord-only (Hegemony mode has no monarch role, doesn't apply at all).
 ];
